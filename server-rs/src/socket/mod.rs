@@ -10,10 +10,72 @@ use crate::db::DbPools;
 use state::{ServerState, Room, Player};
 use chrono::Utc;
 
-pub fn register_handlers(io: SocketIo) {
-    // Create global room state
-    let server_state = Arc::new(ServerState::default());
+fn emit_error(socket: &SocketRef, event: &str, message: &str) {
+    let _ = socket.emit(
+        "error",
+        &json!({
+            "message": format!("{}: {}", event, message)
+        }),
+    );
+}
 
+fn broadcast_players(io: &SocketIo, room_id: &str, room: &Room, extra: Option<Value>) {
+    let mut payload = serde_json::Map::new();
+    payload.insert("players".to_string(), json!(room.players));
+    payload.insert("isPublic".to_string(), json!(room.is_public));
+    payload.insert(
+        "answerSetterId".to_string(),
+        room.answer_setter_id
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
+    );
+
+    if let Some(Value::Object(extra_obj)) = extra {
+        for (k, v) in extra_obj {
+            payload.insert(k, v);
+        }
+    }
+
+    let _ = io.to(room_id.to_string()).emit("updatePlayers", &Value::Object(payload));
+}
+
+fn emit_guess_history_update_to_allowed(io: &SocketIo, _room_id: &str, room: &Room, actor_id: &str) {
+    let Some(game) = room.current_game.as_ref() else {
+        return;
+    };
+
+    let actor = match room.players.iter().find(|p| p.id == actor_id) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let payload = json!({
+        "guesses": game.guesses,
+        "teamGuesses": game.team_guesses,
+    });
+
+    for target in &room.players {
+        let allowed = target.id == actor.id
+            || target.is_answer_setter
+            || target.team.as_deref() == Some("0")
+            || target.temp_observer
+            || (target.team.is_some() && actor.team.is_some() && target.team == actor.team);
+        if allowed {
+            let _ = io.to(target.id.clone()).emit("guessHistoryUpdate", &payload);
+        }
+    }
+}
+
+fn broadcast_guess_history_update(io: &SocketIo, room_id: &str, room: &Room) {
+    let Some(game) = room.current_game.as_ref() else {
+        return;
+    };
+    let payload = gameplay::build_guess_history_payload(game);
+    let _ = io.to(room_id.to_string()).emit("guessHistoryUpdate", &payload);
+}
+
+pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
     // We attach the DB pools as state for the socket layer
     io.clone().ns("/", move |socket: SocketRef, State(_pools): State<Arc<DbPools>>| async move {
         let state = Arc::clone(&server_state);
@@ -414,18 +476,8 @@ pub fn register_handlers(io: SocketIo) {
             }
         });
 
-        // Register room configuration and player state events
+        // Register room configuration and gameplay events
         register_room_handlers(socket.clone(), Arc::clone(&state), io_clone.clone());
-
-        socket.on("submit_guess", |socket: SocketRef, Data::<Value>(data), State(_pools): State<Arc<DbPools>>| async move {
-            info!("User {} submitted guess {:?}", socket.id, data);
-            // Handle guess logic...
-        });
-
-        socket.on("chat", |socket: SocketRef, Data::<Value>(data), State(_pools): State<Arc<DbPools>>| async move {
-            info!("User {} chat {:?}", socket.id, data);
-            // Handle chat logic...
-        });
 
         let state_disconnect = Arc::clone(&state);
         let io_disconnect = io_clone.clone();
@@ -761,15 +813,17 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
                 None => { let _ = socket.emit("error", &json!({ "message": "找不到选中的玩家" })); return; }
             };
 
+            gameplay::revert_setter_observers(&mut room, &room_id, &io_clone);
             room.answer_setter_id = Some(setter_id.clone());
             room.waiting_for_answer = true;
+
+            gameplay::apply_setter_observers(&mut room, &room_id, &setter_id, &io_clone);
 
             let _ = io_clone.to(room_id.clone()).emit("waitForAnswer", &json!({
                 "answerSetterId": setter_id,
                 "setterUsername": setter_name
             }));
-            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
-            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+            broadcast_players(&io_clone, &room_id, &room, None);
         }
     });
 
@@ -800,58 +854,15 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             // Remove disconnected players with 0 score
             room.players.retain(|p| !p.disconnected || p.score > 0);
 
+            // gameStart is the non-manual start path: clear any pending setter state
+            gameplay::revert_setter_observers(&mut room, &room_id, &io_clone);
+            room.answer_setter_id = None;
+            room.waiting_for_answer = false;
+
             let character = data.get("character").cloned().unwrap_or(Value::Null);
             let settings = data.get("settings").cloned();
-            
-            // Init Game State
-            room.current_game = Some(state::CurrentGame {
-                character: character.clone(),
-                settings: settings.clone(),
-                guesses: vec![],
-                team_guesses: std::collections::HashMap::new(),
-                hints: None,
-                sync_round: 1,
-                sync_players_completed: std::collections::HashSet::new(),
-                sync_winner_found: false,
-                sync_winner: None,
-                sync_ready_to_end: false,
-                sync_round_start_rank: 1,
-                nonstop_winners: vec![],
-                nonstop_total_players: 0,
-                first_winner: None,
-                tag_ban_state: vec![],
-                tag_ban_state_pending: vec![],
-                _last_sync_waiting_key: None,
-                _last_sync_waiting_at: 0,
-            });
 
-            let mut nonstop_total = 0;
-            let mut teams_seen = std::collections::HashSet::new();
-            let answer_setter_id = room.answer_setter_id.clone();
-
-            for p in &mut room.players {
-                p.guesses = String::new();
-                p.message = String::new();
-                p.ready = false;
-                p.is_answer_setter = answer_setter_id.as_deref() == Some(&p.id);
-                p.temp_observer = false;
-                p.sync_completed_round = None;
-                p.joined_during_game = None;
-                
-                if !p.disconnected && !p.is_answer_setter && p.team.as_deref() != Some("0") {
-                    if let Some(ref t) = p.team {
-                        if teams_seen.insert(t.clone()) { nonstop_total += 1; }
-                    } else {
-                        nonstop_total += 1;
-                    }
-                }
-            }
-
-            if let Some(ref mut game) = room.current_game {
-                game.nonstop_total_players = std::cmp::max(1, nonstop_total);
-            }
-
-            room.last_active = Utc::now().timestamp_millis();
+            gameplay::init_game_state(&mut room, character.clone(), settings.clone(), None, None);
 
             let _ = io_clone.to(room_id.clone()).emit("gameStart", &json!({
                 "character": character,
@@ -861,6 +872,9 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
                 "isGameStarted": true,
             }));
             let _ = io_clone.to(room_id.clone()).emit("tagBanStateUpdate", &json!({ "tagBanState": [] }));
+
+            // Initial sync/nonstop progress (syncWaiting / nonstopProgress / syncGameEnding)
+            gameplay::emit_sync_and_nonstop_state(&mut room, &room_id, &io_clone, true);
             
             info!("game started in {}", room_id);
         }
@@ -877,15 +891,18 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             
             let is_setter = room.answer_setter_id.as_deref() == Some(socket.id.to_string().as_str());
             if !is_setter {
-                let _ = socket.emit("error", &json!({ "message": "只有被指定的出题人可以出题" })); return;
+                emit_error(&socket, "setAnswer", "只有被指定的出题人可以出题");
+                return;
             }
             if room.current_game.is_some() {
-                let _ = socket.emit("error", &json!({ "message": "游戏已经在进行中" })); return;
+                emit_error(&socket, "setAnswer", "游戏已经在进行中");
+                return;
             }
             
             let all_ready = room.players.iter().all(|p| p.is_host || p.ready || p.disconnected);
             if !all_ready {
-                let _ = socket.emit("error", &json!({ "message": "所有玩家必须准备好才能开始游戏" })); return;
+                emit_error(&socket, "setAnswer", "所有玩家必须准备好才能开始游戏");
+                return;
             }
 
             room.players.retain(|p| !p.disconnected || p.score > 0);
@@ -894,67 +911,878 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             let hints = data.get("hints").cloned();
             let settings = room.settings.clone();
 
-            room.current_game = Some(state::CurrentGame {
-                character: character.clone(),
-                settings: settings.clone(),
-                guesses: vec![],
-                team_guesses: std::collections::HashMap::new(),
-                hints: hints.clone(),
-                sync_round: 1,
-                sync_players_completed: std::collections::HashSet::new(),
-                sync_winner_found: false,
-                sync_winner: None,
-                sync_ready_to_end: false,
-                sync_round_start_rank: 1,
-                nonstop_winners: vec![],
-                nonstop_total_players: 0,
-                first_winner: None,
-                tag_ban_state: vec![],
-                tag_ban_state_pending: vec![],
-                _last_sync_waiting_key: None,
-                _last_sync_waiting_at: 0,
-            });
+            gameplay::apply_setter_observers(&mut room, &room_id, socket.id.to_string().as_str(), &io_clone);
+            gameplay::init_game_state(
+                &mut room,
+                character.clone(),
+                settings.clone(),
+                hints.clone(),
+                Some(socket.id.to_string().as_str()),
+            );
 
-            let mut nonstop_total = 0;
-            let mut teams_seen = std::collections::HashSet::new();
-            let answer_setter_id = room.answer_setter_id.clone();
+            room.waiting_for_answer = false;
+            room.answer_setter_id = None;
 
-            for p in &mut room.players {
-                p.guesses = String::new();
-                p.message = String::new();
-                p.ready = false;
-                p.is_answer_setter = answer_setter_id.as_deref() == Some(&p.id);
-                p.temp_observer = false;
-                p.sync_completed_round = None;
-                p.joined_during_game = None;
-                
-                if !p.disconnected && !p.is_answer_setter && p.team.as_deref() != Some("0") {
-                    if let Some(ref t) = p.team {
-                        if teams_seen.insert(t.clone()) { nonstop_total += 1; }
-                    } else {
-                        nonstop_total += 1;
+            if let Some(ref game) = room.current_game {
+                let _ = socket.emit("guessHistoryUpdate", &gameplay::build_guess_history_payload(game));
+            }
+
+            gameplay::emit_sync_and_nonstop_state(&mut room, &room_id, &io_clone, true);
+            broadcast_players(&io_clone, &room_id, &room, None);
+
+            let _ = io_clone.to(room_id.clone()).emit(
+                "gameStart",
+                &json!({
+                    "character": character,
+                    "settings": settings,
+                    "players": room.players,
+                    "isPublic": room.is_public,
+                    "isGameStarted": true,
+                    "hints": hints,
+                    "isAnswerSetter": false,
+                }),
+            );
+            let _ = io_clone
+                .to(room_id.clone())
+                .emit("tagBanStateUpdate", &json!({ "tagBanState": [] }));
+
+            let _ = socket.emit(
+                "gameStart",
+                &json!({
+                    "character": room.current_game.as_ref().map(|g| g.character.clone()).unwrap_or(Value::Null),
+                    "settings": room.current_game.as_ref().and_then(|g| g.settings.clone()),
+                    "players": room.players,
+                    "isPublic": room.is_public,
+                    "isGameStarted": true,
+                    "hints": room.current_game.as_ref().and_then(|g| g.hints.clone()),
+                    "isAnswerSetter": true,
+                }),
+            );
+
+            if room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("syncMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                gameplay::update_sync_progress(&mut room, &room_id, &io_clone);
+            }
+
+            info!("manual game started in {} by setter", room_id);
+        }
+    });
+
+    // Gameplay events (Phase3): keep aligned with Node server/utils/socket.js + gameplay.js
+    let state_guess = Arc::clone(&state);
+    let io_guess = io.clone();
+    socket.on("playerGuess", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_guess);
+        let io_clone = io_guess.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let guess_result = data.get("guessResult").cloned().unwrap_or(Value::Null);
+            let mut room = match state.rooms.get_mut(&room_id) {
+                Some(r) => r,
+                None => return,
+            };
+            room.last_active = Utc::now().timestamp_millis();
+
+            let actor_id = socket.id.to_string();
+            let Some(player_idx) = room.players.iter().position(|p| p.id == actor_id) else {
+                emit_error(&socket, "playerGuess", "连接中断了");
+                return;
+            };
+            if room.current_game.is_none() {
+                emit_error(&socket, "playerGuess", "游戏未开始或已结束");
+                return;
+            }
+
+            let player = room.players[player_idx].clone();
+            if player.team.as_deref() == Some("0") || player.temp_observer {
+                emit_error(&socket, "playerGuess", "观战中不能猜测");
+                return;
+            }
+            if gameplay::has_end_mark(&player.guesses) {
+                return;
+            }
+
+            let guess_data = guess_result.get("guessData").cloned().unwrap_or(Value::Null);
+            let guess_id_ok = guess_data
+                .get("id")
+                .and_then(|v| if v.is_null() { None } else { Some(v) })
+                .is_some();
+            if !guess_id_ok {
+                emit_error(&socket, "playerGuess", "猜测数据无效");
+                return;
+            }
+
+            let is_correct = guess_result
+                .get("isCorrect")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_partial_correct = !is_correct
+                && guess_result
+                    .get("isPartialCorrect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+            // Pre-check attempt limit before writing this guess
+            let pre_limit = gameplay::enforce_attempt_limit(&mut room, &actor_id, false);
+            if pre_limit.exhausted {
+                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_guess_history_update(&io_clone, &room_id, &room);
+                let _ = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
+                emit_error(&socket, "playerGuess", "已用尽可用次数");
+                return;
+            }
+
+            // Global BP
+            let global_pick = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("globalPick"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let sync_mode = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("syncMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let nonstop_mode = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("nonstopMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if global_pick && !sync_mode {
+                let character_id = guess_data.get("id").cloned().unwrap_or(Value::Null);
+                let already = room
+                    .current_game
+                    .as_ref()
+                    .and_then(|g| Some(&g.guesses))
+                    .map(|guesses| {
+                        guesses.iter().any(|pg| {
+                            let other = pg.get("username").and_then(|v| v.as_str()).unwrap_or("")
+                                != player.username;
+                            if !other {
+                                return false;
+                            }
+                            let list = pg.get("guesses").and_then(|v| v.as_array());
+                            list.is_some_and(|arr| {
+                                arr.iter().any(|g| {
+                                    g.get("guessData").and_then(|gd| gd.get("id")) == Some(&character_id)
+                                })
+                            })
+                        })
+                    })
+                    .unwrap_or(false);
+                if already && (!nonstop_mode || !is_correct) {
+                    emit_error(&socket, "playerGuess", "【全局BP】该角色已经被其他玩家猜过了");
+                    return;
+                }
+            }
+
+            // Write guess history
+            if let Some(ref mut game) = room.current_game {
+                let entry = json!({
+                    "playerId": actor_id,
+                    "playerName": player.username,
+                    "isCorrect": is_correct,
+                    "isPartialCorrect": is_partial_correct,
+                    "guessData": guess_data,
+                });
+
+                let mut found = false;
+                for pg in game.guesses.iter_mut() {
+                    if pg.get("username").and_then(|v| v.as_str()) == Some(player.username.as_str()) {
+                        if let Some(list) = pg.get_mut("guesses").and_then(|v| v.as_array_mut()) {
+                            list.push(entry.clone());
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    game.guesses.push(json!({
+                        "username": player.username,
+                        "guesses": [entry],
+                    }));
+                }
+            }
+
+            emit_guess_history_update_to_allowed(&io_clone, &room_id, &room, &actor_id);
+
+            // boardcastTeamGuess
+            let mut serialized = guess_result.get("guessData").cloned().unwrap_or(Value::Null);
+            if let Some(obj) = serialized.as_object_mut() {
+                obj.insert(
+                    "guessrName".to_string(),
+                    Value::String(player.username.clone()),
+                );
+            }
+            for recipient in room.players.iter() {
+                if recipient.id == actor_id {
+                    continue;
+                }
+                let same_team_non_setter = recipient.team.is_some()
+                    && player.team.is_some()
+                    && recipient.team == player.team
+                    && !recipient.is_answer_setter;
+                let allowed = same_team_non_setter
+                    || recipient.team.as_deref() == Some("0")
+                    || recipient.is_answer_setter;
+                if allowed {
+                    let _ = io_clone.to(recipient.id.clone()).emit(
+                        "boardcastTeamGuess",
+                        &json!({
+                            "guessData": serialized,
+                            "playerId": actor_id,
+                            "playerName": player.username,
+                        }),
+                    );
+                }
+            }
+
+            // Apply mark to guesses (player/team)
+            let mark = if !is_correct && is_partial_correct {
+                "💡"
+            } else if is_correct {
+                "✔"
+            } else {
+                "❌"
+            };
+
+            let is_team_mode = player.team.is_some() && player.team.as_deref() != Some("0");
+            if is_team_mode {
+                let team_id = player.team.clone().unwrap();
+                let updated = {
+                    let game = room.current_game.as_mut().unwrap();
+                    let current = game.team_guesses.get(&team_id).cloned().unwrap_or_default();
+                    let updated = format!("{}{}", current, mark);
+                    game.team_guesses.insert(team_id.clone(), updated.clone());
+                    updated
+                };
+
+                for p in &mut room.players {
+                    if p.team.as_deref() == Some(&team_id) && !p.is_answer_setter && !p.disconnected {
+                        p.guesses = updated.clone();
+                    }
+                }
+            } else {
+                if let Some(p) = room.players.iter_mut().find(|p| p.id == actor_id) {
+                    p.guesses.push_str(mark);
+                }
+            }
+
+            // Sync mode progress
+            if sync_mode {
+                if !is_correct {
+                    // Pre-collect teammate IDs before mutable game borrow
+                    let teammate_ids_to_complete: Vec<String> = if is_team_mode {
+                        let team_id = player.team.clone().unwrap_or_default();
+                        room.players.iter()
+                            .filter(|p| p.team.as_deref() == Some(team_id.as_str())
+                                && p.id != actor_id
+                                && !p.is_answer_setter
+                                && !p.disconnected)
+                            .map(|p| p.id.clone())
+                            .collect()
+                    } else { vec![] };
+
+                    if let Some(ref mut game) = room.current_game {
+                        game.sync_players_completed.insert(actor_id.clone());
+                        for id in teammate_ids_to_complete {
+                            game.sync_players_completed.insert(id);
+                        }
+                    }
+                }
+                gameplay::update_sync_progress(&mut room, &room_id, &io_clone);
+            }
+
+            // Post-check attempt limit (non-nonstop)
+            if !nonstop_mode {
+                let _ = gameplay::enforce_attempt_limit(&mut room, &actor_id, is_correct);
+            }
+
+            let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
+            if !finalized {
+                broadcast_players(&io_clone, &room_id, &room, None);
+            }
+        }
+    });
+
+    let state_tag = Arc::clone(&state);
+    let io_tag = io.clone();
+    socket.on("tagBanSharedMetaTags", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_tag);
+        let io_clone = io_tag.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tags = data.get("tags").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let mut room = match state.rooms.get_mut(&room_id) {
+                Some(r) => r,
+                None => return,
+            };
+            let actor_id = socket.id.to_string();
+            let Some(player) = room.players.iter().find(|p| p.id == actor_id).cloned() else {
+                return;
+            };
+            let Some(ref mut game) = room.current_game else {
+                return;
+            };
+            let tag_ban = game
+                .settings
+                .as_ref()
+                .and_then(|s| s.get("tagBan"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !tag_ban {
+                return;
+            }
+            if tags.is_empty() {
+                return;
+            }
+
+            let sync_mode = game
+                .settings
+                .as_ref()
+                .and_then(|s| s.get("syncMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let existing_state_tags: std::collections::HashSet<String> = game
+                .tag_ban_state
+                .iter()
+                .filter_map(|e| e.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect();
+
+            let target_list = if sync_mode {
+                &mut game.tag_ban_state_pending
+            } else {
+                &mut game.tag_ban_state
+            };
+
+            let mut changed = false;
+            for tag in tags {
+                let Some(tag_name) = tag.as_str() else {
+                    continue;
+                };
+                if existing_state_tags.contains(tag_name) {
+                    continue;
+                }
+                let mut idx = target_list
+                    .iter()
+                    .position(|e| e.get("tag").and_then(|v| v.as_str()) == Some(tag_name));
+                if idx.is_none() {
+                    target_list.push(json!({"tag": tag_name, "revealer": []}));
+                    idx = Some(target_list.len() - 1);
+                    changed = true;
+                }
+                let i = idx.unwrap();
+                let existing = target_list[i]
+                    .get("revealer")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if existing.is_empty() {
+                    if let Some(obj) = target_list[i].as_object_mut() {
+                        obj.insert("revealer".to_string(), Value::Array(vec![Value::String(player.id.clone())]));
+                    }
+                    changed = true;
+                } else if sync_mode {
+                    let has = existing.iter().any(|v| v.as_str() == Some(player.id.as_str()));
+                    if !has {
+                        let mut new_list = existing;
+                        new_list.push(Value::String(player.id.clone()));
+                        if let Some(obj) = target_list[i].as_object_mut() {
+                            obj.insert("revealer".to_string(), Value::Array(new_list));
+                        }
                     }
                 }
             }
 
-            if let Some(ref mut game) = room.current_game {
-                game.nonstop_total_players = std::cmp::max(1, nonstop_total);
+            if !changed || sync_mode {
+                return;
+            }
+            let _ = io_clone.to(room_id).emit(
+                "tagBanStateUpdate",
+                &json!({
+                    "tagBanState": game.tag_ban_state,
+                }),
+            );
+        }
+    });
+
+    let state_nonstop = Arc::clone(&state);
+    let io_nonstop = io.clone();
+    socket.on("nonstopWin", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_nonstop);
+        let io_clone = io_nonstop.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut is_big_win = data.get("isBigWin").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut room = match state.rooms.get_mut(&room_id) {
+                Some(r) => r,
+                None => return,
+            };
+            room.last_active = Utc::now().timestamp_millis();
+            let actor_id = socket.id.to_string();
+            if room.current_game.is_none() {
+                emit_error(&socket, "nonstopWin", "房间不存在或游戏未开始");
+                return;
+            }
+            let Some(player_idx) = room.players.iter().position(|p| p.id == actor_id) else {
+                emit_error(&socket, "nonstopWin", "连接中断了");
+                return;
+            };
+            if room.players[player_idx].temp_observer {
+                emit_error(&socket, "nonstopWin", "旁观者无法猜测");
+                return;
             }
 
-            room.waiting_for_answer = false;
+            let team = room.players[player_idx].team.clone();
+            if let Some(ref t) = team {
+                if t != "0" {
+                    let teammate_won = room
+                        .current_game
+                        .as_ref()
+                        .map(|g| {
+                            g.nonstop_winners.iter().any(|w| {
+                                let Some(wid) = w.get("id").and_then(|v| v.as_str()) else {
+                                    return false;
+                                };
+                                room.players
+                                    .iter()
+                                    .find(|p| p.id == wid)
+                                    .and_then(|p| p.team.clone())
+                                    .as_deref()
+                                    == Some(t.as_str())
+                            })
+                        })
+                        .unwrap_or(false);
+                    if teammate_won {
+                        emit_error(&socket, "nonstopWin", "你的队友已经猜对了，你无法继续猜测");
+                        return;
+                    }
+                }
+            }
+
+            let already_won = room
+                .current_game
+                .as_ref()
+                .map(|g| g.nonstop_winners.iter().any(|w| w.get("id").and_then(|v| v.as_str()) == Some(actor_id.as_str())))
+                .unwrap_or(false);
+            if already_won {
+                return;
+            }
+
+            let raw_guess_count = gameplay::count_attempt_marks(&room.players[player_idx].guesses);
+            if !is_big_win && raw_guess_count == 1 {
+                is_big_win = true;
+            }
+
+            {
+                let p = &mut room.players[player_idx];
+                p.guesses.push_str(if is_big_win { "👑" } else { "✌" });
+            }
+
+            if let Some(ref mut game) = room.current_game {
+                game.sync_players_completed.remove(&actor_id);
+            }
+
+            let is_team_mode = team.is_some() && team.as_deref() != Some("0");
+            if is_team_mode {
+                gameplay::mark_team_victory(&mut room, &room_id, &actor_id, &io_clone);
+            }
+
+            let sync_mode = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("syncMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if sync_mode {
+                // Pre-collect teammate IDs before mutable game borrow
+                let nonstop_teammate_ids: Vec<String> = if is_team_mode {
+                    let team_id = team.clone().unwrap_or_default();
+                    room.players.iter()
+                        .filter(|p| p.team.as_deref() == Some(team_id.as_str())
+                            && p.id != actor_id
+                            && !p.is_answer_setter
+                            && !p.disconnected)
+                        .map(|p| p.id.clone())
+                        .collect()
+                } else { vec![] };
+
+                if let Some(ref mut game) = room.current_game {
+                    game.sync_players_completed.insert(actor_id.clone());
+                    for id in nonstop_teammate_ids {
+                        game.sync_players_completed.insert(id);
+                    }
+                }
+                gameplay::update_sync_progress(&mut room, &room_id, &io_clone);
+            }
+
+            let initial_total_players = room
+                .current_game
+                .as_ref()
+                .map(|g| g.nonstop_total_players)
+                .unwrap_or(1);
+            let winners_count = room
+                .current_game
+                .as_ref()
+                .map(|g| g.nonstop_winners.len() as i32)
+                .unwrap_or(0);
+            let rank_score = std::cmp::max(1, initial_total_players - winners_count);
+            let total_rounds = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("maxAttempts"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10) as i32;
+
+            let score_result = gameplay::calculate_winner_score(&room.players[player_idx].guesses, rank_score, total_rounds);
+            let score = score_result.total_score;
+            room.players[player_idx].score += score;
+
+            // Pre-clone player data before mutable game borrow
+            let winner_username = room.players[player_idx].username.clone();
+            let winner_team = room.players[player_idx].team.clone();
+            if let Some(ref mut game) = room.current_game {
+                game.nonstop_winners.push(json!({
+                    "id": actor_id,
+                    "username": winner_username,
+                    "isBigWin": is_big_win,
+                    "team": winner_team,
+                    "score": score,
+                    "bonuses": score_result.bonuses,
+                }));
+            }
+
+            let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
+            if !finalized {
+                broadcast_players(&io_clone, &room_id, &room, None);
+            }
+        }
+    });
+
+    let state_end = Arc::clone(&state);
+    let io_end = io.clone();
+    socket.on("gameEnd", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_end);
+        let io_clone = io_end.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let result = data.get("result").and_then(|v| v.as_str()).unwrap_or("");
+            let mut room = match state.rooms.get_mut(&room_id) {
+                Some(r) => r,
+                None => return,
+            };
+            room.last_active = Utc::now().timestamp_millis();
+            let actor_id = socket.id.to_string();
+            let Some(player_idx) = room.players.iter().position(|p| p.id == actor_id) else {
+                emit_error(&socket, "gameEnd", "连接中断了");
+                return;
+            };
+            if room.current_game.is_none() {
+                emit_error(&socket, "gameEnd", "游戏未开始或已结束");
+                return;
+            }
+
+            let raw_guess_count = gameplay::count_attempt_marks(&room.players[player_idx].guesses);
+            let mut final_result = result.to_string();
+            if result == "win" && raw_guess_count == 1 && !room.players[player_idx].guesses.contains('👑') {
+                final_result = "bigwin".to_string();
+            }
+
+            // strip conflicting end marks first
+            room.players[player_idx].guesses = gameplay::strip_end_marks(&room.players[player_idx].guesses);
+            let team = room.players[player_idx].team.clone();
+            if let Some(ref t) = team {
+                if t != "0" {
+                    if let Some(ref mut game) = room.current_game {
+                        let current = game.team_guesses.get(t).cloned().unwrap_or_default();
+                        game.team_guesses.insert(t.clone(), gameplay::strip_end_marks(&current));
+                    }
+                }
+            }
+
+            let nonstop_mode = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("nonstopMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let sync_mode = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("syncMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            match final_result.as_str() {
+                "surrender" => {
+                    room.players[player_idx].guesses.push_str("🏳️");
+                    if let Some(ref t) = team {
+                        if t != "0" {
+                            if let Some(ref mut game) = room.current_game {
+                                let cur = game.team_guesses.get(t).cloned().unwrap_or_default();
+                                let updated = format!("{}🏳️", cur);
+                                game.team_guesses.insert(t.clone(), updated.clone());
+                                for p in &mut room.players {
+                                    if p.team.as_deref() == Some(t.as_str())
+                                        && !p.is_answer_setter
+                                        && !p.disconnected
+                                    {
+                                        p.guesses = updated.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "win" => {
+                    room.players[player_idx].guesses.push_str("✌");
+                    let winner_username = room.players[player_idx].username.clone();
+                    if let Some(ref mut game) = room.current_game {
+                        if game.first_winner.is_none() {
+                            game.first_winner = Some(json!({
+                                "id": actor_id,
+                                "username": winner_username,
+                                "isBigWin": false,
+                                "timestamp": Utc::now().timestamp_millis(),
+                            }));
+                        }
+                    }
+                    if !nonstop_mode {
+                        if team.as_deref().is_some_and(|t| t != "0") {
+                            gameplay::mark_team_victory(&mut room, &room_id, &actor_id, &io_clone);
+                        }
+                    }
+                }
+                "bigwin" => {
+                    room.players[player_idx].guesses.push_str("👑");
+                    let bigwin_username = room.players[player_idx].username.clone();
+                    if let Some(ref mut game) = room.current_game {
+                        let should_set = game
+                            .first_winner
+                            .as_ref()
+                            .and_then(|fw| fw.get("isBigWin").and_then(|v| v.as_bool()))
+                            .map(|is_big| !is_big)
+                            .unwrap_or(true);
+                        if game.first_winner.is_none() || should_set {
+                            game.first_winner = Some(json!({
+                                "id": actor_id,
+                                "username": bigwin_username,
+                                "isBigWin": true,
+                                "timestamp": Utc::now().timestamp_millis(),
+                            }));
+                        }
+                    }
+                    if !nonstop_mode {
+                        if team.as_deref().is_some_and(|t| t != "0") {
+                            gameplay::mark_team_victory(&mut room, &room_id, &actor_id, &io_clone);
+                        }
+                    }
+                }
+                _ => {
+                    room.players[player_idx].guesses.push_str("💀");
+                    if let Some(ref t) = team {
+                        if t != "0" {
+                            if let Some(ref mut game) = room.current_game {
+                                let cur = game.team_guesses.get(t).cloned().unwrap_or_default();
+                                let updated = format!("{}💀", cur);
+                                game.team_guesses.insert(t.clone(), updated.clone());
+                                for p in &mut room.players {
+                                    if p.team.as_deref() == Some(t.as_str())
+                                        && !p.is_answer_setter
+                                        && !p.disconnected
+                                    {
+                                        p.guesses = updated.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if sync_mode {
+                if !nonstop_mode && (final_result == "win" || final_result == "bigwin") {
+                    let sync_winner_username = room.players[player_idx].username.clone();
+                    if let Some(ref mut game) = room.current_game {
+                        game.sync_winner_found = true;
+                        game.sync_winner = Some(json!({
+                            "id": actor_id,
+                            "username": sync_winner_username,
+                            "isBigWin": final_result == "bigwin",
+                        }));
+                    }
+                }
+
+                // Pre-collect teammate IDs before mutable game borrow
+                let sync_end_teammate_ids: Vec<String> = if nonstop_mode {
+                    team.as_deref()
+                        .filter(|t| *t != "0")
+                        .map(|t| {
+                            room.players.iter()
+                                .filter(|p| p.team.as_deref() == Some(t)
+                                    && p.id != actor_id
+                                    && !p.is_answer_setter
+                                    && !p.disconnected)
+                                .map(|p| p.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                } else { vec![] };
+
+                if let Some(ref mut game) = room.current_game {
+                    game.sync_players_completed.insert(actor_id.clone());
+                    for id in sync_end_teammate_ids {
+                        game.sync_players_completed.insert(id);
+                    }
+                }
+                broadcast_players(&io_clone, &room_id, &room, None);
+                gameplay::update_sync_progress(&mut room, &room_id, &io_clone);
+            }
+
+            let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
+            if !finalized {
+                broadcast_players(&io_clone, &room_id, &room, None);
+            }
+        }
+    });
+
+    let state_ob = Arc::clone(&state);
+    let io_ob = io.clone();
+    socket.on("enterObserverMode", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_ob);
+        let io_clone = io_ob.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) {
+                Some(r) => r,
+                None => return,
+            };
             room.last_active = Utc::now().timestamp_millis();
 
-            let _ = io_clone.to(room_id.clone()).emit("gameStart", &json!({
-                "character": character,
-                "settings": settings,
-                "players": room.players,
-                "isPublic": room.is_public,
-                "isGameStarted": true,
-                "hints": hints,
-            }));
-            
-            let _ = io_clone.to(room_id.clone()).emit("tagBanStateUpdate", &json!({ "tagBanState": [] }));
-            info!("manual game started in {} by setter", room_id);
+            let actor_id = socket.id.to_string();
+            let Some(player_idx) = room.players.iter().position(|p| p.id == actor_id) else {
+                emit_error(&socket, "enterObserverMode", "连接中断了");
+                return;
+            };
+            if room.current_game.is_none() {
+                emit_error(&socket, "enterObserverMode", "游戏未开始或已结束");
+                return;
+            }
+
+            let has_ended = gameplay::has_end_mark(&room.players[player_idx].guesses);
+            let max_attempts = room
+                .current_game
+                .as_ref()
+                .and_then(|g| g.settings.as_ref())
+                .and_then(|s| s.get("maxAttempts"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10) as usize;
+            let team = room.players[player_idx].team.clone();
+            let is_team_mode = team.is_some() && team.as_deref() != Some("0");
+
+            let count_source = if is_team_mode {
+                let t = team.as_ref().unwrap();
+                room.current_game
+                    .as_ref()
+                    .and_then(|g| g.team_guesses.get(t))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                room.players[player_idx].guesses.clone()
+            };
+            let attempt_count = gameplay::count_attempt_marks(&count_source);
+
+            if !has_ended {
+                let end_mark = if attempt_count >= max_attempts { "💀" } else { "🏳️" };
+                if is_team_mode {
+                    let t = team.as_ref().unwrap().clone();
+                    if let Some(ref mut game) = room.current_game {
+                        let cur = game.team_guesses.get(&t).cloned().unwrap_or_default();
+                        let updated = format!("{}{}", cur, end_mark);
+                        game.team_guesses.insert(t.clone(), updated.clone());
+                        for p in &mut room.players {
+                            if p.team.as_deref() == Some(t.as_str())
+                                && !p.is_answer_setter
+                                && !p.disconnected
+                            {
+                                p.guesses = updated.clone();
+                            }
+                        }
+                    }
+                } else {
+                    room.players[player_idx].guesses.push_str(end_mark);
+                }
+            }
+
+            room.players[player_idx].temp_observer = true;
+            let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
+            if !finalized {
+                broadcast_players(&io_clone, &room_id, &room, None);
+            }
+        }
+    });
+
+    let state_timeout = Arc::clone(&state);
+    let io_timeout = io.clone();
+    socket.on("timeOut", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_timeout);
+        let io_clone = io_timeout.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) {
+                Some(r) => r,
+                None => return,
+            };
+
+            let actor_id = socket.id.to_string();
+            let Some(player_idx) = room.players.iter().position(|p| p.id == actor_id) else {
+                emit_error(&socket, "timeOut", "连接中断了");
+                return;
+            };
+            if room.current_game.is_none() {
+                emit_error(&socket, "timeOut", "游戏未开始或已结束");
+                return;
+            }
+
+            let team = room.players[player_idx].team.clone();
+            let is_team_mode = team.is_some() && team.as_deref() != Some("0");
+
+            let res = gameplay::handle_player_timeout(&mut room, &actor_id);
+
+            if is_team_mode {
+                for pid in &res.affected_player_ids {
+                    let _ = io_clone.to(pid.clone()).emit("resetTimer", &json!({}));
+                }
+            }
+
+            if res.needs_sync_update {
+                gameplay::update_sync_progress(&mut room, &room_id, &io_clone);
+            }
+
+            broadcast_guess_history_update(&io_clone, &room_id, &room);
+
+            let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
+            if !finalized {
+                broadcast_players(&io_clone, &room_id, &room, None);
+            }
         }
     });
 }
