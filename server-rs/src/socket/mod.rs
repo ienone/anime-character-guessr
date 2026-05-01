@@ -96,9 +96,10 @@ pub fn register_handlers(io: SocketIo) {
         });
 
         let state_join = Arc::clone(&state);
+        let io_join = io_clone.clone();
         socket.on("joinRoom", move |socket: SocketRef, Data::<Value>(data)| {
             let state = Arc::clone(&state_join);
-            let io_clone = io_clone.clone(); // Clone for use inside the async block
+            let io_clone = io_join.clone(); // Clone for use inside the async block
             async move {
                 let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let username = data.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -412,6 +413,9 @@ pub fn register_handlers(io: SocketIo) {
             }
         });
 
+        // Register room configuration and player state events
+        register_room_handlers(socket.clone(), Arc::clone(&state), io_clone.clone());
+
         socket.on("submit_guess", |socket: SocketRef, Data::<Value>(data), State(_pools): State<Arc<DbPools>>| async move {
             info!("User {} submitted guess {:?}", socket.id, data);
             // Handle guess logic...
@@ -422,9 +426,349 @@ pub fn register_handlers(io: SocketIo) {
             // Handle chat logic...
         });
 
-        socket.on_disconnect(|socket: SocketRef| async move {
+        let state_disconnect = Arc::clone(&state);
+        let io_disconnect = io_clone.clone();
+        socket.on_disconnect(move |socket: SocketRef| async move {
             info!("Client disconnected: {}", socket.id);
-            // Cleanup player state
+            let state = Arc::clone(&state_disconnect);
+            let io_clone = io_disconnect.clone();
+            
+            // Find room containing the disconnected socket and mark disconnected
+            for mut room_entry in state.rooms.iter_mut() {
+                let room_id = room_entry.key().clone();
+                let room = room_entry.value_mut();
+                
+                if let Some(idx) = room.players.iter().position(|p| p.id == socket.id.to_string()) {
+                    if room.host == socket.id.to_string() {
+                        if let Some(new_host) = room.players.iter().find(|p| !p.disconnected && p.id != socket.id.to_string()) {
+                            room.host = new_host.id.clone();
+                            let new_host_id = new_host.id.clone();
+                            let new_host_name = new_host.username.clone();
+                            let old_host_name = room.players[idx].username.clone();
+                            
+                            for p in &mut room.players {
+                                if p.id == new_host_id {
+                                    p.is_host = true;
+                                    p.ready = false;
+                                }
+                            }
+                            room.players[idx].is_host = false;
+                            room.players[idx].disconnected = true;
+                            
+                            let _ = io_clone.to(room_id.clone()).emit("hostTransferred", &json!({
+                                "oldHostName": old_host_name,
+                                "newHostId": new_host_id,
+                                "newHostName": new_host_name
+                            }));
+                        } else {
+                            // No one else left, wait for cleanup or remove
+                            room.players[idx].disconnected = true;
+                        }
+                    } else {
+                        room.players[idx].disconnected = true;
+                        if room.answer_setter_id.as_deref() == Some(socket.id.to_string().as_str()) {
+                            room.answer_setter_id = None;
+                            room.waiting_for_answer = false;
+                            let _ = io_clone.to(room_id.clone()).emit("waitForAnswerCanceled", &json!({ "message": format!("指定的出题人 {} 已离开，等待被取消", room.players[idx].username) }));
+                        }
+                    }
+                    
+                    if let Some(ref mut game) = room.current_game {
+                        game.sync_players_completed.remove(&socket.id.to_string());
+                    }
+
+                    let payload = json!({
+                        "players": room.players,
+                        "isPublic": room.is_public,
+                        "answerSetterId": room.answer_setter_id,
+                    });
+                    let _ = io_clone.to(room_id.clone()).emit("updatePlayers", &payload);
+                    break;
+                }
+            }
         });
+    });
+}
+
+fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: SocketIo) {
+    let state_ready = Arc::clone(&state);
+    let io_ready = io.clone();
+    socket.on("toggleReady", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_ready);
+        let io_clone = io_ready.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            let Some(player_idx) = room.players.iter().position(|p| p.id == socket.id.to_string()) else {
+                let _ = socket.emit("error", &json!({ "message": "连接中断了" }));
+                return;
+            };
+            if room.players[player_idx].is_host {
+                let _ = socket.emit("error", &json!({ "message": "房主不需要准备" }));
+                return;
+            }
+            if room.current_game.is_some() {
+                let _ = socket.emit("error", &json!({ "message": "游戏进行中不能更改准备状态" }));
+                return;
+            }
+            room.players[player_idx].ready = !room.players[player_idx].ready;
+            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+        }
+    });
+
+    let state_set = Arc::clone(&state);
+    let io_set = io.clone();
+    socket.on("updateGameSettings", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_set);
+        let io_clone = io_set.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
+                let _ = socket.emit("error", &json!({ "message": "只有房主可以更改设置" }));
+                return;
+            }
+            if let Some(settings) = data.get("settings") {
+                room.settings = Some(settings.clone());
+                room.last_active = Utc::now().timestamp_millis();
+                let _ = io_clone.to(room_id).emit("updateGameSettings", &json!({ "settings": settings }));
+            }
+        }
+    });
+
+    let state_req = Arc::clone(&state);
+    socket.on("requestGameSettings", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_req);
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(room) = state.rooms.get(room_id) {
+                if let Some(ref settings) = room.settings {
+                    let _ = socket.emit("updateGameSettings", &json!({ "settings": settings }));
+                }
+            }
+        }
+    });
+
+    let state_vis = Arc::clone(&state);
+    let io_vis = io.clone();
+    socket.on("toggleRoomVisibility", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_vis);
+        let io_clone = io_vis.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
+                let _ = socket.emit("error", &json!({ "message": "只有房主可以更改房间状态" }));
+                return;
+            }
+            room.is_public = !room.is_public;
+            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+        }
+    });
+
+    let state_name = Arc::clone(&state);
+    let io_name = io.clone();
+    socket.on("updateRoomName", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_name);
+        let io_clone = io_name.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let room_name = data.get("roomName").and_then(|v| v.as_str()).unwrap_or("").trim().chars().take(30).collect::<String>();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
+                let _ = socket.emit("error", &json!({ "message": "只有房主可以修改房名" }));
+                return;
+            }
+            room.room_name = room_name.clone();
+            let _ = io_clone.to(room_id).emit("roomNameUpdated", &json!({ "roomName": room_name }));
+        }
+    });
+
+    let state_manual = Arc::clone(&state);
+    let io_manual = io.clone();
+    socket.on("enterManualMode", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_manual);
+        let io_clone = io_manual.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
+                let _ = socket.emit("error", &json!({ "message": "只有房主可以进入出题模式" }));
+                return;
+            }
+            for p in &mut room.players {
+                if !p.is_host { p.ready = true; }
+            }
+            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+        }
+    });
+
+    let state_msg = Arc::clone(&state);
+    let io_msg = io.clone();
+    socket.on("updatePlayerMessage", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_msg);
+        let io_clone = io_msg.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            if let Some(p) = room.players.iter_mut().find(|p| p.id == socket.id.to_string()) {
+                p.message = message;
+                let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+                let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+            }
+        }
+    });
+
+    let state_team = Arc::clone(&state);
+    let io_team = io.clone();
+    socket.on("updatePlayerTeam", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_team);
+        let io_clone = io_team.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let team = data.get("team").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            
+            // Allow empty string to reset team, else '0'-'8'
+            let team_parsed = match team.as_deref() {
+                Some("") | None => None,
+                Some(t) if t.len() == 1 && t.chars().next().unwrap().is_ascii_digit() && t <= "8" => Some(t.to_string()),
+                _ => { let _ = socket.emit("error", &json!({ "message": "Invalid team value" })); return; }
+            };
+
+            if let Some(p) = room.players.iter_mut().find(|p| p.id == socket.id.to_string()) {
+                p.team = team_parsed;
+                let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+                let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+            }
+        }
+    });
+
+    let state_kick = Arc::clone(&state);
+    let io_kick = io.clone();
+    socket.on("kickPlayer", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_kick);
+        let io_clone = io_kick.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let player_id = data.get("playerId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
+                let _ = socket.emit("error", &json!({ "message": "只有房主可以踢出玩家" })); return;
+            }
+            if player_id == socket.id.to_string() {
+                let _ = socket.emit("error", &json!({ "message": "无法踢出自己" })); return;
+            }
+            
+            let Some(idx) = room.players.iter().position(|p| p.id == player_id) else {
+                let _ = socket.emit("error", &json!({ "message": "找不到要踢出的玩家" })); return;
+            };
+            
+            let player_to_kick = room.players.remove(idx);
+            
+            if room.answer_setter_id.as_deref() == Some(player_to_kick.id.as_str()) {
+                room.answer_setter_id = None;
+                room.waiting_for_answer = false;
+                let _ = io_clone.to(room_id.clone()).emit("waitForAnswerCanceled", &json!({ "message": format!("指定的出题人 {} 已被踢出，等待已取消", player_to_kick.username) }));
+            }
+
+            let _ = io_clone.to(player_id.clone()).emit("playerKicked", &json!({ "playerId": player_id, "username": player_to_kick.username }));
+            let _ = socket.to(room_id.clone()).emit("playerKicked", &json!({ "playerId": player_id, "username": player_to_kick.username }));
+            
+            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+            let _ = io_clone.to(room_id.clone()).emit("updatePlayers", &payload);
+
+            if let Some(ref mut game) = room.current_game {
+                game.sync_players_completed.remove(&player_id);
+            }
+            let sockets = io_clone.within(room_id).sockets();
+            if let Some(kicked) = sockets.iter().find(|s| s.id.to_string() == player_id) {
+                let _ = kicked.clone().disconnect();
+            }
+        }
+    });
+
+    let state_transfer = Arc::clone(&state);
+    let io_transfer = io.clone();
+    socket.on("transferHost", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_transfer);
+        let io_clone = io_transfer.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let new_host_id = data.get("newHostId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            
+            let current_host_name = {
+                let current = match room.players.iter().find(|p| p.id == socket.id.to_string()) {
+                    Some(p) => p,
+                    None => return,
+                };
+                if !current.is_host {
+                    let _ = socket.emit("error", &json!({ "message": "只有房主可以转移权限" })); return;
+                }
+                current.username.clone()
+            };
+
+            if let Some(new_host) = room.players.iter().find(|p| p.id == new_host_id) {
+                if new_host.disconnected {
+                    let _ = socket.emit("error", &json!({ "message": "无法将房主转移给该玩家" })); return;
+                }
+            } else {
+                let _ = socket.emit("error", &json!({ "message": "无法将房主转移给该玩家" })); return;
+            }
+
+            room.host = new_host_id.clone();
+            let mut new_host_name = String::new();
+            for p in &mut room.players {
+                p.is_host = p.id == new_host_id;
+                if p.is_host {
+                    p.ready = false;
+                    new_host_name = p.username.clone();
+                }
+            }
+
+            let _ = io_clone.to(room_id.clone()).emit("hostTransferred", &json!({
+                "oldHostName": current_host_name,
+                "newHostId": new_host_id,
+                "newHostName": new_host_name
+            }));
+            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+        }
+    });
+
+    let state_setter = Arc::clone(&state);
+    let io_setter = io.clone();
+    socket.on("setAnswerSetter", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_setter);
+        let io_clone = io_setter.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let setter_id = data.get("setterId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            
+            if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
+                let _ = socket.emit("error", &json!({ "message": "只有房主可以选择出题人" })); return;
+            }
+            
+            let setter_name = match room.players.iter().find(|p| p.id == setter_id) {
+                Some(p) => p.username.clone(),
+                None => { let _ = socket.emit("error", &json!({ "message": "找不到选中的玩家" })); return; }
+            };
+
+            room.answer_setter_id = Some(setter_id.clone());
+            room.waiting_for_answer = true;
+
+            let _ = io_clone.to(room_id.clone()).emit("waitForAnswer", &json!({
+                "answerSetterId": setter_id,
+                "setterUsername": setter_name
+            }));
+            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
+            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+        }
     });
 }
