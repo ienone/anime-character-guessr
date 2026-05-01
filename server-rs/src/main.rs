@@ -27,11 +27,13 @@ async fn main() -> anyhow::Result<()> {
     // Initialize database connections
     let db_pools = db::init_pools(&config).await?;
 
-    // Initialize Socket.IO
-    let (layer, io) = SocketIo::new_layer();
+    // Initialize Socket.IO with global state
+    let (layer, io) = SocketIo::builder()
+        .with_state(Arc::clone(&db_pools))
+        .build_layer();
     
     // Register socket.io event handlers
-    socket::register_handlers(io.clone(), Arc::clone(&db_pools));
+    socket::register_handlers(io.clone());
 
     // Build the Axum application
     let app = Router::new()
