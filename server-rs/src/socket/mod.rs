@@ -1,4 +1,5 @@
 pub mod state;
+pub mod gameplay;
 
 use serde_json::{json, Value};
 use socketioxide::extract::{Data, SocketRef, State};
@@ -769,6 +770,191 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             }));
             let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
             let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+        }
+    });
+
+    let state_start = Arc::clone(&state);
+    let io_start = io.clone();
+    socket.on("gameStart", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_start);
+        let io_clone = io_start.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            
+            if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
+                let _ = socket.emit("error", &json!({ "message": "只有房主可以开始游戏" }));
+                return;
+            }
+            if room.current_game.is_some() {
+                let _ = socket.emit("error", &json!({ "message": "游戏已经在进行中" }));
+                return;
+            }
+            
+            let all_ready = room.players.iter().all(|p| p.is_host || p.ready || p.disconnected);
+            if !all_ready {
+                let _ = socket.emit("error", &json!({ "message": "所有玩家必须准备好才能开始游戏" }));
+                return;
+            }
+
+            // Remove disconnected players with 0 score
+            room.players.retain(|p| !p.disconnected || p.score > 0);
+
+            let character = data.get("character").cloned().unwrap_or(Value::Null);
+            let settings = data.get("settings").cloned();
+            
+            // Init Game State
+            room.current_game = Some(state::CurrentGame {
+                character: character.clone(),
+                settings: settings.clone(),
+                guesses: vec![],
+                team_guesses: std::collections::HashMap::new(),
+                hints: None,
+                sync_round: 1,
+                sync_players_completed: std::collections::HashSet::new(),
+                sync_winner_found: false,
+                sync_winner: None,
+                sync_ready_to_end: false,
+                sync_round_start_rank: 1,
+                nonstop_winners: vec![],
+                nonstop_total_players: 0,
+                first_winner: None,
+                tag_ban_state: vec![],
+                tag_ban_state_pending: vec![],
+                _last_sync_waiting_key: None,
+                _last_sync_waiting_at: 0,
+            });
+
+            let mut nonstop_total = 0;
+            let mut teams_seen = std::collections::HashSet::new();
+            let answer_setter_id = room.answer_setter_id.clone();
+
+            for p in &mut room.players {
+                p.guesses = String::new();
+                p.message = String::new();
+                p.ready = false;
+                p.is_answer_setter = answer_setter_id.as_deref() == Some(&p.id);
+                p.temp_observer = false;
+                p.sync_completed_round = None;
+                p.joined_during_game = None;
+                
+                if !p.disconnected && !p.is_answer_setter && p.team.as_deref() != Some("0") {
+                    if let Some(ref t) = p.team {
+                        if teams_seen.insert(t.clone()) { nonstop_total += 1; }
+                    } else {
+                        nonstop_total += 1;
+                    }
+                }
+            }
+
+            if let Some(ref mut game) = room.current_game {
+                game.nonstop_total_players = std::cmp::max(1, nonstop_total);
+            }
+
+            room.last_active = Utc::now().timestamp_millis();
+
+            let _ = io_clone.to(room_id.clone()).emit("gameStart", &json!({
+                "character": character,
+                "settings": settings,
+                "players": room.players,
+                "isPublic": room.is_public,
+                "isGameStarted": true,
+            }));
+            let _ = io_clone.to(room_id.clone()).emit("tagBanStateUpdate", &json!({ "tagBanState": [] }));
+            
+            info!("game started in {}", room_id);
+        }
+    });
+
+    let state_set_ans = Arc::clone(&state);
+    let io_set_ans = io.clone();
+    socket.on("setAnswer", move |socket: SocketRef, Data::<Value>(data)| {
+        let state = Arc::clone(&state_set_ans);
+        let io_clone = io_set_ans.clone();
+        async move {
+            let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            
+            let is_setter = room.answer_setter_id.as_deref() == Some(socket.id.to_string().as_str());
+            if !is_setter {
+                let _ = socket.emit("error", &json!({ "message": "只有被指定的出题人可以出题" })); return;
+            }
+            if room.current_game.is_some() {
+                let _ = socket.emit("error", &json!({ "message": "游戏已经在进行中" })); return;
+            }
+            
+            let all_ready = room.players.iter().all(|p| p.is_host || p.ready || p.disconnected);
+            if !all_ready {
+                let _ = socket.emit("error", &json!({ "message": "所有玩家必须准备好才能开始游戏" })); return;
+            }
+
+            room.players.retain(|p| !p.disconnected || p.score > 0);
+
+            let character = data.get("character").cloned().unwrap_or(Value::Null);
+            let hints = data.get("hints").cloned();
+            let settings = room.settings.clone();
+
+            room.current_game = Some(state::CurrentGame {
+                character: character.clone(),
+                settings: settings.clone(),
+                guesses: vec![],
+                team_guesses: std::collections::HashMap::new(),
+                hints: hints.clone(),
+                sync_round: 1,
+                sync_players_completed: std::collections::HashSet::new(),
+                sync_winner_found: false,
+                sync_winner: None,
+                sync_ready_to_end: false,
+                sync_round_start_rank: 1,
+                nonstop_winners: vec![],
+                nonstop_total_players: 0,
+                first_winner: None,
+                tag_ban_state: vec![],
+                tag_ban_state_pending: vec![],
+                _last_sync_waiting_key: None,
+                _last_sync_waiting_at: 0,
+            });
+
+            let mut nonstop_total = 0;
+            let mut teams_seen = std::collections::HashSet::new();
+            let answer_setter_id = room.answer_setter_id.clone();
+
+            for p in &mut room.players {
+                p.guesses = String::new();
+                p.message = String::new();
+                p.ready = false;
+                p.is_answer_setter = answer_setter_id.as_deref() == Some(&p.id);
+                p.temp_observer = false;
+                p.sync_completed_round = None;
+                p.joined_during_game = None;
+                
+                if !p.disconnected && !p.is_answer_setter && p.team.as_deref() != Some("0") {
+                    if let Some(ref t) = p.team {
+                        if teams_seen.insert(t.clone()) { nonstop_total += 1; }
+                    } else {
+                        nonstop_total += 1;
+                    }
+                }
+            }
+
+            if let Some(ref mut game) = room.current_game {
+                game.nonstop_total_players = std::cmp::max(1, nonstop_total);
+            }
+
+            room.waiting_for_answer = false;
+            room.last_active = Utc::now().timestamp_millis();
+
+            let _ = io_clone.to(room_id.clone()).emit("gameStart", &json!({
+                "character": character,
+                "settings": settings,
+                "players": room.players,
+                "isPublic": room.is_public,
+                "isGameStarted": true,
+                "hints": hints,
+            }));
+            
+            let _ = io_clone.to(room_id.clone()).emit("tagBanStateUpdate", &json!({ "tagBanState": [] }));
+            info!("manual game started in {} by setter", room_id);
         }
     });
 }

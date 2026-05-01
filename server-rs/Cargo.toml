@@ -10,7 +10,9 @@ bytes = "1.11.1"
 chrono = "0.4.44"
 dashmap = "6.1.0"
 image = "0.25.10"
+lazy_static = "1.5.0"
 rand = "0.10.1"
+regex = "1.12.3"
 reqwest = "0.13.3"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
