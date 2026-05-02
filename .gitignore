@@ -75,3 +75,34 @@ out
 
 # Local Netlify folder
 .netlify
+dump-2026-04-28.210420Z/
+
+# Rust
+server-rs/target/
+db-builder/target/
+**/*.rs.bk
+
+# SQLite Database
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+*sqlite3-journal
+*sqlite3-wal
+*sqlite3-shm
+# SQLite WAL/SHM sidecar files (any extension pattern)
+*.sqlite-wal
+*.sqlite-shm
+
+# Rust - runtime data and server logs (not source)
+server-rs/data/
+server-rs/server_stdout.log
+server-rs/server_stderr.log
+
+# Benchmark results (generated JSON output)
+benchmarks/results/
+
+# Misc generated / local scratch files
+query
+tables.txt
+rustup-init.exe
