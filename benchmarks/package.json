@@ -1,0 +1,15 @@
+{
+  "name": "anime-guessr-benchmarks",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Performance benchmarks for anime-character-guessr servers",
+  "scripts": {
+    "bench": "node run_bench.js",
+    "bench:node": "node run_bench.js --target node",
+    "bench:rust": "node run_bench.js --target rust",
+    "bench:compare": "node run_bench.js --target both --concurrency 20 --requests 500"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
