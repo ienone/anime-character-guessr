@@ -30,6 +30,10 @@ export default defineConfig(({ mode }) => {
           target: serverUrl,
           changeOrigin: true,
         },
+        '/img': {
+          target: serverUrl,
+          changeOrigin: true,
+        },
       },
     },
   }

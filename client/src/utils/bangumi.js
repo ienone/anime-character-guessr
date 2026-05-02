@@ -1,8 +1,109 @@
-import axios from './cached-axios.js';
-import { idToTags } from '../data/id_tags.js';
-import { subjectsWithExtraTags } from '../data/extra_tag_subjects.js';
+import axios from './cached-axios.js'
+import perfAxios from './perf.js'
+import { idToTags } from '../data/id_tags.js'
+import { subjectsWithExtraTags } from '../data/extra_tag_subjects.js'
 
-const API_BASE_URL = import.meta.env.VITE_BGM_API_URL || 'https://api.bgm.tv';
+const API_BASE_URL = import.meta.env.VITE_BGM_API_URL || 'https://api.bgm.tv'
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
+
+/**
+ * Feature flag: when true, single-player character data is fetched from
+ * our own backend (which queries archive.sqlite) instead of calling BGM API
+ * directly. This dramatically reduces latency and eliminates BGM connectivity
+ * issues for the standard game modes.
+ *
+ * BGM Index mode still needs live BGM calls (proxied through the server).
+ */
+const USE_BACKEND_API = import.meta.env.VITE_USE_BACKEND_API !== 'false'
+
+// ─── Backend-backed implementations ──────────────────────────────────────────
+
+/**
+ * Fetch a complete character payload from our backend (archive.sqlite).
+ * Returns the same shape as getRandomCharacter's result.
+ */
+async function backendGetRandomCharacter(gameSettings) {
+  const response = await perfAxios.post(`${SERVER_URL}/api/game/random`, {
+    startYear: gameSettings.startYear,
+    endYear: gameSettings.endYear,
+    metaTags: gameSettings.metaTags,
+    topNSubjects: gameSettings.topNSubjects,
+    commonTags: gameSettings.commonTags,
+    subjectTagNum: gameSettings.subjectTagNum,
+    characterTagNum: gameSettings.characterTagNum,
+    mainCharacterOnly: gameSettings.mainCharacterOnly,
+    characterNum: gameSettings.characterNum,
+    useSubjectPerYear: gameSettings.useSubjectPerYear,
+  })
+  const char = response.data
+  if (!char || char.error) throw new Error(char?.error || '后端返回数据异常')
+
+  // Normalize rawTags: backend returns an object, frontend expects a Map
+  const rawTagsObj = char.rawTags || {}
+  char.rawTags = new Map(Object.entries(rawTagsObj).map(([k, v]) => [k, v]))
+  return char
+}
+
+/**
+ * Fetch character appearance data from backend for a given character ID.
+ * Used during the guess phase.
+ */
+async function backendGetCharacterAppearances(characterId, gameSettings) {
+  const response = await perfAxios.post(`${SERVER_URL}/api/game/character`, {
+    id: characterId,
+    settings: {
+      startYear: gameSettings.startYear,
+      endYear: gameSettings.endYear,
+      metaTags: gameSettings.metaTags,
+      commonTags: gameSettings.commonTags,
+      subjectTagNum: gameSettings.subjectTagNum,
+      characterTagNum: gameSettings.characterTagNum,
+    },
+  })
+  const char = response.data
+  if (!char || char.error) throw new Error(char?.error || '后端返回数据异常')
+
+  const rawTagsObj = char.rawTags || {}
+  char.rawTags = new Map(Object.entries(rawTagsObj).map(([k, v]) => [k, v]))
+  return {
+    appearances: char.appearances || [],
+    appearanceIds: char.appearanceIds || [],
+    latestAppearance: char.latestAppearance ?? -1,
+    earliestAppearance: char.earliestAppearance ?? -1,
+    highestRating: char.highestRating ?? -1,
+    rawTags: char.rawTags,
+    metaTags: char.metaTags || [],
+    animeVAs: char.animeVAs || [],
+    popularity: char.popularity,
+    gender: char.gender,
+    image: char.image,
+    imageGrid: char.imageGrid,
+    nameCn: char.nameCn,
+    nameEn: char.nameEn,
+    summary: char.summary,
+  }
+}
+
+// BGM index/search proxied through our server
+async function serverGetIndexInfo(indexId) {
+  const response = await perfAxios.get(`${SERVER_URL}/api/bgm/index-info`, { params: { indexId } })
+  return response.data
+}
+
+async function serverFetchIndexSubjects(indexId, offset, limit) {
+  const response = await perfAxios.get(`${SERVER_URL}/api/bgm/index-subjects`, {
+    params: { indexId, offset, limit }
+  })
+  return response.data
+}
+
+async function serverSearchSubjects(filter, sort, offset, limit) {
+  const response = await perfAxios.post(`${SERVER_URL}/api/bgm/search`, {
+    sort: sort || 'heat', filter, offset: offset || 0, limit: limit || 10
+  })
+  return response.data
+}
+
 
 async function getSubjectDetails(subjectId) {
   try {
@@ -68,6 +169,15 @@ async function getSubjectDetails(subjectId) {
 }
 
 async function getCharacterAppearances(characterId, gameSettings) {
+  // ── Backend path (archive.sqlite, no BGM calls) ──
+  if (USE_BACKEND_API) {
+    try {
+      return await backendGetCharacterAppearances(characterId, gameSettings)
+    } catch (backendErr) {
+      console.warn('[bangumi] Backend appearances failed, falling back to BGM:', backendErr.message)
+    }
+  }
+  // ── Original BGM path (fallback) ─────────────────
   try {
     const [subjectsResponse, personsResponse] = await Promise.all([
       axios.get(`${API_BASE_URL}/v0/characters/${characterId}/subjects`),
@@ -390,6 +500,16 @@ async function getCharactersBySubjectId(subjectId) {
 }
 
 async function getRandomCharacter(gameSettings) {
+  // ── Backend path: standard/topN/perYear modes backed by archive.sqlite ──
+  // Index mode still needs BGM API (proxied through server if USE_BACKEND_API)
+  if (USE_BACKEND_API && !gameSettings.useIndex) {
+    try {
+      return await backendGetRandomCharacter(gameSettings)
+    } catch (backendErr) {
+      console.warn('[bangumi] Backend random character failed, falling back to BGM:', backendErr.message)
+    }
+  }
+  // ── Original BGM path ─────────────────────────────────────────────────────
   try {
     let subject;
     let total;
@@ -750,6 +870,9 @@ function generateFeedback(guess, answerCharacter, gameSettings) {
 
 async function getIndexInfo(indexId) {
   try {
+    if (USE_BACKEND_API) {
+      return await serverGetIndexInfo(indexId)
+    }
     const response = await axios.get(`${API_BASE_URL}/v0/indices/${indexId}`);
     
     if (!response.data) {
