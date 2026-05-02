@@ -1,42 +1,97 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
 
-const DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
-const DB_PATH: &str = "../archive.sqlite";
+const DEFAULT_DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
+const DEFAULT_DB_PATH: &str = "../archive.sqlite";
+
+#[derive(Debug, Clone)]
+struct Args {
+    dump_dir: PathBuf,
+    out_db: PathBuf,
+}
+
+fn parse_args() -> Result<Args> {
+    let mut dump_dir: Option<PathBuf> = None;
+    let mut out_db: Option<PathBuf> = None;
+
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!(
+                    "db-builder\n\nUSAGE:\n  db-builder [--dump-dir <path>] [--out <path>]\n\nOPTIONS:\n  -d, --dump-dir <path>   Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>        Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  -h, --help              Print help\n"
+                );
+                std::process::exit(0);
+            }
+            "-d" | "--dump-dir" => {
+                let v = it
+                    .next()
+                    .context("--dump-dir requires a value")?;
+                dump_dir = Some(PathBuf::from(v));
+            }
+            "-o" | "--out" => {
+                let v = it.next().context("--out requires a value")?;
+                out_db = Some(PathBuf::from(v));
+            }
+            _ if arg.starts_with('-') => {
+                anyhow::bail!("Unknown option: {arg}")
+            }
+            _ => {
+                // Positional fallback: first is dump_dir, second is out_db
+                if dump_dir.is_none() {
+                    dump_dir = Some(PathBuf::from(arg));
+                } else if out_db.is_none() {
+                    out_db = Some(PathBuf::from(arg));
+                } else {
+                    anyhow::bail!("Unexpected extra argument: {arg}")
+                }
+            }
+        }
+    }
+
+    Ok(Args {
+        dump_dir: dump_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DUMP_DIR)),
+        out_db: out_db.unwrap_or_else(|| PathBuf::from(DEFAULT_DB_PATH)),
+    })
+}
 
 fn main() -> Result<()> {
     let start_time = Instant::now();
     println!("开始离线构建精简版 archive.sqlite...");
 
-    let mut db = Connection::open(DB_PATH)?;
+    let args = parse_args()?;
+    println!("dump_dir: {}", args.dump_dir.display());
+    println!("out_db: {}", args.out_db.display());
+
+    let mut db = Connection::open(&args.out_db)?;
     init_db(&mut db)?;
 
     // ==========================================
     // 第一层漏斗：过滤作品 (Subject)
     // ==========================================
     println!("Step 1: 扫描并过滤 subject.jsonlines...");
-    let valid_subjects = process_subjects(&mut db)?;
+    let valid_subjects = process_subjects(&mut db, &args.dump_dir)?;
     println!("已保留热门动漫/游戏作品数: {}", valid_subjects.len());
 
     // ==========================================
     // 第二层漏斗：过滤关联映射 (Subject-Characters)
     // ==========================================
     println!("\nStep 2: 扫描 subject-characters.jsonlines...");
-    let valid_chars = process_relations(&mut db, &valid_subjects)?;
+    let valid_chars = process_relations(&mut db, &args.dump_dir, &valid_subjects)?;
     println!("符合条件的核心角色 (主角/配角) 且属于热门作品的集合数: {}", valid_chars.len());
 
     // ==========================================
     // 第三层漏斗：过滤角色详细信息 (Character)
     // ==========================================
     println!("\nStep 3: 扫描并过滤 character.jsonlines...");
-    process_characters(&mut db, &valid_chars)?;
+    process_characters(&mut db, &args.dump_dir, &valid_chars)?;
 
     // ==========================================
     // 清理与优化
@@ -87,8 +142,9 @@ fn init_db(db: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn process_subjects(db: &mut Connection) -> Result<HashSet<i64>> {
-    let file = File::open(Path::new(DUMP_DIR).join("subject.jsonlines"))?;
+fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>> {
+    let file = File::open(dump_dir.join("subject.jsonlines"))
+        .with_context(|| format!("failed to open {}", dump_dir.join("subject.jsonlines").display()))?;
     let reader = BufReader::new(file);
     let mut valid_ids = HashSet::new();
 
@@ -150,8 +206,9 @@ fn process_subjects(db: &mut Connection) -> Result<HashSet<i64>> {
     Ok(valid_ids)
 }
 
-fn process_relations(db: &mut Connection, valid_subjects: &HashSet<i64>) -> Result<HashSet<i64>> {
-    let file = File::open(Path::new(DUMP_DIR).join("subject-characters.jsonlines"))?;
+fn process_relations(db: &mut Connection, dump_dir: &Path, valid_subjects: &HashSet<i64>) -> Result<HashSet<i64>> {
+    let file = File::open(dump_dir.join("subject-characters.jsonlines"))
+        .with_context(|| format!("failed to open {}", dump_dir.join("subject-characters.jsonlines").display()))?;
     let reader = BufReader::new(file);
     let mut valid_chars = HashSet::new();
 
@@ -182,8 +239,9 @@ fn process_relations(db: &mut Connection, valid_subjects: &HashSet<i64>) -> Resu
     Ok(valid_chars)
 }
 
-fn process_characters(db: &mut Connection, valid_chars: &HashSet<i64>) -> Result<()> {
-    let file = File::open(Path::new(DUMP_DIR).join("character.jsonlines"))?;
+fn process_characters(db: &mut Connection, dump_dir: &Path, valid_chars: &HashSet<i64>) -> Result<()> {
+    let file = File::open(dump_dir.join("character.jsonlines"))
+        .with_context(|| format!("failed to open {}", dump_dir.join("character.jsonlines").display()))?;
     let reader = BufReader::new(file);
     
     let mut total_kept = 0;

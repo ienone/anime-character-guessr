@@ -43,6 +43,15 @@ docker-compose up --build
 docker-compose down
 ```
 
+## 🚀 自部署优化（推荐）
+为了避免浏览器直连 Bangumi API/图片导致的卡顿（跨境/限流/网络抖动），本项目已内置：
+- Bangumi API 服务端代理：客户端所有 `v0/*` 请求会改为请求你自己的服务端 `/api/bgm/*`
+- 图片服务端缓存代理：远程图片会通过 `/img?url=...` 拉取并缓存到本地磁盘后再返回
+
+你需要做的仅是：
+- `client/.env` 中设置 `VITE_SERVER_URL` 指向你部署后的域名（通常就是站点本身的域名）
+- `server/.env` 中可选配置缓存策略（见 `server/.env.example` 的 `BGM_*` / `IMG_*`）
+
 ## 🎮 游戏玩法
 
 - 猜一个神秘动漫角色。搜索角色，然后做出猜测。

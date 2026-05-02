@@ -1,7 +1,7 @@
 version: "3.8"
 
 services:
-  # Main Reverse Proxy
+  # ─── Reverse Proxy ────────────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: main_nginx_proxy
@@ -11,74 +11,57 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - client
-      - server
+      - server-rs
     networks:
       - app-network
     environment:
-      # Pass domain name to nginx config if needed (e.g., for server_name directive via envsubst)
       - DOMAIN_NAME=${DOMAIN_NAME:-http://localhost}
+    restart: unless-stopped
 
-  # Client Application (React served by Nginx)
+  # ─── Client (React, served by Nginx) ──────────────────────────────────────
   client:
     build:
       context: ./client
       dockerfile: Dockerfile
       args:
-        # Derive VITE variables from DOMAIN_NAME at build time
         - VITE_SERVER_URL=${DOMAIN_NAME:-http://localhost}
         - VITE_AES_SECRET=${AES_SECRET}
     container_name: client_app
     expose:
       - "80"
-    # Runtime environment variables for client are less common with static builds,
-    # but kept here for consistency if needed by some entrypoint script.
-    # Build args are generally sufficient for VITE vars.
-    environment:
-      - VITE_SERVER_URL=${DOMAIN_NAME:-http://localhost}
-      - VITE_AES_SECRET=${AES_SECRET}
     networks:
       - app-network
     restart: unless-stopped
 
-  # Game Server (Node.js + Socket.IO)
-  server:
+  # ─── Game Server (Rust / Axum + socketioxide) ─────────────────────────────
+  server-rs:
     build:
-      context: ./server
+      context: ./server-rs
       dockerfile: Dockerfile
-    container_name: game_server
+    container_name: game_server_rs
     expose:
-      - "${SERVER_INTERNAL_PORT:-3000}"
+      - "${SERVER_INTERNAL_PORT:-3001}"
     environment:
-      - PORT=${SERVER_INTERNAL_PORT:-3000}
-      # Derive CORS origin from DOMAIN_NAME
+      - PORT=${SERVER_INTERNAL_PORT:-3001}
+      - ARCHIVE_DB_PATH=/data/archive.sqlite
+      - APP_DB_PATH=/data/app.sqlite
+      - IMAGE_CACHE_DIR=/data/images
+      # CORS allowed origin (must match the frontend URL)
       - CLIENT_URL=${DOMAIN_NAME:-http://localhost}
-      - SERVER_URL=${SERVER_URL:-http://server:3000}
-      - MONGODB_URI=${MONGODB_URI}
-      - NODE_ENV=production
-    depends_on:
-      - mongo
-    networks:
-      - app-network
-    restart: unless-stopped
-
-  # MongoDB Database
-  mongo:
-    image: mongo:latest
-    container_name: mongodb
     volumes:
-      - mongo_data:/data/db
-    expose:
-      - "27017"
+      # Mount pre-built archive.sqlite (read-only asset)
+      - ./archive.sqlite:/data/archive.sqlite:ro
+      # Persist app.sqlite (leaderboard, image cache)
+      - app_data:/data
     networks:
       - app-network
     restart: unless-stopped
 
-# Define the network
 networks:
   app-network:
     driver: bridge
 
-# Define persistent volume for MongoDB data
 volumes:
-  mongo_data:
+  # Persistent volume for app.sqlite + downloaded/transcoded images
+  app_data:
     driver: local
