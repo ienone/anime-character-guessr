@@ -226,7 +226,10 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                 }
 
                 // Room exists, acquire write lock
-                let mut room = state.rooms.get_mut(&room_id).unwrap();
+                let mut room = match state.rooms.get_mut(&room_id) {
+                    Some(r) => r,
+                    None => return,
+                };
                 room.last_active = Utc::now().timestamp_millis();
 
                 if room.current_game.is_some() {
@@ -239,12 +242,12 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                 if let Some(idx) = existing_idx {
                     // Helper to check if a Value representing an avatar is conceptually empty
                     let is_empty_avatar = |val: &Option<Value>| -> bool {
-                        val.is_none() || val.as_ref().map_or(true, |v| v.is_null() || (v.is_string() && v.as_str().unwrap().is_empty()) || (v.is_number() && v.as_i64() == Some(0)))
+                        val.is_none() || val.as_ref().map_or(true, |v| v.is_null() || (v.is_string() && v.as_str().unwrap_or("").is_empty()) || (v.is_number() && v.as_i64() == Some(0)))
                     };
                     
                     // Helper to safely get avatar as string
                     let avatar_to_string = |val: &Option<Value>| -> String {
-                        val.as_ref().map(|v| if v.is_string() { v.as_str().unwrap().to_string() } else { v.to_string() }).unwrap_or_default()
+                        val.as_ref().map(|v| if v.is_string() { v.as_str().unwrap_or("").to_string() } else { v.to_string() }).unwrap_or_default()
                     };
 
                     // 2. Reconnection Logic
@@ -689,7 +692,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             // Allow empty string to reset team, else '0'-'8'
             let team_parsed = match team.as_deref() {
                 Some("") | None => None,
-                Some(t) if t.len() == 1 && t.chars().next().unwrap().is_ascii_digit() && t <= "8" => Some(t.to_string()),
+                Some(t) if t.len() == 1 && t.chars().next().unwrap_or('9').is_ascii_digit() && t <= "8" => Some(t.to_string()),
                 _ => { let _ = socket.emit("error", &json!({ "message": "Invalid team value" })); return; }
             };
 

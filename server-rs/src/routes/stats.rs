@@ -132,10 +132,12 @@ pub async fn leaderboard_characters(
             "SELECT id, character_name, count FROM answer_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
         )?;
         let rows: Vec<Value> = stmt.query_map([limit], |row| {
+            let id = row.get::<_, i64>(0)?;
             Ok(json!({
-                "_id": row.get::<_, i64>(0)?,
+                "_id": id,
                 "characterName": row.get::<_, String>(1)?,
                 "count": row.get::<_, i64>(2)?,
+                "image": format!("/img/{}.webp", id),
             }))
         })?.filter_map(Result::ok).collect();
         Ok(rows)
@@ -158,10 +160,12 @@ pub async fn leaderboard_guesses(
             "SELECT id, character_name, count FROM guess_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
         )?;
         let rows: Vec<Value> = stmt.query_map([limit], |row| {
+            let id = row.get::<_, i64>(0)?;
             Ok(json!({
-                "_id": row.get::<_, i64>(0)?,
+                "_id": id,
                 "characterName": row.get::<_, String>(1)?,
                 "count": row.get::<_, i64>(2)?,
+                "image": format!("/img/{}.webp", id),
             }))
         })?.filter_map(Result::ok).collect();
         Ok(rows)
@@ -198,7 +202,7 @@ pub async fn leaderboard_weekly(
             .collect();
 
         let rows: Vec<Value> = top_ids.iter().map(|id| {
-            json!({ "_id": id, "count": weekly_map.get(id).copied().unwrap_or(0) })
+            json!({ "_id": id, "count": weekly_map.get(id).copied().unwrap_or(0), "image": format!("/img/{}.webp", id) })
         }).collect();
         Ok(rows)
     }).await;

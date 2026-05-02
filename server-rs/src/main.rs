@@ -8,6 +8,7 @@ use tracing_subscriber;
 
 mod config;
 mod db;
+mod middleware;
 mod routes;
 mod socket;
 mod utils;
@@ -39,17 +40,23 @@ async fn main() -> anyhow::Result<()> {
     // Spawn room auto-cleanup background task (replaces autoClean.js)
     utils::start_room_cleanup(Arc::clone(&server_state), io.clone());
 
+    // Spawn image cache cleanup background task
+    utils::start_image_cache_cleanup(Arc::clone(&db_pools));
+
     // Build the Axum application
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
+        .route("/metrics", get(middleware::metrics::metrics_handler))
         // Room management routes
-        .nest("/", routes::room_routes(Arc::clone(&server_state), io.clone()))
+        .merge(routes::room_routes(Arc::clone(&server_state), io.clone()))
         // REST API routes (game + leaderboard + stats)
         .nest("/api", routes::api_routes(Arc::clone(&db_pools)))
         // Image API
         .nest("/img", routes::image_routes(Arc::clone(&db_pools)))
         // Attach socket.io layer
-        .layer(layer);
+        .layer(layer)
+        // Request metrics (outermost — measures full pipeline)
+        .layer(axum::middleware::from_fn(middleware::metrics::track_metrics));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("Listening on {}", addr);

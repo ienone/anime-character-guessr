@@ -25,10 +25,10 @@ pub fn room_routes(state: Arc<ServerState>, io: SocketIo) -> Router {
         .route("/quick-join", get(quick_join))
         .route("/room-count", get(room_count))
         .route("/list-rooms", get(list_rooms))
-        .route("/room-info/:id", get(room_info))
+        .route("/room-info/{id}", get(room_info))
         .route("/clean-rooms", get(clean_rooms))
-        .route("/close-room/:id", get(close_room_get))
-        .route("/close-room/:id", post(close_room_post))
+        .route("/close-room/{id}", get(close_room_get))
+        .route("/close-room/{id}", post(close_room_post))
         .with_state(room_state)
 }
 
@@ -105,7 +105,7 @@ async fn list_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
     Json(rooms)
 }
 
-/// GET /room-info/:id
+/// GET /room-info/{id}
 async fn room_info(
     State(rs): State<RoomState>,
     Path(id): Path<String>,
@@ -139,7 +139,7 @@ struct CloseReason {
     reason: Option<String>,
 }
 
-/// GET /close-room/:id
+/// GET /close-room/{id}
 async fn close_room_get(
     State(rs): State<RoomState>,
     Path(room_id): Path<String>,
@@ -159,7 +159,7 @@ async fn close_room_get(
     })).into_response()
 }
 
-/// POST /close-room/:id  { reason?: string }
+/// POST /close-room/{id}  { reason?: string }
 async fn close_room_post(
     State(rs): State<RoomState>,
     Path(room_id): Path<String>,

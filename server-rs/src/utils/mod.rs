@@ -5,6 +5,21 @@ use crate::socket::state::ServerState;
 use socketioxide::SocketIo;
 use serde_json::json;
 use tracing::{error, info, warn};
+use dashmap::DashMap;
+use tokio::sync::broadcast;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref PENDING_DOWNLOADS: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
+}
+
+struct CleanupPending(i64, broadcast::Sender<bool>);
+impl Drop for CleanupPending {
+    fn drop(&mut self) {
+        PENDING_DOWNLOADS.remove(&self.0);
+        let _ = self.1.send(true);
+    }
+}
 
 /// Creates runtime data directories on first start.
 pub fn ensure_directories(image_cache_dir: &str) -> anyhow::Result<()> {
@@ -55,6 +70,25 @@ pub fn start_room_cleanup(state: Arc<ServerState>, io: SocketIo) {
 /// Downloads `url`, transcodes to WebP, saves locally, and records the
 /// cache path in app.sqlite. Silently returns on any error (background task).
 pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>) {
+    // Coalesce duplicate requests
+    let rx_opt = {
+        if let Some(entry) = PENDING_DOWNLOADS.get(&id) {
+            Some(entry.value().subscribe())
+        } else {
+            None
+        }
+    };
+
+    if let Some(mut rx) = rx_opt {
+        // A task is already downloading this image, wait for it
+        let _ = rx.recv().await;
+        return;
+    }
+
+    let (tx, _rx) = broadcast::channel(1);
+    PENDING_DOWNLOADS.insert(id, tx.clone());
+    let _cleanup = CleanupPending(id, tx);
+
     // Check if another task already cached it to avoid duplicate work
     let already_cached = db::with_app_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare("SELECT 1 FROM image_cache WHERE id = ?1")?;
@@ -120,3 +154,59 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
         Ok(()) => info!("Cached image for character {} at {}", id, path),
     }
 }
+
+/// Periodically checks the image cache size and removes the oldest entries
+/// if it exceeds a threshold (e.g. 5000 images).
+pub fn start_image_cache_cleanup(pools: Arc<DbPools>) {
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(60 * 60); // every 1 hour
+        let max_cache_size = 5000;
+        loop {
+            tokio::time::sleep(interval).await;
+            info!("Running image cache cleanup task...");
+
+            let pools_clone = Arc::clone(&pools);
+            let to_delete = db::with_app_db(pools_clone, move |conn| {
+                let mut stmt = conn.prepare("SELECT count(*) FROM image_cache")?;
+                let count: i64 = stmt.query_row([], |row| row.get(0))?;
+
+                if count <= max_cache_size {
+                    return Ok(vec![]);
+                }
+
+                let limit = count - max_cache_size;
+                let mut stmt2 = conn.prepare("SELECT id, local_path FROM image_cache ORDER BY created_at ASC LIMIT ?1")?;
+                let rows = stmt2.query_map([limit], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?.filter_map(Result::ok).collect::<Vec<_>>();
+                Ok(rows)
+            }).await.unwrap_or_default();
+
+            let mut deleted_count = 0;
+            for (_, path) in &to_delete {
+                if tokio::fs::remove_file(path).await.is_ok() || !std::path::Path::new(path).exists() {
+                    deleted_count += 1;
+                }
+            }
+
+            if deleted_count > 0 {
+                let pools_clone = Arc::clone(&pools);
+                let ids: Vec<String> = to_delete.into_iter().map(|(id, _)| id).collect();
+                let _ = db::with_app_db(pools_clone, move |conn| {
+                    let tx = conn.transaction()?;
+                    {
+                        let mut stmt = tx.prepare("DELETE FROM image_cache WHERE id = ?1")?;
+                        for id in ids {
+                            let _ = stmt.execute([id]);
+                        }
+                    }
+                    tx.commit()?;
+                    Ok(())
+                }).await;
+
+                info!("Auto-cleanup: removed {} old cached images", deleted_count);
+            }
+        }
+    });
+}
+

@@ -9,12 +9,14 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use crate::db::{self, DbPools};
 use crate::utils;
-use rand::seq::IndexedRandom;
 
+
+pub mod game;
 pub mod leaderboard;
 pub mod rooms;
 pub mod roulette;
 pub mod stats;
+pub mod tags;
 
 // ─── Route Builders ───────────────────────────────────────────────────────────
 
@@ -23,11 +25,16 @@ pub use rooms::room_routes;
 
 /// /api/* — game logic, leaderboard, stats
 pub fn api_routes(pools: Arc<DbPools>) -> Router {
-    // State for stats handlers needs both DbPools and ServerState
     Router::new()
-        // Core game
+        // Single-player game (archive.sqlite backed)
         .route("/game/random", post(get_random_character))
-        // Roulette (character picker animation)
+        .route("/game/character", post(get_character_by_id))
+        // BGM proxy (for index mode / search — BGM calls go through server)
+        .route("/bgm/index-info", get(bgm_proxy_index_info))
+        .route("/bgm/index-subjects", get(bgm_proxy_index_subjects))
+        .route("/bgm/search", post(bgm_proxy_search))
+        .route("/bgm/character", get(bgm_proxy_character))
+        // Roulette
         .route("/roulette", get(roulette::roulette))
         // Redeem codes
         .route("/redeem", get(stats::redeem))
@@ -41,8 +48,16 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         // Stats write endpoints
         .route("/answer-character-count", post(stats::answer_character_count))
         .route("/guess-character-count", post(stats::guess_character_count))
-        .route("/character-usage/:id", get(stats::character_usage))
+        .route("/character-usage/{id}", get(stats::character_usage))
         .route("/subject-added", post(stats::subject_added))
+        // Tags & Feedback
+        .route("/character-tags", post(tags::update_character_tags))
+        .route("/character-tags/{id}", get(tags::get_character_tags))
+        .route("/game-character-tags", post(tags::update_game_character_tags))
+        .route("/game-character-tags/{subject_id}", get(tags::get_game_character_tags))
+        .route("/propose-tags", post(tags::propose_tags))
+        .route("/feedback-tags", post(tags::feedback_tags))
+        .route("/bug-feedback", post(tags::bug_feedback))
         .with_state(pools)
 }
 
@@ -53,66 +68,141 @@ pub fn image_routes(pools: Arc<DbPools>) -> Router {
         .with_state(pools)
 }
 
-// ─── Route Handlers ───────────────────────────────────────────────────────────
-
+/// POST /api/game/random
+/// Pick a random character based on game settings — fully in-memory, zero DB queries.
 async fn get_random_character(
     State(pools): State<Arc<DbPools>>,
-    Json(_settings): Json<Value>,
+    Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let char_id = {
-        let mut rng = rand::rng();
-        match pools.character_ids.choose(&mut rng) {
-            Some(&id) => id,
-            None => return Json(json!({ "error": "No characters loaded" })).into_response(),
-        }
-    };
+    let settings = game::GameSettings::from_json(&body);
+    let pools_clone = Arc::clone(&pools);
 
-    let db_result = db::with_archive_db(Arc::clone(&pools), move |conn| {
-        let char_raw: String = conn
-            .query_row(
-                "SELECT raw_json FROM characters WHERE id = ?1",
-                [char_id],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
+    // spawn_blocking to avoid blocking the async executor during tag aggregation
+    let result = tokio::task::spawn_blocking(move || {
+        game::random_character(&pools_clone, &settings)
+    }).await;
 
-        let mut sub_stmt = conn.prepare(
-            "SELECT s.raw_json
-             FROM subject_characters sc
-             JOIN subjects s ON sc.subject_id = s.id
-             WHERE sc.character_id = ?1
-             ORDER BY s.collects DESC",
-        )?;
-
-        let mut subjects_raw = Vec::new();
-        let mut rows = sub_stmt.query([char_id])?;
-        while let Some(row) = rows.next()? {
-            let sub_raw: String = row.get(0)?;
-            subjects_raw.push(sub_raw);
-        }
-        Ok((char_raw, subjects_raw))
-    })
-    .await;
-
-    let (char_raw, subjects_raw) = match db_result {
-        Ok(v) => v,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "db_error", "message": e.to_string() })),
-        ).into_response(),
-    };
-
-    let mut character: Value = serde_json::from_str(&char_raw).unwrap_or(json!({}));
-    let subjects = subjects_raw
-        .into_iter()
-        .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .collect::<Vec<_>>();
-
-    character["id"] = json!(char_id);
-    character["appearances"] = json!(subjects);
-
-    Json(character).into_response()
+    match result {
+        Ok(Ok((_, payload))) => Json(payload).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
 }
+
+/// POST /api/game/character  { id: number, settings: {...} }
+/// Return full gameplay payload for a specific character — fully in-memory.
+async fn get_character_by_id(
+    State(pools): State<Arc<DbPools>>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let char_id = match body.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id required" }))).into_response(),
+    };
+    let settings = game::GameSettings::from_json(body.get("settings").unwrap_or(&json!({})));
+    let pools_clone = Arc::clone(&pools);
+
+    let result = tokio::task::spawn_blocking(move || {
+        game::character_by_id(&pools_clone, char_id, &settings)
+    }).await;
+
+    match result {
+        Ok(Ok(payload)) => Json(payload).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+// ─── BGM Proxy Routes (for Index/Search mode) ─────────────────────────────────
+// These proxy calls to api.bgm.tv with server-side caching to mitigate
+// connectivity issues from the client.
+
+use axum::extract::Query as AxumQuery;
+use std::collections::HashMap;
+
+/// GET /api/bgm/index-info?indexId=xxx
+async fn bgm_proxy_index_info(
+    AxumQuery(q): AxumQuery<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let index_id = match q.get("indexId") {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "indexId required" }))).into_response(),
+    };
+    let url = format!("https://api.bgm.tv/v0/indices/{}", index_id);
+    match bgm_get(&url).await {
+        Ok(data) => Json(json!({ "title": data.get("title"), "total": data.get("total") })).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// GET /api/bgm/index-subjects?indexId=xxx&offset=0&limit=10
+async fn bgm_proxy_index_subjects(
+    AxumQuery(q): AxumQuery<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let index_id = match q.get("indexId") {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "indexId required" }))).into_response(),
+    };
+    let offset = q.get("offset").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let limit = q.get("limit").and_then(|s| s.parse::<u64>().ok()).unwrap_or(10).min(50);
+    let url = format!(
+        "https://api.bgm.tv/v0/indices/{}/subjects?limit={}&offset={}",
+        index_id, limit, offset
+    );
+    match bgm_get(&url).await {
+        Ok(data) => Json(data).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// POST /api/bgm/search  — forward body to BGM search API
+async fn bgm_proxy_search(Json(body): Json<Value>) -> impl IntoResponse {
+    let offset = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).min(50);
+    let url = format!(
+        "https://api.bgm.tv/v0/search/subjects?limit={}&offset={}",
+        limit, offset
+    );
+    let forward_body = body.get("filter").cloned().map(|filter| json!({ "sort": body.get("sort").cloned().unwrap_or(json!("heat")), "filter": filter })).unwrap_or(body.clone());
+    match bgm_post(&url, &forward_body).await {
+        Ok(data) => Json(data).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// GET /api/bgm/character?id=xxx — proxy single character details from BGM
+async fn bgm_proxy_character(
+    AxumQuery(q): AxumQuery<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let id = match q.get("id") {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id required" }))).into_response(),
+    };
+    let url = format!("https://api.bgm.tv/v0/characters/{}", id);
+    match bgm_get(&url).await {
+        Ok(data) => Json(data).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn bgm_get(url: &str) -> anyhow::Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)")
+        .build()?;
+    let resp = client.get(url).send().await?.error_for_status()?;
+    Ok(resp.json().await?)
+}
+
+async fn bgm_post(url: &str, body: &Value) -> anyhow::Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)")
+        .build()?;
+    let resp = client.post(url).json(body).send().await?.error_for_status()?;
+    Ok(resp.json().await?)
+}
+
 
 async fn get_character_image(
     State(pools): State<Arc<DbPools>>,
