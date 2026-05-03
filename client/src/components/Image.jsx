@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import axios from 'axios'
 
 /**
  * 带重试功能的图片组件
@@ -14,9 +15,10 @@ function Image({
   alt = '', 
   maxRetries = 10, 
   retryDelay = 5000, 
-  fallbackSrc = null,
+  fallbackSrc = '/assets/icon.jpg',
   onLoadSuccess,
   onLoadError,
+  className = '',
   ...props 
 }) {
   const [currentSrc, setCurrentSrc] = useState(src);
@@ -42,6 +44,51 @@ function Image({
     };
   }, [src]);
 
+  // If src points to our `/img/:id.webp` proxy, resolve it via server first.
+  // This allows the server to attempt caching; if it can't fetch within the
+  // configured time window, we fall back to direct-origin URL so the browser
+  // can try loading it (client shows placeholder meanwhile).
+  useEffect(() => {
+    const m = typeof src === 'string' ? src.match(/\/img\/(\d+)\.webp(?:\?.*)?$/) : null
+    if (!m) return
+
+    const id = m[1]
+    let cancelled = false
+
+    async function resolve() {
+      try {
+        // Avoid immediately hitting `/img/:id.webp` before the server has a chance
+        // to resolve/cache; show placeholder while we ask the server.
+        if (fallbackSrc) setCurrentSrc(fallbackSrc)
+
+        const base = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
+        const url = `${base}/api/img/resolve/${id}`
+        const res = await axios.get(url, { timeout: 1500 })
+        if (cancelled || !mountedRef.current) return
+
+        // Server returns JSON; prefer proxy url when cached, otherwise try sourceUrl.
+        const data = res.data || {}
+        if (data.cached) {
+          setCurrentSrc(data.imgUrl || src)
+        } else if (data.sourceUrl) {
+          // Show placeholder immediately, then try the origin URL directly.
+          // This matches the "server couldn't fetch within time window" UX goal.
+          setTimeout(() => {
+            if (cancelled || !mountedRef.current) return
+            setCurrentSrc(data.sourceUrl)
+          }, 0)
+        }
+      } catch {
+        // If resolve fails (server down), fall back to trying the original src.
+        // Normal retry logic will handle errors.
+        setCurrentSrc(src)
+      }
+    }
+
+    resolve()
+    return () => { cancelled = true }
+  }, [src, fallbackSrc]);
+
   const handleError = useCallback(() => {
     if (!mountedRef.current) return;
 
@@ -54,8 +101,9 @@ function Image({
         if (!mountedRef.current) return;
         setRetryCount(nextRetry);
         // 添加时间戳绕过缓存
-        const separator = src.includes('?') ? '&' : '?';
-        setCurrentSrc(`${src}${separator}_retry=${Date.now()}`);
+        const baseSrc = currentSrc || src
+        const separator = baseSrc.includes('?') ? '&' : '?';
+        setCurrentSrc(`${baseSrc}${separator}_retry=${Date.now()}`);
       }, retryDelay * nextRetry); // 指数退避
     } else {
       // 已达到最大重试次数
@@ -71,7 +119,7 @@ function Image({
         onLoadError(new Error(`Failed to load image after ${maxRetries} retries: ${src}`));
       }
     }
-  }, [src, retryCount, maxRetries, retryDelay, fallbackSrc, onLoadError]);
+  }, [src, currentSrc, retryCount, maxRetries, retryDelay, fallbackSrc, onLoadError]);
 
   const handleLoad = useCallback(() => {
     if (!mountedRef.current) return;
@@ -88,6 +136,7 @@ function Image({
       alt={alt}
       onError={handleError}
       onLoad={handleLoad}
+      className={`${className}${isLoading ? ' is-loading' : ''}${hasFailed ? ' has-failed' : ''}`.trim() || undefined}
       {...props}
     />
   );

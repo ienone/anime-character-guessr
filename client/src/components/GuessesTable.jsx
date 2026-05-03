@@ -4,7 +4,7 @@ import ModifiedTagDisplay from './ModifiedTagDisplay';
 import Image from './Image';
 import { subjectsWithExtraTags } from '../data/extra_tag_subjects';
 
-function GuessesTable({ guesses, gameSettings, answerCharacter, collapsedCount = 0, bannedTags = [], showNames = true }) {
+function GuessesTable({ guesses, answerCharacter, collapsedCount = 0, bannedTags = [], showNames = true }) {
   const [clickedExpandTags, setClickedExpandTags] = useState(new Set());
   const [externalTagMode, setExternalTagMode] = useState(false);
 

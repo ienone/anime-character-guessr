@@ -4,7 +4,7 @@ import { searchSubjects, getCharactersBySubjectId, getCharacterDetails } from '.
 import '../styles/search.css';
 import { submitGuessCharacterCount } from '../utils/db';
 
-const API_BASE_URL = import.meta.env.VITE_BGM_API_URL || 'https://api.bgm.tv';
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
 
 function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, finishInit = true }) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -187,12 +187,13 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     
     loadingState(true);
     try {
-      const response = await axios.post(
-        `${API_BASE_URL}/v0/search/characters?limit=${currentLimit}&offset=${currentOffset}`,
-        {
-          keyword: searchQuery.trim()
+      const response = await axios.get(`${SERVER_URL}/api/archive/search/characters`, {
+        params: {
+          keyword: searchQuery.trim(),
+          limit: currentLimit,
+          offset: currentOffset
         }
-      );
+      })
       
       const newResults = response.data.data.map(character => ({
         id: character.id,

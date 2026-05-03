@@ -1,5 +1,3 @@
-import { version } from "react";
-
 /**
  * 公告数据
  * 数组中第一个元素会显示在最上面（最新的公告）

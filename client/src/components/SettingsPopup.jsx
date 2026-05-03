@@ -28,7 +28,6 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
   const [indexInfo, setIndexInfo] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  const [isSearching, setIsSearching] = useState(false);
   const searchContainerRef = useRef(null);
   const [hintInputs, setHintInputs] = useState(['8','5','3']);
   const [localSettings, setLocalSettings] = useState(() => JSON.parse(JSON.stringify(gameSettings)));
@@ -154,15 +153,12 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
     
-    setIsSearching(true);
     try {
       const results = await searchSubjects(searchQuery);
       setSearchResults(results);
     } catch (error) {
       console.error('Search failed:', error);
       setSearchResults([]);
-    } finally {
-      setIsSearching(false);
     }
   };
 
@@ -224,7 +220,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
     if (isMultiplayer) {
       const keysToCommit = ['globalPick', 'tagBan', 'syncMode', 'nonstopMode'];
       keysToCommit.forEach((key) => {
-        if (localSettings.hasOwnProperty(key)) onSettingsChange(key, localSettings[key]);
+        if (Object.prototype.hasOwnProperty.call(localSettings, key)) onSettingsChange(key, localSettings[key]);
       });
     }
     // 在确认时触发重启（如果提供），并关闭弹窗

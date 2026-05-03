@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import '../styles/Roulette.css';
 import axios from 'axios';
+import Image from './Image'
 
-const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
+const serverUrl = import.meta.env.VITE_SERVER_URL || ''
 
 const Roulette = ({ defaultExpanded = false }) => {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
@@ -11,7 +12,7 @@ const Roulette = ({ defaultExpanded = false }) => {
   const [rouletteData, setRouletteData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [initialAvatarId, setInitialAvatarId] = useState(() => {
+  const [initialAvatarId] = useState(() => {
     return sessionStorage.getItem('avatarId') !== null;
   });
   const [redeemCode, setRedeemCode] = useState('');
@@ -20,7 +21,7 @@ const Roulette = ({ defaultExpanded = false }) => {
   useEffect(() => {
     if (isExpanded && rouletteData.length === 0) {
       setLoading(true);
-      axios.get(`${serverUrl}/roulette`)
+      axios.get(`${serverUrl}/api/roulette`)
         .then((res) => {
           setRouletteData(res.data);
           setLoading(false);
@@ -42,7 +43,7 @@ const Roulette = ({ defaultExpanded = false }) => {
 
     setRedeeming(true);
     try {
-      const response = await axios.get(`${serverUrl}/redeem?code=${encodeURIComponent(redeemCode.trim())}`);
+      const response = await axios.get(`${serverUrl}/api/redeem?code=${encodeURIComponent(redeemCode.trim())}`);
       
       if (response.data.avatarId && response.data.avatarImage) {
         sessionStorage.setItem('avatarId', response.data.avatarId);
@@ -122,7 +123,7 @@ const Roulette = ({ defaultExpanded = false }) => {
                       <div className="roulette-card-inner">
                         <div className="roulette-card-front" />
                         <div className="roulette-card-back">
-                          <img
+                          <Image
                             src={char.image_medium}
                             alt="avatar"
                             className="roulette-card-img"

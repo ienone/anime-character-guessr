@@ -1,5 +1,4 @@
 import { useEffect, useState, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { getRandomCharacter, getCharacterAppearances, generateFeedback } from '../utils/bangumi';
 import SearchBar from '../components/SearchBar';
 import GuessesTable from '../components/GuessesTable';
@@ -34,7 +33,6 @@ function SinglePlayer() {
   const [useImageHint, setUseImageHint] = useState(0);
   const [showFeedbackPopup, setShowFeedbackPopup] = useState(false);
   const [isGameRestarting, setIsGameRestarting] = useState(false); // 防止重复点击"再玩一次"
-  const navigate = useNavigate();
   const [gameSettings, setGameSettings] = useLocalStorage('singleplayer-game-settings', {
     startYear: new Date().getFullYear()-10,
     endYear: new Date().getFullYear(),

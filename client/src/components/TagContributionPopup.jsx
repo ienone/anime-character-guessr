@@ -1,5 +1,5 @@
 import '../styles/popups.css';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { submitCharacterTags, proposeCustomTags, submitFeedbackTags } from '../utils/db';
 import { idToTags } from '../data/id_tags.js';
 

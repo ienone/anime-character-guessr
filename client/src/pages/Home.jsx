@@ -4,8 +4,8 @@ import '../styles/Home.css';
 import WelcomePopup from '../components/WelcomePopup';
 
 const LINE_OPTIONS = [
-  { url: 'https://anime-character-guessr.netlify.app/', name: 'Netlify', apiBase: 'https://api.bgm.tv' },
-  { url: 'https://ccb.baka.website/', name: 'Baka专线', apiBase: 'https://bgmapi.baka.website' }
+  { url: 'https://anime-character-guessr.netlify.app/', name: 'Netlify' },
+  { url: 'https://ccb.baka.website/', name: 'Baka专线' }
 ];
 
 const Home = () => {
@@ -99,7 +99,9 @@ const Home = () => {
                 ) {
                   displayName = '本地部署';
                 }
-              } catch {}
+              } catch {
+                // ignore malformed URL
+              }
             }
 
             // 仅对第三线路或动态添加的线路显示为“抢先体验”（如果匹配 ccbeta.baka.website）
@@ -110,7 +112,9 @@ const Home = () => {
                 if (lineHost === 'ccbeta.baka.website' || originHost === 'ccbeta.baka.website') {
                   displayName = '抢先体验';
                 }
-              } catch {}
+              } catch {
+                // ignore malformed URL
+              }
             }
 
             return (

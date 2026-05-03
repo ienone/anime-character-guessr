@@ -21,7 +21,7 @@ import '../styles/game.css';
 import CryptoJS from 'crypto-js';
 import axios from 'axios';
 const secret = import.meta.env.VITE_AES_SECRET || 'My-Secret-Key';
-const SOCKET_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
+const SOCKET_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '');
 
 const Multiplayer = () => {
   const navigate = useNavigate();
@@ -135,7 +135,6 @@ const Multiplayer = () => {
     const statusList = syncStatus?.syncStatus || [];
     return statusList.filter((entry) => {
       const player = players.find(p => p.id === entry.id);
-      const guesses = player?.guesses || '';
       const isDisconnected = !!player?.disconnected;
       // 保留已完成的赢家在当前轮展示，下一轮已被服务器移出列表；仅隐藏断线玩家
       return !(entry.completed && isDisconnected);
@@ -489,7 +488,7 @@ const Multiplayer = () => {
       setShowSetAnswerPopup(false);
     });
 
-    newSocket.on('guessHistoryUpdate', ({ guesses, teamGuesses }) => {
+    newSocket.on('guessHistoryUpdate', ({ guesses }) => {
       setGuessesHistory(guesses);
 
       // 使用统一的辅助函数更新剩余次数
