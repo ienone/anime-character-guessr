@@ -392,7 +392,7 @@ fn assemble_payload(
         "highestRating": if highest_rating < 0.0 { json!(-1) } else { json!(highest_rating) },
         "metaTags": meta_tags_out,
         "rawTags": raw_tags_out,
-        "animeVAs": [],  // VA info not in archive.sqlite currently
+        "animeVAs": [],  // Filled by server-side VA cache when available
     });
 
     Ok(response)

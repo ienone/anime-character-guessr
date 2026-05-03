@@ -777,6 +777,21 @@ fn init_app_schema(conn: &Connection) -> anyhow::Result<()> {
             local_path TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        -- Persisted mirror cache for character image source URLs (from legacy JSON or BGM API fallback).
+        CREATE TABLE IF NOT EXISTS character_image_sources (
+            character_id INTEGER PRIMARY KEY,
+            image_medium TEXT NOT NULL DEFAULT '',
+            image_grid TEXT NOT NULL DEFAULT '',
+            fetched_at_ms INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT '' -- e.g. 'json' | 'bgm'
+        );
+        -- Persisted mirror cache for character voice actors (animeVAs), stored as JSON array of names.
+        CREATE TABLE IF NOT EXISTS character_vas (
+            character_id INTEGER PRIMARY KEY,
+            va_names_json TEXT NOT NULL DEFAULT '[]',
+            fetched_at_ms INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT '' -- e.g. 'dump' | 'bgm'
+        );
         CREATE TABLE IF NOT EXISTS leaderboard (
             user_id TEXT PRIMARY KEY,
             username TEXT NOT NULL DEFAULT '',

@@ -235,7 +235,15 @@ async fn get_random_character(
     }).await;
 
     match result {
-        Ok(Ok((_, payload))) => Json(payload).into_response(),
+        Ok(Ok((char_id, mut payload))) => {
+            // Fill animeVAs via persisted mirror cache; BGM is used only as fallback and then stored in app.sqlite.
+            if let Some(vas) = ensure_vas_cached(&pools, char_id).await {
+                if let Value::Object(ref mut obj) = payload {
+                    obj.insert("animeVAs".to_string(), Value::Array(vas.into_iter().map(Value::String).collect()));
+                }
+            }
+            Json(payload).into_response()
+        }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
@@ -259,7 +267,14 @@ async fn get_character_by_id(
     }).await;
 
     match result {
-        Ok(Ok(payload)) => Json(payload).into_response(),
+        Ok(Ok(mut payload)) => {
+            if let Some(vas) = ensure_vas_cached(&pools, char_id).await {
+                if let Value::Object(ref mut obj) = payload {
+                    obj.insert("animeVAs".to_string(), Value::Array(vas.into_iter().map(Value::String).collect()));
+                }
+            }
+            Json(payload).into_response()
+        }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
@@ -362,6 +377,204 @@ async fn bgm_get(url: &str) -> anyhow::Result<Value> {
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("bgm_get failed")))
 }
 
+async fn bgm_get_character(id: i64) -> anyhow::Result<Value> {
+    let url = format!("https://api.bgm.tv/v0/characters/{}", id);
+    bgm_get(&url).await
+}
+
+async fn bgm_get_character_persons(id: i64) -> anyhow::Result<Value> {
+    let url = format!("https://api.bgm.tv/v0/characters/{}/persons", id);
+    bgm_get(&url).await
+}
+
+async fn load_cached_image_source(
+    pools: &Arc<DbPools>,
+    id: i64,
+) -> Option<(String, String)> {
+    let id2 = id;
+    let row = db::with_app_db(Arc::clone(pools), move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT image_medium, image_grid FROM character_image_sources WHERE character_id = ?1",
+        )?;
+        let r = stmt
+            .query_row([id2], |row| {
+                Ok((
+                    row.get::<_, String>(0).unwrap_or_default(),
+                    row.get::<_, String>(1).unwrap_or_default(),
+                ))
+            })
+            .ok();
+        Ok(r)
+    })
+    .await
+    .ok()
+    .flatten();
+
+    row.and_then(|(m, g)| {
+        let m2 = m.trim().to_string();
+        let g2 = g.trim().to_string();
+        if m2.is_empty() && g2.is_empty() {
+            None
+        } else {
+            Some((m2, g2))
+        }
+    })
+}
+
+async fn save_cached_image_source(
+    pools: &Arc<DbPools>,
+    id: i64,
+    image_medium: String,
+    image_grid: String,
+    source: &str,
+) {
+    let fetched_at_ms = chrono::Utc::now().timestamp_millis();
+    let src = source.to_string();
+    let m = image_medium;
+    let g = image_grid;
+    let _ = db::with_app_db(Arc::clone(pools), move |conn| {
+        conn.execute(
+            "INSERT INTO character_image_sources (character_id, image_medium, image_grid, fetched_at_ms, source)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(character_id) DO UPDATE SET
+               image_medium=excluded.image_medium,
+               image_grid=excluded.image_grid,
+               fetched_at_ms=excluded.fetched_at_ms,
+               source=excluded.source",
+            rusqlite::params![id, m, g, fetched_at_ms, src],
+        )?;
+        Ok(())
+    })
+    .await;
+}
+
+async fn load_cached_vas(pools: &Arc<DbPools>, id: i64) -> Option<Vec<String>> {
+    let id2 = id;
+    let json_opt = db::with_app_db(Arc::clone(pools), move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT va_names_json FROM character_vas WHERE character_id = ?1",
+                [id2],
+                |row| row.get::<_, String>(0),
+            )
+            .ok())
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let json = json_opt?;
+    serde_json::from_str::<Vec<String>>(&json).ok().filter(|v| !v.is_empty())
+}
+
+async fn save_cached_vas(pools: &Arc<DbPools>, id: i64, names: Vec<String>, source: &str) {
+    let fetched_at_ms = chrono::Utc::now().timestamp_millis();
+    let src = source.to_string();
+    let json = serde_json::to_string(&names).unwrap_or("[]".to_string());
+    let _ = db::with_app_db(Arc::clone(pools), move |conn| {
+        conn.execute(
+            "INSERT INTO character_vas (character_id, va_names_json, fetched_at_ms, source)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(character_id) DO UPDATE SET
+               va_names_json=excluded.va_names_json,
+               fetched_at_ms=excluded.fetched_at_ms,
+               source=excluded.source",
+            rusqlite::params![id, json, fetched_at_ms, src],
+        )?;
+        Ok(())
+    })
+    .await;
+}
+
+fn extract_images_from_bgm_character(raw: &Value) -> (String, String) {
+    let imgs = raw.get("images").and_then(|v| v.as_object());
+    let get = |k: &str| imgs.and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let medium = {
+        let m = get("medium");
+        if !m.is_empty() { m } else { get("large") }
+    };
+    let grid = {
+        let g = get("grid");
+        if !g.is_empty() { g } else { medium.clone() }
+    };
+    (medium, grid)
+}
+
+fn extract_vas_from_bgm_persons(raw: &Value) -> Vec<String> {
+    let arr = raw.as_array().cloned().unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in arr {
+        // old frontend behavior: filter subject_type 2 or 4
+        let ok_type = item
+            .get("subject_type")
+            .and_then(|v| v.as_i64())
+            .map(|t| t == 2 || t == 4)
+            .unwrap_or(true);
+        if !ok_type {
+            continue;
+        }
+        if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+            let n = name.trim().to_string();
+            if n.is_empty() {
+                continue;
+            }
+            if seen.insert(n.clone()) {
+                out.push(n);
+            }
+        }
+        if out.len() >= 12 {
+            break;
+        }
+    }
+    out
+}
+
+async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(String, String)> {
+    // 1) app.sqlite cache
+    if let Some((m, g)) = load_cached_image_source(pools, id).await {
+        return Some((m, g));
+    }
+
+    // 2) offline JSON index (legacy) -> persist into app.sqlite
+    if let Some(&idx) = pools.character_image_index.by_id.get(&id) {
+        let entry = &pools.character_image_index.list[idx];
+        let m = entry.image_medium.first().cloned().unwrap_or_default();
+        let g = entry.image_grid.first().cloned().unwrap_or_default();
+        if !m.trim().is_empty() || !g.trim().is_empty() {
+            save_cached_image_source(pools, id, m.clone(), g.clone(), "json").await;
+            return Some((m, g));
+        }
+    }
+
+    // 3) BGM API fallback -> persist
+    if let Ok(raw) = bgm_get_character(id).await {
+        let (m, g) = extract_images_from_bgm_character(&raw);
+        if !m.trim().is_empty() || !g.trim().is_empty() {
+            save_cached_image_source(pools, id, m.clone(), g.clone(), "bgm").await;
+            return Some((m, g));
+        }
+    }
+
+    None
+}
+
+async fn ensure_vas_cached(pools: &Arc<DbPools>, id: i64) -> Option<Vec<String>> {
+    if let Some(v) = load_cached_vas(pools, id).await {
+        return Some(v);
+    }
+
+    if let Ok(raw) = bgm_get_character_persons(id).await {
+        let names = extract_vas_from_bgm_persons(&raw);
+        if !names.is_empty() {
+            save_cached_vas(pools, id, names.clone(), "bgm").await;
+            return Some(names);
+        }
+    }
+
+    None
+}
+
 async fn get_character_image(
     State(pools): State<Arc<DbPools>>,
     Path(id_str): Path<String>,
@@ -397,51 +610,15 @@ async fn get_character_image(
         }
     }
 
-    // 2. Cache miss — fetch original URL from archive.sqlite (if present)
-    let original_url: Option<String> = match db::with_archive_db(Arc::clone(&pools), move |conn| {
-        let raw: Option<String> = conn
-            .query_row(
-                "SELECT raw_json FROM characters WHERE id = ?1",
-                [id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok();
-
-        let url = raw.and_then(|raw| {
-            serde_json::from_str::<Value>(&raw).ok().and_then(|val| {
-                val.get("images").and_then(|imgs| {
-                    imgs.get("large")
-                        .or_else(|| imgs.get("medium"))
-                        .or_else(|| imgs.get("grid"))
-                        .and_then(|u| u.as_str().map(|s| s.to_string()))
-                })
-            })
-        });
-        Ok(url)
-    })
-    .await
-    {
-        Ok(v) => v,
-        Err(_) => None,
+    // 2. Cache miss — resolve source URL (app.sqlite mirror -> legacy json -> BGM API fallback).
+    let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools, id).await else {
+        return StatusCode::NOT_FOUND.into_response();
     };
 
-    // 2.1 Fallback: use offline character_images.json mapping (preferred).
-    // If we still can't resolve any URL, return 404 (per requirement).
-    let mut resolved_url: Option<String> = original_url.filter(|u| !u.trim().is_empty());
-    if resolved_url.is_none() {
-        if let Some(&idx) = pools.character_image_index.by_id.get(&id) {
-            let entry = &pools.character_image_index.list[idx];
-            resolved_url = entry
-                .image_medium
-                .first()
-                .or_else(|| entry.image_grid.first())
-                .cloned()
-                .filter(|u| !u.trim().is_empty());
-        }
-    }
-
-    let Some(target_url) = resolved_url else {
-        return StatusCode::NOT_FOUND.into_response();
+    let target_url = if !image_medium.trim().is_empty() {
+        image_medium
+    } else {
+        image_grid
     };
 
     // 3. Download+transcode in background, but try to serve within a short time window
