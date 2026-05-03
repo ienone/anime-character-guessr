@@ -1,36 +1,61 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, response::IntoResponse, Json};
 use serde_json::json;
 use std::sync::Arc;
-use rand::prelude::IndexedRandom;
-use crate::db::DbPools;
+
+use crate::db::{self, DbPools};
 
 /// GET /api/roulette
-/// Returns 10 random characters with image URLs from archive.sqlite.
-/// Mirrors Node.js /roulette endpoint used for the character roulette animation.
+///
+/// Returns 10 random characters for the avatar roulette.
+/// We intentionally serve images through our `/img/:id.webp` proxy.
 pub async fn roulette(State(pools): State<Arc<DbPools>>) -> impl IntoResponse {
-    if pools.character_image_index.list.len() < 10 {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "Not enough character images" })),
-        ).into_response();
-    }
+    // Sample from existing image sources in app.sqlite so we don't return dead avatars.
+    let result = db::with_app_db(Arc::clone(&pools), move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT character_id, source
+             FROM character_image_sources
+             WHERE (image_medium != '' OR image_grid != '')
+             ORDER BY RANDOM()
+             LIMIT 10",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1).unwrap_or_default(),
+            ))
+        })?;
+        let mut out: Vec<(i64, String)> = Vec::new();
+        for r in rows {
+            if let Ok(v) = r {
+                out.push(v);
+            }
+        }
+        Ok(out)
+    })
+    .await;
 
-    // Same behavior as Node: sample 10 unique entries; pick one random URL from each list.
-    let mut rng = rand::rng();
-    let selected = pools
-        .character_image_index
-        .list
-        .sample(&mut rng, 10)
-        .map(|c| {
+    let list = match result {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(json!({ "error": e.to_string() })).into_response();
+        }
+    };
+
+    // Soft fallback: if app.sqlite doesn't have enough entries yet, we still return what we have.
+    // Client can handle fewer, but ideally migrate-app should fill >= 10.
+    let selected = list
+        .into_iter()
+        .map(|(id, source)| {
             json!({
-                "id": c.id,
-                "tier": c.tier,
-                // Serve through our image proxy so the client never needs to hit external URLs.
-                "image_medium": format!("/img/{}.webp", c.id),
-                "image_grid": format!("/img/{}.webp", c.id),
+                "id": id,
+                // No more JSON tiers; keep client styling stable with a neutral tier.
+                "tier": if source == "json" || source == "jsonl" { "A" } else { "B" },
+                "image_medium": format!("/img/{}.webp", id),
+                "image_grid": format!("/img/{}.webp", id),
             })
         })
         .collect::<Vec<_>>();
 
     Json(selected).into_response()
 }
+

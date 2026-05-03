@@ -46,7 +46,6 @@ services:
       - ARCHIVE_DB_PATH=/data/archive.sqlite
       - APP_DB_PATH=/data/app.sqlite
       - IMAGE_CACHE_DIR=/data/images
-      - CHARACTER_IMAGES_PATH=/app/assets/character_images.json
       # CORS allowed origin (must match the frontend URL)
       - CLIENT_URL=${DOMAIN_NAME:-http://localhost}
     volumes:

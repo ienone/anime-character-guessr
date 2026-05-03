@@ -43,7 +43,8 @@ WORKDIR /app
 # Copy the static binary
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/server-rs ./server-rs
 
-# Offline character image mapping (used by /img/:id and /api/roulette)
+# (optional) assets folder kept for backwards-compat, but server no longer
+# depends on character_images.json at runtime.
 COPY assets ./assets
 
 # Runtime data directories (SQLite files are mounted via Docker volumes)
@@ -56,7 +57,6 @@ EXPOSE 3001
 ENV PORT=3001 \
     ARCHIVE_DB_PATH=/data/archive.sqlite \
     APP_DB_PATH=/data/app.sqlite \
-    IMAGE_CACHE_DIR=/data/images \
-    CHARACTER_IMAGES_PATH=/app/assets/character_images.json
+    IMAGE_CACHE_DIR=/data/images
 
 ENTRYPOINT ["./server-rs"]

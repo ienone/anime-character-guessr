@@ -5,8 +5,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::sync::Arc;
 use std::collections::HashMap;
-use serde_json::{json, Value};
-use serde::Deserialize;
+use serde_json::Value;
 use std::collections::{HashSet};
 use jieba_rs::Jieba;
 use pinyin::ToPinyin;
@@ -65,7 +64,6 @@ pub struct SubjectDoc {
     pub collects: i64,
     pub name: String,
     pub name_cn: String,
-    pub images: Value,
 }
 
 pub struct SubjectSearchIndex {
@@ -226,25 +224,6 @@ fn to_pinyin_full_and_initials(s: &str) -> (String, String) {
     (full, initials)
 }
 
-// ─── Offline character image URL mapping ─────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CharacterImageEntry {
-    pub id: i64,
-    #[serde(default)]
-    pub tier: String,
-    #[serde(default)]
-    pub image_grid: Vec<String>,
-    #[serde(default)]
-    pub image_medium: Vec<String>,
-}
-
-pub struct CharacterImageIndex {
-    pub list: Vec<CharacterImageEntry>,
-    /// id -> index into `list`
-    pub by_id: HashMap<i64, usize>,
-}
-
 // ─── Offline character search index (segmentation + pinyin) ─────────────────
 
 #[derive(Clone)]
@@ -325,8 +304,6 @@ pub struct DbPools {
     pub character_cache: Arc<CharacterCache>,
     /// Directory for locally cached/transcoded character images.
     pub image_cache_dir: String,
-    /// Offline image URL mapping loaded from JSON.
-    pub character_image_index: Arc<CharacterImageIndex>,
     /// Offline subject search index (segmentation + pinyin).
     pub subject_search_index: Arc<SubjectSearchIndex>,
     /// Offline character search index (segmentation + pinyin).
@@ -380,15 +357,12 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
     let subject_search_index = Arc::new(build_subject_search_index(&archive_conn)?);
     let character_search_index = Arc::new(build_character_search_index(&archive_conn)?);
 
-    let character_image_index = Arc::new(load_character_image_index(&config.character_images_path)?);
-
     tracing::info!(
-        "Cache ready in {:.2}s — {} chars, {} candidate entries, {} subject rows cached, {} image mappings",
+        "Cache ready in {:.2}s — {} chars, {} candidate entries, {} subject rows cached",
         t0.elapsed().as_secs_f64(),
         character_cache.char_json.len(),
         candidate_index.all.len(),
         character_cache.char_subjects.values().map(|v| v.len()).sum::<usize>(),
-        character_image_index.list.len(),
     );
 
     Ok(Arc::new(DbPools {
@@ -397,7 +371,6 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
         candidate_index,
         character_cache,
         image_cache_dir: config.image_cache_dir.clone(),
-        character_image_index,
         subject_search_index,
         character_search_index,
     }))
@@ -436,10 +409,9 @@ fn build_subject_search_index(conn: &Connection) -> anyhow::Result<SubjectSearch
         };
         let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let name_cn = v.get("name_cn").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let images = v.get("images").cloned().unwrap_or(json!({}));
 
         let idx = docs.len();
-        docs.push(SubjectDoc { id, stype, date, collects, name: name.clone(), name_cn: name_cn.clone(), images });
+        docs.push(SubjectDoc { id, stype, date, collects, name: name.clone(), name_cn: name_cn.clone() });
         by_id.insert(id, idx);
 
         let mut tokens = HashSet::<String>::new();
@@ -727,20 +699,6 @@ fn build_character_cache(conn: &Connection) -> anyhow::Result<CharacterCache> {
     Ok(CharacterCache { char_json, char_subjects })
 }
 
-fn load_character_image_index(path: &str) -> anyhow::Result<CharacterImageIndex> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read CHARACTER_IMAGES_PATH at {}", path))?;
-    let list: Vec<CharacterImageEntry> = serde_json::from_str(&text)
-        .with_context(|| format!("Failed to parse character images JSON at {}", path))?;
-
-    let mut by_id: HashMap<i64, usize> = HashMap::with_capacity(list.len());
-    for (idx, entry) in list.iter().enumerate() {
-        by_id.insert(entry.id, idx);
-    }
-
-    Ok(CharacterImageIndex { list, by_id })
-}
-
 pub async fn with_archive_db<T, F>(pools: Arc<DbPools>, f: F) -> anyhow::Result<T>
 where
     T: Send + 'static,
@@ -784,6 +742,14 @@ fn init_app_schema(conn: &Connection) -> anyhow::Result<()> {
             image_grid TEXT NOT NULL DEFAULT '',
             fetched_at_ms INTEGER NOT NULL DEFAULT 0,
             source TEXT NOT NULL DEFAULT '' -- e.g. 'json' | 'bgm'
+        );
+        -- Persisted mirror cache for subject (anime/game) image source URLs from BGM API fallback.
+        CREATE TABLE IF NOT EXISTS subject_image_sources (
+            subject_id INTEGER PRIMARY KEY,
+            image_medium TEXT NOT NULL DEFAULT '',
+            image_grid TEXT NOT NULL DEFAULT '',
+            fetched_at_ms INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT '' -- e.g. 'bgm_image' | 'bgm'
         );
         -- Persisted mirror cache for character voice actors (animeVAs), stored as JSON array of names.
         CREATE TABLE IF NOT EXISTS character_vas (

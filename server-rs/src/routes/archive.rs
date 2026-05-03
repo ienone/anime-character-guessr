@@ -86,9 +86,6 @@ async fn get_subject_characters(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid id" }))).into_response();
     }
 
-    let image_index = Arc::clone(&pools.character_image_index);
-    let image_index_for_db = Arc::clone(&image_index);
-
     let result = db::with_archive_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare(
             "SELECT sc.character_id, sc.type, c.raw_json
@@ -112,22 +109,20 @@ async fn get_subject_characters(
                 Err(_) => continue,
             };
 
-            // Skip characters missing from our in-memory image index; these are very likely
-            // to have no usable image and lead to bad UX in the game flow.
-            if !image_index_for_db.by_id.contains_key(&cid) {
-                continue;
-            }
-
             let v: Value = match serde_json::from_str(&raw) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
             let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let relation = if role == 1 { "主角" } else { "配角" };
+            // Always serve images through our proxy (/img/:id.webp).
+            // Frontend reads `character.images?.grid` for the dropdown thumbnail.
+            let img_url = format!("/img/{}.webp", cid);
             out.push(json!({
                 "id": cid,
                 "relation": relation,
                 "name": name,
+                "images": { "grid": img_url, "medium": img_url },
             }));
         }
 
@@ -150,17 +145,7 @@ async fn get_subject_characters(
             let url = format!("https://api.bgm.tv/v0/subjects/{}/characters", subject_id);
             match super::bgm_get(&url).await {
                 Ok(raw) => {
-                    // Filter out characters we don't have offline image mappings for.
-                    let filtered = raw.as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|item| {
-                            let cid = item.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-                            cid > 0 && image_index.by_id.contains_key(&cid)
-                        })
-                        .collect::<Vec<_>>();
-                    let out = Value::Array(filtered);
+                    let out = Value::Array(raw.as_array().cloned().unwrap_or_default());
                     super::cache_put_ttl(&super::SUBJECT_CHARACTERS_CACHE, cache_key, 10 * 60 * 1000, out.clone());
                     Json(out).into_response()
                 }
@@ -313,13 +298,16 @@ async fn search_subjects(
         .search(&keyword, &types, limit)
         .into_iter()
         .map(|doc| {
+            // Always serve through our subject image proxy. BGM offline dump has
+            // no image URLs for subjects; the proxy resolves + caches lazily.
+            let img_url = format!("/img/subject/{}.webp", doc.id);
             json!({
                 "id": doc.id,
                 "type": doc.stype,
                 "date": doc.date,
                 "name": doc.name,
                 "name_cn": doc.name_cn,
-                "images": doc.images,
+                "images": { "grid": img_url, "medium": img_url, "common": img_url },
             })
         })
         .collect::<Vec<_>>();
@@ -355,7 +343,6 @@ async fn search_characters(
         .character_search_index
         .search(&keyword, offset, limit)
         .into_iter()
-        .filter(|doc| pools.character_image_index.by_id.contains_key(&doc.id))
         .map(|doc| {
             // Parse common display fields from archive infobox text.
             let (name_cn, name_en_any, image, _image_grid, gender, _summary, popularity) =

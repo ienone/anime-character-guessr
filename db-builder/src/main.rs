@@ -7,28 +7,41 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
+use chrono;
 
 const DEFAULT_DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
 const DEFAULT_DB_PATH: &str = "../archive.sqlite";
+const DEFAULT_APP_DB_PATH: &str = "../server-rs/data/app.sqlite";
+const DEFAULT_IMAGES_JSON_PATH: &str = "../server-rs/assets/character_images.json";
 
 #[derive(Debug, Clone)]
 struct Args {
     dump_dir: PathBuf,
     out_db: PathBuf,
+    app_db: PathBuf,
+    images_path: PathBuf,
+    mode: String, // build-archive | migrate-app
 }
 
 fn parse_args() -> Result<Args> {
     let mut dump_dir: Option<PathBuf> = None;
     let mut out_db: Option<PathBuf> = None;
+    let mut app_db: Option<PathBuf> = None;
+    let mut images_path: Option<PathBuf> = None;
+    let mut mode: Option<String> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "db-builder\n\nUSAGE:\n  db-builder [--dump-dir <path>] [--out <path>]\n\nOPTIONS:\n  -d, --dump-dir <path>   Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>        Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  -h, --help              Print help\n"
+                    "db-builder\n\nUSAGE:\n  db-builder [--mode <build-archive|migrate-app>] [--dump-dir <path>] [--out <path>] [--app-db <path>] [--images-path <path>]\n\nMODES:\n  build-archive  Build trimmed archive.sqlite from dump (default)\n  migrate-app    Populate app.sqlite caches (image sources + VAs) from dump/assets\n\nOPTIONS:\n  -m, --mode <mode>         build-archive | migrate-app (default: build-archive)\n  -d, --dump-dir <path>     Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>          Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  --app-db <path>           app.sqlite path (default: {DEFAULT_APP_DB_PATH})\n  --images-path <path>      character_images.json/.jsonl path (default: {DEFAULT_IMAGES_JSON_PATH})\n  -h, --help                Print help\n"
                 );
                 std::process::exit(0);
+            }
+            "-m" | "--mode" => {
+                let v = it.next().context("--mode requires a value")?;
+                mode = Some(v);
             }
             "-d" | "--dump-dir" => {
                 let v = it
@@ -39,6 +52,19 @@ fn parse_args() -> Result<Args> {
             "-o" | "--out" => {
                 let v = it.next().context("--out requires a value")?;
                 out_db = Some(PathBuf::from(v));
+            }
+            "--app-db" => {
+                let v = it.next().context("--app-db requires a value")?;
+                app_db = Some(PathBuf::from(v));
+            }
+            "--images-path" => {
+                let v = it.next().context("--images-path requires a value")?;
+                images_path = Some(PathBuf::from(v));
+            }
+            // Backwards-compat
+            "--images-json" => {
+                let v = it.next().context("--images-json requires a value")?;
+                images_path = Some(PathBuf::from(v));
             }
             _ if arg.starts_with('-') => {
                 anyhow::bail!("Unknown option: {arg}")
@@ -59,48 +85,271 @@ fn parse_args() -> Result<Args> {
     Ok(Args {
         dump_dir: dump_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DUMP_DIR)),
         out_db: out_db.unwrap_or_else(|| PathBuf::from(DEFAULT_DB_PATH)),
+        app_db: app_db.unwrap_or_else(|| PathBuf::from(DEFAULT_APP_DB_PATH)),
+        images_path: images_path.unwrap_or_else(|| PathBuf::from(DEFAULT_IMAGES_JSON_PATH)),
+        mode: mode.unwrap_or_else(|| "build-archive".to_string()),
     })
 }
 
 fn main() -> Result<()> {
     let start_time = Instant::now();
-    println!("开始离线构建精简版 archive.sqlite...");
-
     let args = parse_args()?;
-    println!("dump_dir: {}", args.dump_dir.display());
-    println!("out_db: {}", args.out_db.display());
 
-    let mut db = Connection::open(&args.out_db)?;
-    init_db(&mut db)?;
+    match args.mode.as_str() {
+        "build-archive" => {
+            println!("开始离线构建精简版 archive.sqlite...");
+            println!("dump_dir: {}", args.dump_dir.display());
+            println!("out_db: {}", args.out_db.display());
 
-    // ==========================================
-    // 第一层漏斗：过滤作品 (Subject)
-    // ==========================================
-    println!("Step 1: 扫描并过滤 subject.jsonlines...");
-    let valid_subjects = process_subjects(&mut db, &args.dump_dir)?;
-    println!("已保留热门动漫/游戏作品数: {}", valid_subjects.len());
+            let mut db = Connection::open(&args.out_db)?;
+            init_db(&mut db)?;
 
-    // ==========================================
-    // 第二层漏斗：过滤关联映射 (Subject-Characters)
-    // ==========================================
-    println!("\nStep 2: 扫描 subject-characters.jsonlines...");
-    let valid_chars = process_relations(&mut db, &args.dump_dir, &valid_subjects)?;
-    println!("符合条件的核心角色 (主角/配角) 且属于热门作品的集合数: {}", valid_chars.len());
+            // ==========================================
+            // 第一层漏斗：过滤作品 (Subject)
+            // ==========================================
+            println!("Step 1: 扫描并过滤 subject.jsonlines...");
+            let valid_subjects = process_subjects(&mut db, &args.dump_dir)?;
+            println!("已保留热门动漫/游戏作品数: {}", valid_subjects.len());
 
-    // ==========================================
-    // 第三层漏斗：过滤角色详细信息 (Character)
-    // ==========================================
-    println!("\nStep 3: 扫描并过滤 character.jsonlines...");
-    process_characters(&mut db, &args.dump_dir, &valid_chars)?;
+            // ==========================================
+            // 第二层漏斗：过滤关联映射 (Subject-Characters)
+            // ==========================================
+            println!("\nStep 2: 扫描 subject-characters.jsonlines...");
+            let valid_chars = process_relations(&mut db, &args.dump_dir, &valid_subjects)?;
+            println!("符合条件的核心角色 (主角/配角) 且属于热门作品的集合数: {}", valid_chars.len());
 
-    // ==========================================
-    // 清理与优化
-    // ==========================================
-    println!("\n执行 SQLite 空间优化与索引构建...");
-    db.execute_batch("VACUUM; OPTIMIZE;")?;
+            // ==========================================
+            // 第三层漏斗：过滤角色详细信息 (Character)
+            // ==========================================
+            println!("\nStep 3: 扫描并过滤 character.jsonlines...");
+            process_characters(&mut db, &args.dump_dir, &valid_chars)?;
 
-    println!("构建完成！耗时: {:.2?}", start_time.elapsed());
+            // ==========================================
+            // 清理与优化
+            // ==========================================
+            println!("\n执行 SQLite 空间优化与索引构建...");
+            db.execute_batch("VACUUM; OPTIMIZE;")?;
+
+            println!("构建完成！耗时: {:.2?}", start_time.elapsed());
+        }
+        "migrate-app" => {
+            println!("开始迁移 app.sqlite 缓存数据（图片源 + 声优）...");
+            println!("dump_dir: {}", args.dump_dir.display());
+            println!("archive_db: {}", args.out_db.display());
+            println!("app_db: {}", args.app_db.display());
+            println!("images_path: {}", args.images_path.display());
+
+            migrate_app_db(&args.dump_dir, &args.out_db, &args.app_db, &args.images_path)?;
+            println!("迁移完成！耗时: {:.2?}", start_time.elapsed());
+        }
+        other => anyhow::bail!("Unknown mode: {other}"),
+    }
+
     Ok(())
+}
+
+fn ensure_app_schema(app: &Connection) -> Result<()> {
+    app.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS character_image_sources (
+            character_id INTEGER PRIMARY KEY,
+            image_medium TEXT NOT NULL DEFAULT '',
+            image_grid TEXT NOT NULL DEFAULT '',
+            fetched_at_ms INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS character_vas (
+            character_id INTEGER PRIMARY KEY,
+            va_names_json TEXT NOT NULL DEFAULT '[]',
+            fetched_at_ms INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT ''
+        );
+        "
+    )?;
+    Ok(())
+}
+
+fn migrate_app_db(dump_dir: &Path, archive_db_path: &Path, app_db_path: &Path, images_json_path: &Path) -> Result<()> {
+    // Load valid subject/character sets from archive.sqlite so we only cache within game scope.
+    let archive = Connection::open(archive_db_path)?;
+    let mut stmt = archive.prepare("SELECT id FROM subjects")?;
+    let valid_subjects: HashSet<i64> = stmt.query_map([], |row| row.get::<_, i64>(0))?.filter_map(Result::ok).collect();
+    let mut stmt2 = archive.prepare("SELECT id FROM characters")?;
+    let valid_chars: HashSet<i64> = stmt2.query_map([], |row| row.get::<_, i64>(0))?.filter_map(Result::ok).collect();
+    println!("valid subjects: {}, valid chars: {}", valid_subjects.len(), valid_chars.len());
+
+    let mut app = Connection::open(app_db_path)?;
+    ensure_app_schema(&app)?;
+
+    // ── 1) Import character image mapping into character_image_sources ──
+    // Supports either:
+    //  - JSON array:    [{ id, image_medium: [..], image_grid: [..], ... }, ...]
+    //  - JSONL:         one JSON object per line (same schema)
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let imported_imgs = import_character_image_sources(&mut app, images_json_path, &valid_chars, now_ms)?;
+    println!("imported image sources: {}", imported_imgs);
+
+    // ── 2) Build character_vas from dump (person + person-characters) ──
+    // Load seiyu person id -> name
+    let mut seiyu_names: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    {
+        let file = File::open(dump_dir.join("person.jsonlines"))
+            .with_context(|| format!("failed to open {}", dump_dir.join("person.jsonlines").display()))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() { continue; }
+            let v: Value = serde_json::from_str(&line)?;
+            let id = v["id"].as_i64().unwrap_or(0);
+            if id == 0 { continue; }
+            let careers = v.get("career").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            let is_seiyu = careers.iter().any(|c| c.as_str() == Some("seiyu"));
+            if !is_seiyu { continue; }
+            let name = v["name"].as_str().unwrap_or("").trim().to_string();
+            if name.is_empty() { continue; }
+            seiyu_names.insert(id, name);
+        }
+    }
+    println!("seiyu persons: {}", seiyu_names.len());
+
+    let mut va_by_char: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    {
+        let file = File::open(dump_dir.join("person-characters.jsonlines"))
+            .with_context(|| format!("failed to open {}", dump_dir.join("person-characters.jsonlines").display()))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() { continue; }
+            let v: Value = serde_json::from_str(&line)?;
+            // type==0 is the dominant mapping (voice actor)
+            if v["type"].as_i64().unwrap_or(-1) != 0 { continue; }
+            let subject_id = v["subject_id"].as_i64().unwrap_or(0);
+            let character_id = v["character_id"].as_i64().unwrap_or(0);
+            let person_id = v["person_id"].as_i64().unwrap_or(0);
+            if subject_id == 0 || character_id == 0 || person_id == 0 { continue; }
+            if !valid_subjects.contains(&subject_id) { continue; }
+            if !valid_chars.contains(&character_id) { continue; }
+            let Some(name) = seiyu_names.get(&person_id) else { continue; };
+
+            let entry = va_by_char.entry(character_id).or_insert_with(Vec::new);
+            if entry.len() >= 8 { continue; }
+            if !entry.iter().any(|n| n == name) {
+                entry.push(name.clone());
+            }
+        }
+    }
+    println!("chars with va: {}", va_by_char.len());
+
+    {
+        let tx2 = app.transaction()?;
+        let mut va_stmt = tx2.prepare(
+            "INSERT INTO character_vas (character_id, va_names_json, fetched_at_ms, source)\n\
+             VALUES (?1, ?2, ?3, 'dump')\n\
+             ON CONFLICT(character_id) DO UPDATE SET\n\
+               va_names_json=excluded.va_names_json,\n\
+               fetched_at_ms=excluded.fetched_at_ms,\n\
+               source=excluded.source"
+        )?;
+        let mut written_vas = 0;
+        for (cid, names) in va_by_char {
+            let json = serde_json::to_string(&names).unwrap_or("[]".to_string());
+            va_stmt.execute((cid, json, now_ms))?;
+            written_vas += 1;
+        }
+        drop(va_stmt);
+        tx2.commit()?;
+        println!("written character_vas rows: {}", written_vas);
+    }
+
+    // Final coverage summary
+    let img_cnt: i64 = app.query_row("SELECT COUNT(1) FROM character_image_sources", [], |r| r.get(0))?;
+    let va_cnt: i64 = app.query_row("SELECT COUNT(1) FROM character_vas", [], |r| r.get(0))?;
+    println!("app.sqlite totals: image_sources={} vas={}", img_cnt, va_cnt);
+
+    Ok(())
+}
+
+fn import_character_image_sources(
+    app: &mut Connection,
+    images_path: &Path,
+    valid_chars: &HashSet<i64>,
+    now_ms: i64,
+) -> Result<i64> {
+    let ext = images_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let tx = app.transaction()?;
+    let mut img_stmt = tx.prepare(
+        "INSERT INTO character_image_sources (character_id, image_medium, image_grid, fetched_at_ms, source)\n\
+         VALUES (?1, ?2, ?3, ?4, ?5)\n\
+         ON CONFLICT(character_id) DO UPDATE SET\n\
+           image_medium=excluded.image_medium,\n\
+           image_grid=excluded.image_grid,\n\
+           fetched_at_ms=excluded.fetched_at_ms,\n\
+           source=excluded.source",
+    )?;
+
+    let mut imported: i64 = 0;
+
+    // Helper: write one entry
+    let mut write_item = |item: Value, source: &str| -> Result<()> {
+        let Some(id) = item.get("id").and_then(|x| x.as_i64()) else { return Ok(()); };
+        if !valid_chars.contains(&id) {
+            return Ok(());
+        }
+
+        let first_str = |v: Option<&Value>| -> String {
+            v.and_then(|x| x.as_array())
+                .and_then(|a| a.first())
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+
+        let medium = first_str(item.get("image_medium"));
+        let grid = first_str(item.get("image_grid"));
+
+        if medium.is_empty() && grid.is_empty() {
+            return Ok(());
+        }
+
+        img_stmt.execute((id, medium, grid, now_ms, source))?;
+        imported += 1;
+        Ok(())
+    };
+
+    if ext == "jsonl" {
+        let file = File::open(images_path)
+            .with_context(|| format!("failed to open images jsonl at {}", images_path.display()))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(t)
+                .with_context(|| format!("failed to parse images jsonl line for {}", images_path.display()))?;
+            write_item(v, "jsonl")?;
+        }
+    } else {
+        let text = std::fs::read_to_string(images_path)
+            .with_context(|| format!("failed to read images json at {}", images_path.display()))?;
+        let v: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse images json at {}", images_path.display()))?;
+        let arr = v.as_array().cloned().unwrap_or_default();
+        for item in arr {
+            write_item(item, "json")?;
+        }
+    }
+
+    drop(img_stmt);
+    tx.commit()?;
+    Ok(imported)
 }
 
 fn init_db(db: &mut Connection) -> Result<()> {

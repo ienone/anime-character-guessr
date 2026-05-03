@@ -11,10 +11,10 @@ use lazy_static::lazy_static;
 use std::time::Duration;
 
 lazy_static! {
-    static ref PENDING_DOWNLOADS: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
+    static ref PENDING_DOWNLOADS: DashMap<String, broadcast::Sender<bool>> = DashMap::new();
 }
 
-struct CleanupPending(i64, broadcast::Sender<bool>);
+struct CleanupPending(String, broadcast::Sender<bool>);
 impl Drop for CleanupPending {
     fn drop(&mut self) {
         PENDING_DOWNLOADS.remove(&self.0);
@@ -70,10 +70,14 @@ pub fn start_room_cleanup(state: Arc<ServerState>, io: SocketIo) {
 
 /// Downloads `url`, transcodes to WebP, saves locally, and records the
 /// cache path in app.sqlite. Silently returns on any error (background task).
-pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>) {
+///
+/// `cache_key` is the row id used in `image_cache` (e.g. `"123"` for a
+/// character, `"s:123"` for a subject). It is also used to derive the
+/// on-disk filename (colons replaced with underscores).
+pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc<DbPools>) {
     // Coalesce duplicate requests
     let rx_opt = {
-        if let Some(entry) = PENDING_DOWNLOADS.get(&id) {
+        if let Some(entry) = PENDING_DOWNLOADS.get(&cache_key) {
             Some(entry.value().subscribe())
         } else {
             None
@@ -87,13 +91,14 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
     }
 
     let (tx, _rx) = broadcast::channel(1);
-    PENDING_DOWNLOADS.insert(id, tx.clone());
-    let _cleanup = CleanupPending(id, tx);
+    PENDING_DOWNLOADS.insert(cache_key.clone(), tx.clone());
+    let _cleanup = CleanupPending(cache_key.clone(), tx);
 
     // Check if another task already cached it to avoid duplicate work
+    let key_lookup = cache_key.clone();
     let already_cached = db::with_app_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare("SELECT 1 FROM image_cache WHERE id = ?1")?;
-        Ok(stmt.exists([id.to_string()]).unwrap_or(false))
+        Ok(stmt.exists([key_lookup]).unwrap_or(false))
     })
     .await
     .unwrap_or(false);
@@ -102,7 +107,7 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
         return;
     }
 
-    info!("Downloading image for character {}: {}", id, url);
+    info!("Downloading image for {}: {}", cache_key, url);
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
@@ -111,7 +116,7 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
     {
         Ok(c) => c,
         Err(e) => {
-            error!("Failed to build reqwest client for image {}: {}", id, e);
+            error!("Failed to build reqwest client for image {}: {}", cache_key, e);
             return;
         }
     };
@@ -134,7 +139,7 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
             Err(e) => last_err = Some(e.into()),
         }
         if attempt == 0 {
-            warn!("Retrying image download for {} after error: {}", id, last_err.as_ref().unwrap());
+            warn!("Retrying image download for {} after error: {}", cache_key, last_err.as_ref().unwrap());
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
@@ -144,7 +149,7 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
         None => {
             error!(
                 "Failed to fetch image for {}: {}",
-                id,
+                cache_key,
                 last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())
             );
             return;
@@ -154,16 +159,19 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            error!("Failed to read image bytes for {}: {}", id, e);
+            error!("Failed to read image bytes for {}: {}", cache_key, e);
             return;
         }
     };
+
+    // Filename: replace ':' with '_' for safe paths (e.g. "s:123" → "s_123.webp").
+    let file_basename = cache_key.replace(':', "_");
 
     // Transcode in a blocking task — image crate is CPU-bound
     let image_cache_dir = pools.image_cache_dir.clone();
     let transcode_result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let img = image::load_from_memory(&bytes)?;
-        let path = format!("{}/{}.webp", image_cache_dir, id);
+        let path = format!("{}/{}.webp", image_cache_dir, file_basename);
         img.save_with_format(&path, image::ImageFormat::WebP)?;
         Ok(path)
     })
@@ -172,79 +180,44 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
     let path = match transcode_result {
         Ok(Ok(p)) => p,
         _ => {
-            error!("Failed to transcode image for {}", id);
+            error!("Failed to transcode image for {}", cache_key);
             return;
         }
     };
 
-    let id_str = id.to_string();
+    let key_for_write = cache_key.clone();
     let path_clone = path.clone();
     let write_result = db::with_app_db(Arc::clone(&pools), move |conn| {
         conn.execute(
             "INSERT OR IGNORE INTO image_cache (id, local_path) VALUES (?1, ?2)",
-            [id_str, path_clone],
+            [key_for_write, path_clone],
         )?;
         Ok(())
     })
     .await;
 
     match write_result {
-        Err(e) => error!("Failed to save cache record for {}: {}", id, e),
-        Ok(()) => info!("Cached image for character {} at {}", id, path),
+        Err(e) => error!("Failed to save cache record for {}: {}", cache_key, e),
+        Ok(()) => info!("Cached image for {} at {}", cache_key, path),
     }
 }
 
-/// Periodically checks the image cache size and removes the oldest entries
-/// if it exceeds a threshold (e.g. 5000 images).
+/// Periodically checks the image cache size and removes the oldest entries.
+///
+/// Disabled for now: cached files are intentionally tiny 50x50 WebP thumbnails,
+/// so keeping all generated thumbnails is cheaper than repeatedly refetching
+/// them from BGM.
 pub fn start_image_cache_cleanup(pools: Arc<DbPools>) {
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(60 * 60); // every 1 hour
-        let max_cache_size = 5000;
         loop {
             tokio::time::sleep(interval).await;
-            info!("Running image cache cleanup task...");
-
-            let pools_clone = Arc::clone(&pools);
-            let to_delete = db::with_app_db(pools_clone, move |conn| {
+            let count = db::with_app_db(Arc::clone(&pools), move |conn| {
                 let mut stmt = conn.prepare("SELECT count(*) FROM image_cache")?;
                 let count: i64 = stmt.query_row([], |row| row.get(0))?;
-
-                if count <= max_cache_size {
-                    return Ok(vec![]);
-                }
-
-                let limit = count - max_cache_size;
-                let mut stmt2 = conn.prepare("SELECT id, local_path FROM image_cache ORDER BY created_at ASC LIMIT ?1")?;
-                let rows = stmt2.query_map([limit], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?.filter_map(Result::ok).collect::<Vec<_>>();
-                Ok(rows)
+                Ok(count)
             }).await.unwrap_or_default();
-
-            let mut deleted_count = 0;
-            for (_, path) in &to_delete {
-                if tokio::fs::remove_file(path).await.is_ok() || !std::path::Path::new(path).exists() {
-                    deleted_count += 1;
-                }
-            }
-
-            if deleted_count > 0 {
-                let pools_clone = Arc::clone(&pools);
-                let ids: Vec<String> = to_delete.into_iter().map(|(id, _)| id).collect();
-                let _ = db::with_app_db(pools_clone, move |conn| {
-                    let tx = conn.transaction()?;
-                    {
-                        let mut stmt = tx.prepare("DELETE FROM image_cache WHERE id = ?1")?;
-                        for id in ids {
-                            let _ = stmt.execute([id]);
-                        }
-                    }
-                    tx.commit()?;
-                    Ok(())
-                }).await;
-
-                info!("Auto-cleanup: removed {} old cached images", deleted_count);
-            }
+            info!("Image thumbnail cache cleanup skipped; {} thumbnails retained", count);
         }
     });
 }

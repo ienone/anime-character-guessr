@@ -13,6 +13,7 @@ use dashmap::DashMap;
 use tracing::warn;
 use std::time::Duration;
 use axum::response::Redirect;
+use tokio::sync::broadcast;
 
 
 pub mod game;
@@ -65,6 +66,11 @@ lazy_static::lazy_static! {
     static ref SUBJECT_DETAILS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = subjectId
     static ref SUBJECT_CHARACTERS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = subjectId
     static ref CHARACTER_DETAILS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = characterId
+    // In-flight de-duplication for BGM image source resolution (per character_id).
+    // Prevents bursty concurrent requests all hitting BGM for the same character.
+    static ref PENDING_IMAGE_SOURCE: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
+    // Same idea, but for subject images (independent namespace).
+    static ref PENDING_SUBJECT_IMAGE_SOURCE: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
 }
 
 /// /api/* — game logic, leaderboard, stats
@@ -75,6 +81,9 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         .route("/game/character", post(get_character_by_id))
         // Image resolve helper (JSON): tells client whether /img is cached yet
         .route("/img/resolve/{id}", get(resolve_character_image))
+        .route("/img/resolve/subject/{id}", get(resolve_subject_image))
+        .route("/img/source/{id}", get(resolve_character_image_source))
+        .route("/img/source/subject/{id}", get(resolve_subject_image_source))
         // Archive-backed local endpoints (reduce BGM API usage)
         .nest("/archive", archive::archive_routes(Arc::clone(&pools)))
         // BGM proxy (for index mode / search — BGM calls go through server)
@@ -108,9 +117,12 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         .with_state(pools)
 }
 
-/// /img/* — character image proxy with local WebP cache
+/// /img/* — character & subject image proxy with local WebP cache
 pub fn image_routes(pools: Arc<DbPools>) -> Router {
     Router::new()
+        // Subject route MUST be registered before the character catch-all so
+        // `/img/subject/{id}` is not swallowed by `/img/{id}`.
+        .route("/subject/{id}", get(get_subject_image))
         .route("/{id}", get(get_character_image))
         .with_state(pools)
 }
@@ -156,36 +168,34 @@ async fn resolve_character_image(
         })).into_response();
     }
 
-    // 2) Resolve source URL from offline mapping (preferred).
-    let source_url = match pools.character_image_index.by_id.get(&id) {
-        Some(&idx) => {
-            let entry = &pools.character_image_index.list[idx];
-            entry
-                .image_medium
-                .first()
-                .or_else(|| entry.image_grid.first())
-                .cloned()
-                .unwrap_or_else(|| "https://lain.bgm.tv/pic/user/l/icon.jpg".to_string())
-        }
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "cached": false,
-                    "code": "NO_MAPPING",
-                    "imgUrl": img_url,
-                    "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
-                })),
-            )
-                .into_response();
-        }
+    // 2) Resolve a usable source URL (app.sqlite mirror first; then BGM fallback).
+    let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools, id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "cached": false,
+                "code": "NO_SOURCE",
+                "imgUrl": img_url,
+                "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
+            })),
+        )
+            .into_response();
+    };
+
+    let source_url = if !image_grid.trim().is_empty() {
+        image_grid
+    } else if !image_medium.trim().is_empty() {
+        image_medium
+    } else {
+        "https://lain.bgm.tv/pic/user/l/icon.jpg".to_string()
     };
 
     // 3) Kick off caching; wait briefly for UX, otherwise tell client to try direct.
     let pools_clone = Arc::clone(&pools);
     let source_clone = source_url.clone();
+    let cache_key = id.to_string();
     let handle = tokio::spawn(async move {
-        utils::download_and_cache_image(id, source_clone, pools_clone).await;
+        utils::download_and_cache_image(cache_key, source_clone, pools_clone).await;
     });
 
     let _ = tokio::time::timeout(Duration::from_millis(wait_ms), handle).await;
@@ -218,6 +228,158 @@ async fn resolve_character_image(
             "sourceUrl": source_url,
         })),
     ).into_response()
+}
+
+async fn resolve_character_image_source(
+    State(pools): State<Arc<DbPools>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if id <= 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id must be positive" }))).into_response();
+    }
+
+    let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools, id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "code": "NO_SOURCE",
+                "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
+            })),
+        )
+            .into_response();
+    };
+
+    let source_url = if !image_medium.trim().is_empty() {
+        image_medium
+    } else {
+        image_grid
+    };
+
+    Json(json!({ "sourceUrl": source_url })).into_response()
+}
+
+/// GET /api/img/resolve/subject/:id?waitMs=1200
+/// Same helper as character image resolution, but backed by the subject image
+/// redirect API and stored under the `s:{id}` image-cache namespace.
+async fn resolve_subject_image(
+    State(pools): State<Arc<DbPools>>,
+    Path(id): Path<i64>,
+    AxumQuery(q): AxumQuery<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if id <= 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id must be positive" }))).into_response();
+    }
+
+    let wait_ms = q.get("waitMs")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1200)
+        .min(5000);
+
+    let cache_key = format!("s:{}", id);
+    let cached_key = cache_key.clone();
+    let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
+        Ok(conn.query_row(
+            "SELECT local_path FROM image_cache WHERE id = ?1",
+            [cached_key],
+            |row| row.get::<_, String>(0),
+        ).ok())
+    }).await {
+        Ok(Some(path)) => tokio::fs::metadata(path).await.is_ok(),
+        _ => false,
+    };
+
+    let img_url = format!("/img/subject/{}.webp", id);
+    if cached {
+        return Json(json!({
+            "cached": true,
+            "imgUrl": img_url,
+        })).into_response();
+    }
+
+    let Some((image_medium, image_grid)) = ensure_subject_image_source_cached(&pools, id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "cached": false,
+                "code": "NO_SOURCE",
+                "imgUrl": img_url,
+                "sourceUrl": "",
+            })),
+        )
+            .into_response();
+    };
+
+    let source_url = if !image_grid.trim().is_empty() {
+        image_grid
+    } else {
+        image_medium
+    };
+
+    let pools_clone = Arc::clone(&pools);
+    let source_clone = source_url.clone();
+    let cache_key_for_dl = cache_key.clone();
+    let handle = tokio::spawn(async move {
+        utils::download_and_cache_image(cache_key_for_dl, source_clone, pools_clone).await;
+    });
+
+    let _ = tokio::time::timeout(Duration::from_millis(wait_ms), handle).await;
+
+    let cached_key = cache_key.clone();
+    let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
+        Ok(conn.query_row(
+            "SELECT local_path FROM image_cache WHERE id = ?1",
+            [cached_key],
+            |row| row.get::<_, String>(0),
+        ).ok())
+    }).await {
+        Ok(Some(path)) => tokio::fs::metadata(path).await.is_ok(),
+        _ => false,
+    };
+
+    if cached {
+        return Json(json!({
+            "cached": true,
+            "imgUrl": img_url,
+        })).into_response();
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "cached": false,
+            "code": "TIMEOUT",
+            "imgUrl": img_url,
+            "sourceUrl": source_url,
+        })),
+    ).into_response()
+}
+
+async fn resolve_subject_image_source(
+    State(pools): State<Arc<DbPools>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if id <= 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id must be positive" }))).into_response();
+    }
+
+    let Some((image_medium, image_grid)) = ensure_subject_image_source_cached(&pools, id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "code": "NO_SOURCE",
+                "sourceUrl": "",
+            })),
+        )
+            .into_response();
+    };
+
+    let source_url = if !image_medium.trim().is_empty() {
+        image_medium
+    } else {
+        image_grid
+    };
+
+    Json(json!({ "sourceUrl": source_url })).into_response()
 }
 
 /// POST /api/game/random
@@ -382,9 +544,64 @@ async fn bgm_get_character(id: i64) -> anyhow::Result<Value> {
     bgm_get(&url).await
 }
 
-async fn bgm_get_character_persons(id: i64) -> anyhow::Result<Value> {
-    let url = format!("https://api.bgm.tv/v0/characters/{}/persons", id);
-    bgm_get(&url).await
+async fn bgm_get_character_image_location(id: i64, image_type: &str) -> anyhow::Result<Option<String>> {
+    let url = format!(
+        "https://api.bgm.tv/v0/characters/{}/image?type={}",
+        id, image_type
+    );
+
+    // This endpoint responds with 302 and the image URL in the Location header.
+    // We explicitly disable redirects to capture Location without fetching the image.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)")
+        .build()?;
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..=1 {
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_redirection() {
+                    if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
+                        let mut s = loc.to_str().unwrap_or("").trim().to_string();
+                        if s.is_empty() {
+                            return Ok(None);
+                        }
+                        // Some servers may return a relative location.
+                        if s.starts_with('/') {
+                            s = format!("https://lain.bgm.tv{}", s);
+                        }
+                        // Spec note: "no image" returns a default placeholder URL.
+                        if s.contains("/img/no_icon_subject.png") {
+                            return Ok(None);
+                        }
+                        return Ok(Some(s));
+                    }
+                    return Ok(None);
+                }
+
+                // If server ever changes to return 200 + body or something else, treat it as no image.
+                if status.is_success() {
+                    return Ok(None);
+                }
+
+                last_err = Some(anyhow::anyhow!("bgm image endpoint returned {}", status));
+            }
+            Err(e) => last_err = Some(e.into()),
+        }
+
+        if attempt == 0 {
+            warn!(
+                "bgm_get_character_image_location retrying after error: {}",
+                last_err.as_ref().unwrap()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("bgm image endpoint failed")))
 }
 
 async fn load_cached_image_source(
@@ -467,25 +684,6 @@ async fn load_cached_vas(pools: &Arc<DbPools>, id: i64) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(&json).ok().filter(|v| !v.is_empty())
 }
 
-async fn save_cached_vas(pools: &Arc<DbPools>, id: i64, names: Vec<String>, source: &str) {
-    let fetched_at_ms = chrono::Utc::now().timestamp_millis();
-    let src = source.to_string();
-    let json = serde_json::to_string(&names).unwrap_or("[]".to_string());
-    let _ = db::with_app_db(Arc::clone(pools), move |conn| {
-        conn.execute(
-            "INSERT INTO character_vas (character_id, va_names_json, fetched_at_ms, source)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(character_id) DO UPDATE SET
-               va_names_json=excluded.va_names_json,
-               fetched_at_ms=excluded.fetched_at_ms,
-               source=excluded.source",
-            rusqlite::params![id, json, fetched_at_ms, src],
-        )?;
-        Ok(())
-    })
-    .await;
-}
-
 fn extract_images_from_bgm_character(raw: &Value) -> (String, String) {
     let imgs = raw.get("images").and_then(|v| v.as_object());
     let get = |k: &str| imgs.and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -500,76 +698,73 @@ fn extract_images_from_bgm_character(raw: &Value) -> (String, String) {
     (medium, grid)
 }
 
-fn extract_vas_from_bgm_persons(raw: &Value) -> Vec<String> {
-    let arr = raw.as_array().cloned().unwrap_or_default();
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for item in arr {
-        // old frontend behavior: filter subject_type 2 or 4
-        let ok_type = item
-            .get("subject_type")
-            .and_then(|v| v.as_i64())
-            .map(|t| t == 2 || t == 4)
-            .unwrap_or(true);
-        if !ok_type {
-            continue;
-        }
-        if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-            let n = name.trim().to_string();
-            if n.is_empty() {
-                continue;
-            }
-            if seen.insert(n.clone()) {
-                out.push(n);
-            }
-        }
-        if out.len() >= 12 {
-            break;
-        }
-    }
-    out
-}
-
 async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(String, String)> {
     // 1) app.sqlite cache
     if let Some((m, g)) = load_cached_image_source(pools, id).await {
         return Some((m, g));
     }
 
-    // 2) offline JSON index (legacy) -> persist into app.sqlite
-    if let Some(&idx) = pools.character_image_index.by_id.get(&id) {
-        let entry = &pools.character_image_index.list[idx];
-        let m = entry.image_medium.first().cloned().unwrap_or_default();
-        let g = entry.image_grid.first().cloned().unwrap_or_default();
-        if !m.trim().is_empty() || !g.trim().is_empty() {
-            save_cached_image_source(pools, id, m.clone(), g.clone(), "json").await;
+    // 2) In-flight de-duplication: if another request is already resolving this id,
+    // wait briefly and then re-check app.sqlite.
+    if let Some(entry) = PENDING_IMAGE_SOURCE.get(&id) {
+        let mut rx = entry.value().subscribe();
+        let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
+        if let Some((m, g)) = load_cached_image_source(pools, id).await {
             return Some((m, g));
+        }
+        // still not available; fall through to do our own resolution best-effort
+    }
+
+    // Become the leader for this id (best-effort). If another leader races us, we just join it.
+    let (tx, _rx) = broadcast::channel(1);
+    let we_are_leader = PENDING_IMAGE_SOURCE.insert(id, tx.clone()).is_none();
+    struct CleanupPendingImageSource(i64);
+    impl Drop for CleanupPendingImageSource {
+        fn drop(&mut self) {
+            PENDING_IMAGE_SOURCE.remove(&self.0);
         }
     }
 
-    // 3) BGM API fallback -> persist
+    if !we_are_leader {
+        // Someone else inserted concurrently. Wait and re-check.
+        if let Some(entry) = PENDING_IMAGE_SOURCE.get(&id) {
+            let mut rx = entry.value().subscribe();
+            let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
+        }
+        return load_cached_image_source(pools, id).await;
+    }
+    let _cleanup = CleanupPendingImageSource(id);
+
+    // 3) BGM image endpoint fallback (preferred): capture Location without downloading the image.
+    let (medium, grid) = tokio::join!(
+        bgm_get_character_image_location(id, "medium"),
+        bgm_get_character_image_location(id, "grid"),
+    );
+    let medium = medium.ok().flatten().unwrap_or_default();
+    let grid = grid.ok().flatten().unwrap_or_default();
+    if !medium.trim().is_empty() || !grid.trim().is_empty() {
+        save_cached_image_source(pools, id, medium.clone(), grid.clone(), "bgm_image").await;
+        let _ = tx.send(true);
+        return Some((medium, grid));
+    }
+
+    // 4) BGM character detail fallback (legacy): parse `images` field.
     if let Ok(raw) = bgm_get_character(id).await {
         let (m, g) = extract_images_from_bgm_character(&raw);
         if !m.trim().is_empty() || !g.trim().is_empty() {
             save_cached_image_source(pools, id, m.clone(), g.clone(), "bgm").await;
+            let _ = tx.send(true);
             return Some((m, g));
         }
     }
 
+    let _ = tx.send(true);
     None
 }
 
 async fn ensure_vas_cached(pools: &Arc<DbPools>, id: i64) -> Option<Vec<String>> {
     if let Some(v) = load_cached_vas(pools, id).await {
         return Some(v);
-    }
-
-    if let Ok(raw) = bgm_get_character_persons(id).await {
-        let names = extract_vas_from_bgm_persons(&raw);
-        if !names.is_empty() {
-            save_cached_vas(pools, id, names.clone(), "bgm").await;
-            return Some(names);
-        }
     }
 
     None
@@ -615,17 +810,18 @@ async fn get_character_image(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let target_url = if !image_medium.trim().is_empty() {
-        image_medium
-    } else {
+    let target_url = if !image_grid.trim().is_empty() {
         image_grid
+    } else {
+        image_medium
     };
 
     // 3. Download+transcode in background, but try to serve within a short time window
     let pools_clone = Arc::clone(&pools);
     let url_clone = target_url.clone();
+    let cache_key = id.to_string();
     let handle = tokio::spawn(async move {
-        utils::download_and_cache_image(id, url_clone, pools_clone).await;
+        utils::download_and_cache_image(cache_key, url_clone, pools_clone).await;
     });
 
     // Give the background job a small chance to finish for better UX.
@@ -663,5 +859,283 @@ async fn get_character_image(
     }
 
     // Cache not ready: redirect to origin URL (client can still use /api/img/resolve for UX).
+    Redirect::temporary(&target_url).into_response()
+}
+
+// ─── Subject image proxy ─────────────────────────────────────────────────────
+//
+// BGM offline dump does NOT include subject images. We resolve them on demand
+// via `GET https://api.bgm.tv/v0/subjects/{id}/image?type=...` (302), then
+// transcode + cache like character images. Cached entries are namespaced as
+// `s:{id}` in `image_cache` and stored as `subject_{id}.webp` on disk.
+
+async fn bgm_get_subject_image_location(id: i64, image_type: &str) -> anyhow::Result<Option<String>> {
+    let url = format!(
+        "https://api.bgm.tv/v0/subjects/{}/image?type={}",
+        id, image_type
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)")
+        .build()?;
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..=1 {
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_redirection() {
+                    if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
+                        let mut s = loc.to_str().unwrap_or("").trim().to_string();
+                        if s.is_empty() {
+                            return Ok(None);
+                        }
+                        if s.starts_with('/') {
+                            s = format!("https://lain.bgm.tv{}", s);
+                        }
+                        if s.contains("/img/no_icon_subject.png") {
+                            return Ok(None);
+                        }
+                        return Ok(Some(s));
+                    }
+                    return Ok(None);
+                }
+
+                if status.is_success() {
+                    return Ok(None);
+                }
+
+                last_err = Some(anyhow::anyhow!("bgm subject image endpoint returned {}", status));
+            }
+            Err(e) => last_err = Some(e.into()),
+        }
+
+        if attempt == 0 {
+            warn!(
+                "bgm_get_subject_image_location retrying after error: {}",
+                last_err.as_ref().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("bgm subject image endpoint failed")))
+}
+
+fn extract_images_from_bgm_subject(raw: &Value) -> (String, String) {
+    let imgs = raw.get("images").and_then(|v| v.as_object());
+    let get = |k: &str| imgs.and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let medium = {
+        let m = get("medium");
+        if !m.is_empty() { m } else { get("common") }
+    };
+    let grid = {
+        let g = get("grid");
+        if !g.is_empty() { g } else { medium.clone() }
+    };
+    (medium, grid)
+}
+
+async fn load_cached_subject_image_source(
+    pools: &Arc<DbPools>,
+    id: i64,
+) -> Option<(String, String)> {
+    let id2 = id;
+    let row = db::with_app_db(Arc::clone(pools), move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT image_medium, image_grid FROM subject_image_sources WHERE subject_id = ?1",
+        )?;
+        let r = stmt
+            .query_row([id2], |row| {
+                Ok((
+                    row.get::<_, String>(0).unwrap_or_default(),
+                    row.get::<_, String>(1).unwrap_or_default(),
+                ))
+            })
+            .ok();
+        Ok(r)
+    })
+    .await
+    .ok()
+    .flatten();
+
+    row.and_then(|(m, g)| {
+        let m2 = m.trim().to_string();
+        let g2 = g.trim().to_string();
+        if m2.is_empty() && g2.is_empty() {
+            None
+        } else {
+            Some((m2, g2))
+        }
+    })
+}
+
+async fn save_cached_subject_image_source(
+    pools: &Arc<DbPools>,
+    id: i64,
+    image_medium: String,
+    image_grid: String,
+    source: &str,
+) {
+    let fetched_at_ms = chrono::Utc::now().timestamp_millis();
+    let src = source.to_string();
+    let _ = db::with_app_db(Arc::clone(pools), move |conn| {
+        conn.execute(
+            "INSERT INTO subject_image_sources (subject_id, image_medium, image_grid, fetched_at_ms, source)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(subject_id) DO UPDATE SET
+               image_medium=excluded.image_medium,
+               image_grid=excluded.image_grid,
+               fetched_at_ms=excluded.fetched_at_ms,
+               source=excluded.source",
+            rusqlite::params![id, image_medium, image_grid, fetched_at_ms, src],
+        )?;
+        Ok(())
+    })
+    .await;
+}
+
+async fn ensure_subject_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(String, String)> {
+    if let Some((m, g)) = load_cached_subject_image_source(pools, id).await {
+        return Some((m, g));
+    }
+
+    if let Some(entry) = PENDING_SUBJECT_IMAGE_SOURCE.get(&id) {
+        let mut rx = entry.value().subscribe();
+        let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
+        if let Some((m, g)) = load_cached_subject_image_source(pools, id).await {
+            return Some((m, g));
+        }
+    }
+
+    let (tx, _rx) = broadcast::channel(1);
+    let we_are_leader = PENDING_SUBJECT_IMAGE_SOURCE.insert(id, tx.clone()).is_none();
+    struct CleanupPendingSubjectImageSource(i64);
+    impl Drop for CleanupPendingSubjectImageSource {
+        fn drop(&mut self) {
+            PENDING_SUBJECT_IMAGE_SOURCE.remove(&self.0);
+        }
+    }
+
+    if !we_are_leader {
+        if let Some(entry) = PENDING_SUBJECT_IMAGE_SOURCE.get(&id) {
+            let mut rx = entry.value().subscribe();
+            let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
+        }
+        return load_cached_subject_image_source(pools, id).await;
+    }
+    let _cleanup = CleanupPendingSubjectImageSource(id);
+
+    let (medium, grid) = tokio::join!(
+        bgm_get_subject_image_location(id, "common"),
+        bgm_get_subject_image_location(id, "grid"),
+    );
+    let medium = medium.ok().flatten().unwrap_or_default();
+    let grid = grid.ok().flatten().unwrap_or_default();
+    if !medium.trim().is_empty() || !grid.trim().is_empty() {
+        save_cached_subject_image_source(pools, id, medium.clone(), grid.clone(), "bgm_image").await;
+        let _ = tx.send(true);
+        return Some((medium, grid));
+    }
+
+    if let Ok(raw) = bgm_get(&format!("https://api.bgm.tv/v0/subjects/{}", id)).await {
+        let (m, g) = extract_images_from_bgm_subject(&raw);
+        if !m.trim().is_empty() || !g.trim().is_empty() {
+            save_cached_subject_image_source(pools, id, m.clone(), g.clone(), "bgm").await;
+            let _ = tx.send(true);
+            return Some((m, g));
+        }
+    }
+
+    let _ = tx.send(true);
+    None
+}
+
+async fn get_subject_image(
+    State(pools): State<Arc<DbPools>>,
+    Path(id_str): Path<String>,
+) -> impl IntoResponse {
+    let id: i64 = id_str.split('.').next().unwrap_or("0").parse().unwrap_or(0);
+
+    if id == 0 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let cache_key = format!("s:{}", id);
+
+    // 1. Check local cache
+    let key_lookup = cache_key.clone();
+    let local_path: Option<String> = match db::with_app_db(Arc::clone(&pools), move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT local_path FROM image_cache WHERE id = ?1",
+                [key_lookup],
+                |row| row.get(0),
+            )
+            .ok())
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => None,
+    };
+
+    if let Some(path) = local_path {
+        if let Ok(content) = tokio::fs::read(&path).await {
+            let mut headers = header::HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+            headers.insert(header::CACHE_CONTROL, "public, max-age=31536000".parse().unwrap());
+            return (headers, content).into_response();
+        }
+    }
+
+    // 2. Cache miss — resolve source URL via BGM image redirect endpoint.
+    let Some((image_medium, image_grid)) = ensure_subject_image_source_cached(&pools, id).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let target_url = if !image_grid.trim().is_empty() {
+        image_grid
+    } else {
+        image_medium
+    };
+
+    // 3. Download+transcode in background, but try to serve within a short window.
+    let pools_clone = Arc::clone(&pools);
+    let url_clone = target_url.clone();
+    let cache_key_for_dl = cache_key.clone();
+    let handle = tokio::spawn(async move {
+        utils::download_and_cache_image(cache_key_for_dl, url_clone, pools_clone).await;
+    });
+
+    if tokio::time::timeout(std::time::Duration::from_millis(1200), handle).await.is_ok() {
+        let key_lookup = cache_key.clone();
+        let local_path: Option<String> = match db::with_app_db(Arc::clone(&pools), move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT local_path FROM image_cache WHERE id = ?1",
+                    [key_lookup],
+                    |row| row.get(0),
+                )
+                .ok())
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(_) => None,
+        };
+
+        if let Some(path) = local_path {
+            if let Ok(content) = tokio::fs::read(&path).await {
+                let mut headers = header::HeaderMap::new();
+                headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+                headers.insert(header::CACHE_CONTROL, "public, max-age=31536000".parse().unwrap());
+                return (headers, content).into_response();
+            }
+        }
+    }
+
     Redirect::temporary(&target_url).into_response()
 }

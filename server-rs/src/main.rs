@@ -3,6 +3,8 @@ use socketioxide::SocketIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use axum::http::{HeaderValue, Method, header};
 use tracing::info;
 use tracing_subscriber;
 
@@ -59,6 +61,9 @@ async fn main() -> anyhow::Result<()> {
     // Spawn image cache cleanup background task
     utils::start_image_cache_cleanup(Arc::clone(&db_pools));
 
+    // CORS — must allow the dev/prod client origin(s) for both REST and Socket.IO.
+    let cors = build_cors_layer(&config.client_url);
+
     // Build the Axum application
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -71,6 +76,8 @@ async fn main() -> anyhow::Result<()> {
         .nest("/img", routes::image_routes(Arc::clone(&db_pools)))
         // Attach socket.io layer
         .layer(layer)
+        // CORS (must wrap Socket.IO too)
+        .layer(cors)
         // Request metrics (outermost — measures full pipeline)
         .layer(axum::middleware::from_fn(middleware::metrics::track_metrics));
 
@@ -81,4 +88,47 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Build a CORS layer from a comma-separated origins list.
+/// `*` or empty means "allow any" (mirror Node `cors()` default for dev).
+fn build_cors_layer(client_url: &str) -> CorsLayer {
+    let trimmed = client_url.trim();
+
+    let base = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+            Method::PATCH,
+        ])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::ACCEPT,
+            header::ORIGIN,
+        ])
+        .allow_credentials(true);
+
+    if trimmed.is_empty() || trimmed == "*" {
+        // `allow_credentials(true)` is incompatible with `Any`; mirror the
+        // request origin instead so browser dev usage still works.
+        return base.allow_origin(AllowOrigin::mirror_request());
+    }
+
+    let origins: Vec<HeaderValue> = trimmed
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| HeaderValue::from_str(s).ok())
+        .collect();
+
+    if origins.is_empty() {
+        base.allow_origin(AllowOrigin::mirror_request())
+    } else {
+        info!("CORS allowed origins: {:?}", origins);
+        base.allow_origin(AllowOrigin::list(origins))
+    }
 }
