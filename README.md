@@ -3,65 +3,72 @@
 ## 📖 简介
 二次元笑传之猜猜呗，快来弗/灯一把吧！
 
-- 一个猜动漫角色的游戏, 建议使用桌面端浏览器游玩。
-- 灵感来源 [BLAST.tv](https://blast.tv/counter-strikle), 数据来源 [Bangumi](https://bgm.tv/)。
+- 一个猜动漫角色的游戏，建议使用桌面端浏览器游玩。
+- 灵感来源 [BLAST.tv](https://blast.tv/counter-strikle)，数据来源 [Bangumi](https://bgm.tv/)。
 - 游玩群：467740403
 - 开发交流群：894333602
 
-## 📦 运行教程
+## 📦 项目结构
 
-### 1. 本地 npm 运行
+- `client/`：Vite React 前端。
+- `server-rs/`：Rust 游戏服务器，负责 Socket.IO、Bangumi API 代理和图片缓存。
+- `db-builder/`：Bangumi 数据库构建与维护工具。
+- `archive.sqlite`：本地条目/角色索引数据库。
 
-分别在 `client` 和 `server` 目录下执行以下命令：
-```
+## 🚀 本地运行
+
+前端：
+```bash
+cd client
 npm install
 npm run dev
 ```
 
-### 2. docker 运行
+Rust 服务端：
+```bash
+cd server-rs
+cargo run
+```
 
-在根目录下新建env文件
+前端通过 `VITE_SERVER_URL` 指向服务端地址；未设置时使用同源地址。
+
+## 🐳 Docker 运行
+
+在根目录新建 `.env` 文件：
 ```env
 DOMAIN_NAME=http://[你的 IP]
-
-MONGODB_URI=mongodb://mongo:27017/tags
-
-CLIENT_INTERNAL_PORT=80
-SERVER_INTERNAL_PORT=3000
+SERVER_INTERNAL_PORT=3001
 NGINX_EXTERNAL_PORT=80
-
 AES_SECRET=YourSuperSecretKeyChangeMe
+```
 
-SERVER_URL=http://[你的 IP]:3000
-```
-使用项目中的 `docker-compose` 文件一键运行：
-```
+启动：
+```bash
 docker-compose up --build
 ```
-删除容器：
-```
+
+停止并删除容器：
+```bash
 docker-compose down
 ```
 
-## 🚀 自部署优化（推荐）
-为了避免浏览器直连 Bangumi API/图片导致的卡顿（跨境/限流/网络抖动），本项目已内置：
-- Bangumi API 服务端代理：客户端所有 `v0/*` 请求会改为请求你自己的服务端 `/api/bgm/*`
-- 图片服务端缓存代理：远程图片会通过 `/img?url=...` 拉取并缓存到本地磁盘后再返回
+## 🚀 自部署优化
 
-你需要做的仅是：
-- `client/.env` 中设置 `VITE_SERVER_URL` 指向你部署后的域名（通常就是站点本身的域名）
-- `server/.env` 中可选配置缓存策略（见 `server/.env.example` 的 `BGM_*` / `IMG_*`）
+- Bangumi API 通过服务端 `/api/bgm/*` 代理，避免浏览器直连 API。
+- 小图使用 Bangumi `grid` 图片并缓存为本地 `/img/{id}.webp`，适合搜索结果和列表头像。
+- 大图直接返回 Bangumi 源图链接，避免服务端长期存储大图。
+- 可配合 CDN/边缘加速缓存 `/img/*` 和 Bangumi 源图跳转结果，降低源站压力。
 
 ## 🎮 游戏玩法
 
 - 猜一个神秘动漫角色。搜索角色，然后做出猜测。
 - 每次猜测后，你会获得你猜的角色的信息。
 - 绿色高亮：正确或非常接近；黄色高亮：有点接近。
-- "↑"：应该往高了猜；"↓"：应该往低了猜
+- `↑`：应该往高了猜；`↓`：应该往低了猜。
 
 ## ✨ 贡献标签
 
-- 提交外部标签PR的时候请注意！
-- 素材文件分好文件夹，放到client/public/assets下。
-- 标签数据可以直接放到client/public/data/extra_tags下，作者会看一下再导入。
-- 本地测试新标签加载不出来？看一看有没有把条目ID放进./client/data的extra_tag_subjects.js里。
+- 提交外部标签 PR 时请注意素材和数据目录结构。
+- 素材文件分好文件夹，放到 `client/public/assets` 下。
+- 标签数据可以直接放到 `client/public/data/extra_tags` 下，维护者会审核后导入。
+- 本地测试新标签加载不出来时，检查条目 ID 是否已放进 `client/src/data/extra_tag_subjects.js`。

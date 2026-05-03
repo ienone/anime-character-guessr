@@ -29,7 +29,7 @@ pub fn ensure_directories(image_cache_dir: &str) -> anyhow::Result<()> {
 }
 
 /// Spawns a background Tokio task that periodically removes stale rooms.
-/// Replaces Node.js autoClean.js — runs every 5 minutes.
+/// Runs every 5 minutes.
 /// A room is cleaned if:
 ///   - No game is in progress, AND
 ///   - No activity for > 5 minutes (300_000 ms)

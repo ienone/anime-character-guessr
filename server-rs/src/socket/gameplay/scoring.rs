@@ -20,7 +20,7 @@ pub struct ScoreBonuses {
 }
 
 pub fn calculate_winner_score(guesses: &str, base_score: i32, total_rounds: i32) -> ScoreResult {
-    // Keep aligned with server/utils/gameplay.js:calculateWinnerScore
+    // Winner score scales with guess count and supports crown-marked big wins.
     let is_big_win = guesses.contains('👑');
     let cleaned = super::marks::strip_end_marks(guesses);
     let guess_count = cleaned.chars().count() as i32;
@@ -59,7 +59,7 @@ pub fn calculate_setter_score(
     big_winner_score: i32,
     total_rounds: i32,
 ) -> i32 {
-    // Keep aligned with server/utils/gameplay.js:calculateSetterScore
+    // Setter score depends on winners, skips, and per-round base score.
     let has_winner = winner_guess_count > 0;
     let has_big_winner = winner_guesses.contains('👑');
 
@@ -82,7 +82,7 @@ pub fn calculate_setter_score(
 }
 
 pub fn calculate_nonstop_setter_score(has_big_winner: bool, big_winner_score: i32, winners_count: i32, total_players_count: i32) -> i32 {
-    // Keep aligned with server/utils/gameplay.js:calculateNonstopSetterScore
+    // Nonstop setter score scales by winner count and total active players.
     let total_players = std::cmp::max(1, total_players_count);
     let player_multiplier = std::cmp::max(1, ((total_players as f32) / 2.0).ceil() as i32);
 

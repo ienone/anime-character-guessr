@@ -1048,7 +1048,7 @@ pub fn finalize_nonstop_game(room: &mut Room, room_id: &str, io: &SocketIo) -> b
             "reason": nonstop_setter_score_reason(has_big_winner, winners_count, total_players_count)
         }));
         let details = generate_score_details(&room.players, &score_changes, setter_info);
-        // keep deterministic ordering? Node doesn't; ok.
+        // Keep deterministic ordering for stable score details.
         // ensure setter_id used? not needed.
         let _ = setter_id;
         details

@@ -36,7 +36,7 @@ fn merge_extra(a: Option<Value>, b: Option<Value>) -> Option<Value> {
 
 fn broadcast_players(io: &SocketIo, room_id: &str, room: &mut Room, extra: Option<Value>) {
     // Coalesce short bursts of updatePlayers broadcasts for better performance and
-    // smoother UI (mirrors Node's broadcastPlayers cooldown).
+    // smoother UI by coalescing updatePlayers broadcasts.
     const COOLDOWN_MS: i64 = 120;
     let now = Utc::now().timestamp_millis();
 
@@ -949,7 +949,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             
             info!("game started in {}", room_id);
 
-            // Mirror Node: ensure updatePlayers gets answerSetterId=null immediately after gameStart.
+            // Ensure updatePlayers gets answerSetterId=null immediately after gameStart.
             broadcast_players(&io_clone, &room_id, &mut room, Some(json!({
                 "answerSetterId": Value::Null
             })));
@@ -1052,7 +1052,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
         }
     });
 
-    // Gameplay events (Phase3): keep aligned with Node server/utils/socket.js + gameplay.js
+    // Gameplay events.
     let state_guess = Arc::clone(&state);
     let io_guess = io.clone();
     socket.on("playerGuess", move |socket: SocketRef, Data::<Value>(data)| {

@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     // Register socket.io event handlers (pass shared state)
     socket::register_handlers(io.clone(), Arc::clone(&server_state));
 
-    // Graceful shutdown: notify clients (matches Node behavior).
+    // Graceful shutdown: notify clients before the process exits.
     // Best-effort: emit on Ctrl+C (portable across platforms).
     {
         let io_shutdown = io.clone();
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Build a CORS layer from a comma-separated origins list.
-/// `*` or empty means "allow any" (mirror Node `cors()` default for dev).
+/// `*` or empty means "allow any" for development.
 fn build_cors_layer(client_url: &str) -> CorsLayer {
     let trimmed = client_url.trim();
 

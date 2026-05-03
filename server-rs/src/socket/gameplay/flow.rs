@@ -10,7 +10,7 @@ pub struct EnforceResult {
 }
 
 pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool) -> EnforceResult {
-    // Keep aligned with server/utils/gameplay.js:enforceAttemptLimit
+    // Enforce per-player guess limits and eliminate players after exhausting attempts.
     let Some(ref mut game) = room.current_game else {
         return EnforceResult {
             exhausted: false,
@@ -103,7 +103,7 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
 }
 
 pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult {
-    // Keep aligned with server/utils/gameplay.js:handlePlayerTimeout
+    // Eliminate timed-out players and finish the round when no active players remain.
     let Some(game) = room.current_game.as_ref() else {
         return TimeoutResult {
             needs_sync_update: false,
