@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { io } from 'socket.io-client';
@@ -38,6 +38,9 @@ const Multiplayer = () => {
   const [isJoined, setIsJoined] = useState(false);
   const [socket, setSocket] = useState(null);
   const socketRef = useRef(null);
+  const roomIdRef = useRef(roomId);
+  const usernameRef = useRef(username);
+  const isJoinedRef = useRef(isJoined);
   const [error, setError] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [isPublic, setIsPublic] = useState(true);
@@ -125,6 +128,19 @@ const Multiplayer = () => {
   const reconnectTimerRef = useRef(null);
   const isManualDisconnectRef = useRef(false);
   const isAutoReconnectingRef = useRef(false);
+  const fetchRoomListRef = useRef(null);
+
+  useEffect(() => {
+    roomIdRef.current = roomId;
+  }, [roomId]);
+
+  useEffect(() => {
+    usernameRef.current = username;
+  }, [username]);
+
+  useEffect(() => {
+    isJoinedRef.current = isJoined;
+  }, [isJoined]);
   const allSpectators = useMemo(() => {
     if (!players || players.length === 0) return false;
     return players.every(p => p.disconnected || p.team === '0');
@@ -317,13 +333,13 @@ const Multiplayer = () => {
         reconnectTimerRef.current = null;
       }
       
-      if (isJoined && roomId && username) {
+      if (isJoinedRef.current && roomIdRef.current && usernameRef.current) {
         const avatarId = sessionStorage.getItem('avatarId');
         const avatarImage = sessionStorage.getItem('avatarImage');
         const avatarPayload = avatarId !== null ? { avatarId, avatarImage } : {};
         
-        newSocket.emit('joinRoom', { roomId, username, ...avatarPayload });
-        newSocket.emit('requestGameSettings', { roomId });
+        newSocket.emit('joinRoom', { roomId: roomIdRef.current, username: usernameRef.current, ...avatarPayload });
+        newSocket.emit('requestGameSettings', { roomId: roomIdRef.current });
       }
     });
 
@@ -521,9 +537,9 @@ const Multiplayer = () => {
     newSocket.on('error', ({ message }) => {
       if (
         isAutoReconnectingRef.current &&
-        isJoined &&
-        roomId &&
-        username &&
+        isJoinedRef.current &&
+        roomIdRef.current &&
+        usernameRef.current &&
         typeof message === 'string' &&
         message.includes('换个名字吧')
       ) {
@@ -531,8 +547,8 @@ const Multiplayer = () => {
         const avatarImage = sessionStorage.getItem('avatarImage');
         const avatarPayload = avatarId !== null ? { avatarId, avatarImage } : {};
         setTimeout(() => {
-          socketRef.current?.emit('joinRoom', { roomId, username, ...avatarPayload });
-          socketRef.current?.emit('requestGameSettings', { roomId });
+          socketRef.current?.emit('joinRoom', { roomId: roomIdRef.current, username: usernameRef.current, ...avatarPayload });
+          socketRef.current?.emit('requestGameSettings', { roomId: roomIdRef.current });
         }, 500);
         return;
       }
@@ -556,7 +572,6 @@ const Multiplayer = () => {
     });
 
     newSocket.on('updateGameSettings', ({ settings }) => {
-      console.log('Received game settings:', settings);
       setGameSettings(settings);
     });
 
@@ -749,11 +764,10 @@ const Multiplayer = () => {
   }, [roomId, navigate]);
 
   useEffect(() => {
-    console.log('Game Settings:', gameSettings);
     if (isHost && isJoined) {
       socketRef.current?.emit('updateGameSettings', { roomId, settings: gameSettings });
     }
-  }, [showSettings]);
+  }, [showSettings, isHost, isJoined, roomId, gameSettings]);
 
   useEffect(() => {
     gameSettingsRef.current = gameSettings;
@@ -767,7 +781,7 @@ const Multiplayer = () => {
     
     const intervalId = setInterval(() => {
       if (roomListExpandedRef.current && !isJoined) {
-        fetchRoomList();
+        fetchRoomListRef.current?.();
       }
     }, 5000);
     
@@ -1222,7 +1236,7 @@ const Multiplayer = () => {
   };
 
   // 获取房间列表（静默刷新，避免页面抖动）
-  const fetchRoomList = async () => {
+  const fetchRoomList = useCallback(async () => {
     // 只有首次加载时显示 loading 状态
     if (isFirstLoadRoomsRef.current) {
       setLoadingRooms(true);
@@ -1238,7 +1252,11 @@ const Multiplayer = () => {
     } finally {
       setLoadingRooms(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchRoomListRef.current = fetchRoomList;
+  }, [fetchRoomList]);
 
   // 加入指定房间
   const handleJoinSpecificRoom = (targetRoomId) => {
@@ -1712,7 +1730,7 @@ const Multiplayer = () => {
                     )}
                     {guessesLeft <= useImageHint && imgHint &&(
                       <div className="hint-container">
-                        <Image src={imgHint} style={{height: '200px', filter: `blur(${guessesLeft}px)`}} alt="提示" />
+                        <Image src={imgHint} preferSource style={{height: '200px', filter: `blur(${guessesLeft}px)`}} alt="提示" />
                       </div>
                     )}
                   </div>
@@ -1728,7 +1746,7 @@ const Multiplayer = () => {
                 <div className="answer-setter-view">
                   {canShowSelectedAnswer && answerCharacter && (isAnswerSetter || isTeamObserver) && (
                     <div className="selected-answer">
-                      <Image src={answerCharacter.imageGrid} alt={answerCharacter.name} className="answer-image" />
+                      <Image src={answerCharacter.imageGrid} preferSource alt={answerCharacter.name} className="answer-image" />
                       <div className="answer-info">
                         <div>{answerCharacter.name}</div>
                         <div>{answerCharacter.nameCn}</div>

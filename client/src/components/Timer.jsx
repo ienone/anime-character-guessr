@@ -6,7 +6,7 @@ const Timer = ({ timeLimit, onTimeUp, isActive, reset }) => {
 
   // Initialize or reset end time
   useEffect(() => {
-    if (reset || !endTimeRef.current || timeLeft !== timeLimit) {
+    if (reset || !endTimeRef.current) {
       const newEndTime = Date.now() + timeLimit * 1000;
       endTimeRef.current = newEndTime;
       setTimeLeft(timeLimit);

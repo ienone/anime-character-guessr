@@ -94,7 +94,6 @@ function SinglePlayer() {
           setHints(hintTexts);
           setUseImageHint(gameSettings.useImageHint);
           setImgHint(gameSettings.useImageHint > 0 ? character.image : null);
-          console.log('初始化游戏', gameSettings);
           setFinishInit(true);
           setInitFailed(false);
         }
@@ -113,7 +112,7 @@ function SinglePlayer() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [gameSettings]);
 
   const handleCharacterSelect = async (character) => {
     if (isGuessing || !answerCharacter) return;
@@ -297,7 +296,6 @@ function SinglePlayer() {
         setHints(hintTexts);
         setUseImageHint(gameSettings.useImageHint);
         setImgHint(gameSettings.useImageHint > 0 ? character.image : null);
-        console.log('初始化游戏', gameSettings);
         setFinishInit(true);
         setInitFailed(false);
       } catch (error) {

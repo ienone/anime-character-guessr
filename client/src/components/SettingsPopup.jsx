@@ -1,7 +1,7 @@
 import '../styles/popups.css';
 import '../styles/SettingsPopup.css';
 import { getIndexInfo, searchSubjects } from '../utils/bangumi';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import axiosCache from '../utils/cached-axios';
 import { getPresetConfig } from '../data/presets';
 
@@ -53,19 +53,6 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
     };
   }, []);
 
-  // Debounced search function
-  useEffect(() => {
-    const timeoutId = setTimeout(() => {
-      if (searchQuery.trim()) {
-        handleSearch();
-      } else {
-        setSearchResults([]);
-      }
-    }, 500);
-
-    return () => clearTimeout(timeoutId);
-  }, [searchQuery]);
-
   // Initialize indexInputValue and fetch indexInfo if indexId exists
   useEffect(() => {
     if (gameSettings.useIndex && gameSettings.indexId) {
@@ -74,7 +61,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
         .then(info => setIndexInfo(info))
         .catch(console.error);
     }
-  }, []);
+  }, [gameSettings.indexId, gameSettings.useIndex]);
 
   useEffect(() => {
     if (Array.isArray(gameSettings.useHints) && gameSettings.useHints.length > 0) {
@@ -92,7 +79,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
     if (!gameSettings.commonTags) {
       onSettingsChange('commonTags', true);
     }
-  }, []);
+  }, [gameSettings.commonTags, onSettingsChange]);
 
   const setIndex = async (indexId) => {
     if (!indexId) {
@@ -150,7 +137,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
     }
   };
 
-  const handleSearch = async () => {
+  const handleSearch = useCallback(async () => {
     if (!searchQuery.trim()) return;
     
     try {
@@ -160,7 +147,20 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
       console.error('Search failed:', error);
       setSearchResults([]);
     }
-  };
+  }, [searchQuery]);
+
+  // Debounced search function
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      if (searchQuery.trim()) {
+        handleSearch();
+      } else {
+        setSearchResults([]);
+      }
+    }, 500);
+
+    return () => clearTimeout(timeoutId);
+  }, [searchQuery, handleSearch]);
 
   const handleAddSubject = (subject) => {
     const newAddedSubjects = [
