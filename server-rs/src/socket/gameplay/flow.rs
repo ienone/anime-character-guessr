@@ -7,8 +7,6 @@ pub struct TimeoutResult {
 
 pub struct EnforceResult {
     pub exhausted: bool,
-    #[allow(dead_code)]
-    pub pending_win: bool,
 }
 
 pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool) -> EnforceResult {
@@ -16,14 +14,12 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
     let Some(ref mut game) = room.current_game else {
         return EnforceResult {
             exhausted: false,
-            pending_win: false,
         };
     };
 
     let Some(player) = room.players.iter().find(|p| p.id == player_id) else {
         return EnforceResult {
             exhausted: false,
-            pending_win: false,
         };
     };
 
@@ -31,7 +27,6 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
     if player.is_answer_setter || player.team.as_deref() == Some("0") || player.temp_observer {
         return EnforceResult {
             exhausted: false,
-            pending_win: false,
         };
     }
 
@@ -56,21 +51,18 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
     if attempt_count < max_attempts {
         return EnforceResult {
             exhausted: false,
-            pending_win: false,
         };
     }
 
     if super::marks::has_end_mark(&source_marks) {
         return EnforceResult {
             exhausted: true,
-            pending_win: false,
         };
     }
 
     if is_correct {
         return EnforceResult {
             exhausted: true,
-            pending_win: true,
         };
     }
 
@@ -107,7 +99,6 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
 
     EnforceResult {
         exhausted: true,
-        pending_win: false,
     }
 }
 
@@ -212,16 +203,3 @@ pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult 
     }
 }
 
-#[allow(dead_code)]
-pub fn check_all_ended(room: &Room) -> bool {
-    // Check if all active players (not disconnected, not setter, not spectator) have end marks
-    let active_players: Vec<_> = room.players.iter()
-        .filter(|p| !p.disconnected && !p.is_answer_setter && p.team.as_deref() != Some("0") && !p.temp_observer)
-        .collect();
-
-    if active_players.is_empty() {
-        return false;
-    }
-
-    active_players.iter().all(|p| super::marks::has_end_mark(&p.guesses))
-}

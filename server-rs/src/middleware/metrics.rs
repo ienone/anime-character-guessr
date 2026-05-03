@@ -2,7 +2,6 @@
 //!
 //! Logs every HTTP request with: method, path, status, duration_ms.
 //! Slow requests (>500ms) are emitted at WARN level.
-//! Periodically samples process memory via the `sysinfo` crate.
 //! Exposes Prometheus-format metrics at `GET /metrics`.
 
 use axum::{
@@ -14,6 +13,7 @@ use axum::{
 };
 use std::{sync::atomic::{AtomicU64, Ordering}, time::Instant};
 use tracing::{info, warn};
+use sysinfo::{Pid, System};
 
 // ─── Global atomic counters ───────────────────────────────────────────────────
 
@@ -29,6 +29,11 @@ static BUCKET_500MS:  AtomicU64 = AtomicU64::new(0);
 static BUCKET_1000MS: AtomicU64 = AtomicU64::new(0);
 static BUCKET_INF:    AtomicU64 = AtomicU64::new(0);
 static LATENCY_SUM_MS: AtomicU64 = AtomicU64::new(0);
+
+// ─── Process metrics (sampled on /metrics) ───────────────────────────────────
+
+static PROCESS_RSS_KB: AtomicU64 = AtomicU64::new(0);
+static CPU_USAGE_PERCENT_X100: AtomicU64 = AtomicU64::new(0);
 
 // ─── Middleware function ──────────────────────────────────────────────────────
 
@@ -99,8 +104,11 @@ pub async fn metrics_handler() -> impl IntoResponse {
     let b1000= BUCKET_1000MS.load(Ordering::Relaxed);
     let binf = BUCKET_INF.load(Ordering::Relaxed);
 
-    // Memory via sysinfo
-    let (rss_kb, vms_kb) = process_memory_kb();
+    // Update process metrics snapshot (best effort).
+    sample_process_metrics();
+    let rss_kb = PROCESS_RSS_KB.load(Ordering::Relaxed);
+    let cpu_x100 = CPU_USAGE_PERCENT_X100.load(Ordering::Relaxed);
+    let cpu_percent = (cpu_x100 as f64) / 100.0;
 
     let body = format!(
         "# HELP http_requests_total Total HTTP requests\n\
@@ -136,9 +144,9 @@ pub async fn metrics_handler() -> impl IntoResponse {
          # TYPE process_rss_kb gauge\n\
          process_rss_kb {rss_kb}\n\
          \n\
-         # HELP process_vms_kb Virtual memory size (KB)\n\
-         # TYPE process_vms_kb gauge\n\
-         process_vms_kb {vms_kb}\n",
+         # HELP cpu_usage_percent Process CPU usage percent (0-100)\n\
+         # TYPE cpu_usage_percent gauge\n\
+         cpu_usage_percent {cpu_percent}\n",
         total=total, slow=slow, errors=errors, avg_ms=avg_ms, sum_ms=sum_ms,
         b10=b10+b50+b100+b500+b1000+binf,
         b50=b50+b100+b500+b1000+binf,
@@ -146,7 +154,7 @@ pub async fn metrics_handler() -> impl IntoResponse {
         b500=b500+b1000+binf,
         b1000=b1000+binf,
         binf=binf,
-        rss_kb=rss_kb, vms_kb=vms_kb,
+        rss_kb=rss_kb, cpu_percent=cpu_percent,
     );
 
     (
@@ -156,25 +164,26 @@ pub async fn metrics_handler() -> impl IntoResponse {
     )
 }
 
-/// Read process memory from /proc/self/status (Linux) or via sysinfo on other platforms.
-fn process_memory_kb() -> (u64, u64) {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            let mut rss = 0u64;
-            let mut vms = 0u64;
-            for line in status.lines() {
-                if line.starts_with("VmRSS:") {
-                    rss = line.split_whitespace().nth(1)
-                        .and_then(|v| v.parse().ok()).unwrap_or(0);
-                } else if line.starts_with("VmSize:") {
-                    vms = line.split_whitespace().nth(1)
-                        .and_then(|v| v.parse().ok()).unwrap_or(0);
-                }
-            }
-            return (rss, vms);
-        }
+fn sample_process_metrics() {
+    // sysinfo CPU usage is a delta between refreshes; keep a small static System
+    // to preserve previous ticks across /metrics calls.
+    static SYS: std::sync::OnceLock<std::sync::Mutex<System>> = std::sync::OnceLock::new();
+    let sys = SYS.get_or_init(|| std::sync::Mutex::new(System::new()));
+    let mut system = sys.lock().unwrap();
+
+    let pid = Pid::from_u32(std::process::id());
+
+    system.refresh_cpu_all();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    if let Some(p) = system.process(pid) {
+        let rss_kb = p.memory(); // KB
+        PROCESS_RSS_KB.store(rss_kb, Ordering::Relaxed);
+
+        // On some platforms sysinfo may report >100 for multi-core aggregate usage.
+        let cpu = p.cpu_usage() as f64;
+        let cpu_clamped = cpu.max(0.0).min(100.0);
+        let cpu_x100 = (cpu_clamped * 100.0).round() as u64;
+        CPU_USAGE_PERCENT_X100.store(cpu_x100, Ordering::Relaxed);
     }
-    // Fallback (Windows / macOS)
-    (0, 0)
 }

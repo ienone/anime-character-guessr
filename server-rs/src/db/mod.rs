@@ -5,7 +5,16 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::sync::Arc;
 use std::collections::HashMap;
-use serde_json::Value;
+use serde_json::{json, Value};
+use serde::Deserialize;
+use std::collections::{HashSet};
+use jieba_rs::Jieba;
+use pinyin::ToPinyin;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref JIEBA: Jieba = Jieba::new();
+}
 
 // ─── Pre-built in-memory candidate index ─────────────────────────────────────
 
@@ -46,18 +55,282 @@ pub struct CharacterCache {
     pub char_subjects: HashMap<i64, Vec<SubjectRow>>,
 }
 
+// ─── Offline subject search index (segmentation + pinyin) ───────────────────
+
+#[derive(Clone)]
+pub struct SubjectDoc {
+    pub id: i64,
+    pub stype: i64,
+    pub date: String,
+    pub collects: i64,
+    pub name: String,
+    pub name_cn: String,
+    pub images: Value,
+}
+
+pub struct SubjectSearchIndex {
+    pub docs: Vec<SubjectDoc>,
+    pub postings: HashMap<String, Vec<usize>>, // token -> doc indices
+}
+
+impl SubjectSearchIndex {
+    pub fn search(&self, keyword: &str, types: &[i64], limit: usize) -> Vec<SubjectDoc> {
+        let q = keyword.trim();
+        if q.is_empty() || limit == 0 {
+            return vec![];
+        }
+        let q_lc = q.to_lowercase();
+
+        let mut query_tokens = tokenize_query(q);
+        // also allow direct substring match on query itself
+        query_tokens.insert(q_lc.clone());
+
+        let type_filter: Option<HashSet<i64>> = if types.is_empty() {
+            None
+        } else {
+            Some(types.iter().copied().collect())
+        };
+
+        let mut scores: HashMap<usize, i64> = HashMap::new();
+
+        for tok in &query_tokens {
+            if tok.len() < 2 {
+                continue;
+            }
+            if let Some(list) = self.postings.get(tok) {
+                let w = token_weight(tok, &q_lc);
+                for &idx in list {
+                    *scores.entry(idx).or_insert(0) += w;
+                }
+            }
+        }
+
+        // Extra boost for substring match (covers non-tokenized partial input)
+        if !q_lc.is_empty() {
+            for (idx, doc) in self.docs.iter().enumerate() {
+                if let Some(ref tf) = type_filter {
+                    if !tf.contains(&doc.stype) {
+                        continue;
+                    }
+                }
+                let hay_cn = doc.name_cn.to_lowercase();
+                let hay = doc.name.to_lowercase();
+                if hay_cn.contains(&q_lc) || hay.contains(&q_lc) {
+                    *scores.entry(idx).or_insert(0) += 200;
+                }
+            }
+        }
+
+        let mut scored: Vec<(usize, i64)> = scores
+            .into_iter()
+            .filter(|(idx, _)| {
+                if let Some(ref tf) = type_filter {
+                    tf.contains(&self.docs[*idx].stype)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        scored.sort_unstable_by(|(a_idx, a_s), (b_idx, b_s)| {
+            let a_doc = &self.docs[*a_idx];
+            let b_doc = &self.docs[*b_idx];
+            b_s.cmp(a_s)
+                .then_with(|| b_doc.collects.cmp(&a_doc.collects))
+                .then_with(|| a_doc.id.cmp(&b_doc.id))
+        });
+
+        scored
+            .into_iter()
+            .take(limit.min(100))
+            .map(|(idx, _)| self.docs[idx].clone())
+            .collect()
+    }
+}
+
+fn token_weight(tok: &str, q_lc: &str) -> i64 {
+    if tok == q_lc {
+        return 500;
+    }
+    if tok.len() >= 6 {
+        60
+    } else if tok.len() >= 3 {
+        30
+    } else {
+        10
+    }
+}
+
+fn normalize_token(s: &str) -> String {
+    s.trim()
+        .to_lowercase()
+        .replace([' ', '\t', '\n', '\r', '　'], "")
+}
+
+fn is_ascii_word(s: &str) -> bool {
+    s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn tokenize_query(q: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let q_norm = normalize_token(q);
+    if q_norm.is_empty() {
+        return out;
+    }
+
+    // basic splits (latin / symbols)
+    for part in q
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .map(normalize_token)
+        .filter(|s| !s.is_empty())
+    {
+        out.insert(part);
+    }
+
+    // pinyin expansions: allow searching by full pinyin or initials
+    let (py_full, py_initials) = to_pinyin_full_and_initials(&q_norm);
+    if !py_full.is_empty() {
+        out.insert(py_full);
+    }
+    if !py_initials.is_empty() {
+        out.insert(py_initials);
+    }
+
+    // For CJK input, jieba cut adds much better recall
+    for w in JIEBA.cut(q, false) {
+        let t = normalize_token(w);
+        if t.len() >= 2 {
+            out.insert(t);
+        }
+    }
+
+    out
+}
+
+fn to_pinyin_full_and_initials(s: &str) -> (String, String) {
+    let mut full = String::new();
+    let mut initials = String::new();
+    for ch in s.chars() {
+        if let Some(py) = ch.to_pinyin() {
+            let p = py.plain().to_string();
+            if let Some(first) = p.chars().next() {
+                initials.push(first);
+            }
+            full.push_str(&p);
+        } else if ch.is_ascii_alphabetic() {
+            let lower = ch.to_ascii_lowercase();
+            full.push(lower);
+            initials.push(lower);
+        }
+    }
+    (full, initials)
+}
+
+// ─── Offline character image URL mapping ─────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CharacterImageEntry {
+    pub id: i64,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub image_grid: Vec<String>,
+    #[serde(default)]
+    pub image_medium: Vec<String>,
+}
+
+pub struct CharacterImageIndex {
+    pub list: Vec<CharacterImageEntry>,
+    /// id -> index into `list`
+    pub by_id: HashMap<i64, usize>,
+}
+
+// ─── Offline character search index (segmentation + pinyin) ─────────────────
+
+#[derive(Clone)]
+pub struct CharacterDoc {
+    pub id: i64,
+    pub name: String,
+    pub infobox: String,
+    pub summary: String,
+    pub collects: i64,
+    pub comments: i64,
+}
+
+pub struct CharacterSearchIndex {
+    pub docs: Vec<CharacterDoc>,
+    pub postings: HashMap<String, Vec<usize>>, // token -> doc indices
+}
+
+impl CharacterSearchIndex {
+    pub fn search(&self, keyword: &str, offset: usize, limit: usize) -> Vec<CharacterDoc> {
+        let q = keyword.trim();
+        if q.is_empty() || limit == 0 {
+            return vec![];
+        }
+        let q_lc = q.to_lowercase();
+
+        let mut query_tokens = tokenize_query(q);
+        query_tokens.insert(q_lc.clone());
+
+        let mut scores: HashMap<usize, i64> = HashMap::new();
+        for tok in &query_tokens {
+            if tok.len() < 2 {
+                continue;
+            }
+            if let Some(list) = self.postings.get(tok) {
+                let w = token_weight(tok, &q_lc);
+                for &idx in list {
+                    *scores.entry(idx).or_insert(0) += w;
+                }
+            }
+        }
+
+        // Substring boost for name/infobox-derived fields.
+        if !q_lc.is_empty() {
+            for (idx, doc) in self.docs.iter().enumerate() {
+                let hay = doc.name.to_lowercase();
+                if hay.contains(&q_lc) {
+                    *scores.entry(idx).or_insert(0) += 200;
+                }
+            }
+        }
+
+        let mut scored: Vec<(usize, i64)> = scores.into_iter().collect();
+        scored.sort_unstable_by(|(a_idx, a_s), (b_idx, b_s)| {
+            let a_doc = &self.docs[*a_idx];
+            let b_doc = &self.docs[*b_idx];
+            b_s.cmp(a_s)
+                .then_with(|| (b_doc.collects + b_doc.comments).cmp(&(a_doc.collects + a_doc.comments)))
+                .then_with(|| a_doc.id.cmp(&b_doc.id))
+        });
+
+        scored
+            .into_iter()
+            .skip(offset)
+            .take(limit.min(50))
+            .map(|(idx, _)| self.docs[idx].clone())
+            .collect()
+    }
+}
+
 // ─── DbPools ──────────────────────────────────────────────────────────────────
 
 pub struct DbPools {
     pub archive_db: Pool<SqliteConnectionManager>,
     pub app_db: Pool<SqliteConnectionManager>,
-    pub character_ids: Vec<i64>,
     /// Pre-built candidate index: enables sub-millisecond character filtering
     pub candidate_index: CandidateIndex,
     /// Full in-memory character + subject data: eliminates all DB queries on hot path
     pub character_cache: Arc<CharacterCache>,
     /// Directory for locally cached/transcoded character images.
     pub image_cache_dir: String,
+    /// Offline image URL mapping loaded from JSON.
+    pub character_image_index: Arc<CharacterImageIndex>,
+    /// Offline subject search index (segmentation + pinyin).
+    pub subject_search_index: Arc<SubjectSearchIndex>,
+    /// Offline character search index (segmentation + pinyin).
+    pub character_search_index: Arc<CharacterSearchIndex>,
 }
 
 pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
@@ -102,26 +375,239 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
     tracing::info!("Building in-memory character cache (this may take a few seconds)...");
     let t0 = std::time::Instant::now();
 
-    let character_ids = load_character_ids(&archive_conn)?;
     let candidate_index = build_candidate_index(&archive_conn)?;
     let character_cache = Arc::new(build_character_cache(&archive_conn)?);
+    let subject_search_index = Arc::new(build_subject_search_index(&archive_conn)?);
+    let character_search_index = Arc::new(build_character_search_index(&archive_conn)?);
+
+    let character_image_index = Arc::new(load_character_image_index(&config.character_images_path)?);
 
     tracing::info!(
-        "Cache ready in {:.2}s — {} chars, {} candidate entries, {} subject rows cached",
+        "Cache ready in {:.2}s — {} chars, {} candidate entries, {} subject rows cached, {} image mappings",
         t0.elapsed().as_secs_f64(),
         character_cache.char_json.len(),
         candidate_index.all.len(),
         character_cache.char_subjects.values().map(|v| v.len()).sum::<usize>(),
+        character_image_index.list.len(),
     );
 
     Ok(Arc::new(DbPools {
         archive_db,
         app_db,
-        character_ids,
         candidate_index,
         character_cache,
         image_cache_dir: config.image_cache_dir.clone(),
+        character_image_index,
+        subject_search_index,
+        character_search_index,
     }))
+}
+
+fn build_subject_search_index(conn: &Connection) -> anyhow::Result<SubjectSearchIndex> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, date, collects, raw_json
+         FROM subjects
+         WHERE nsfw = 0
+         ORDER BY collects DESC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2).unwrap_or_default(),
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+
+    let mut docs: Vec<SubjectDoc> = Vec::new();
+    let mut by_id: HashMap<i64, usize> = HashMap::new();
+    let mut postings: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for row in rows {
+        let (id, stype, date, collects, raw) = match row {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let v: Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let name_cn = v.get("name_cn").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let images = v.get("images").cloned().unwrap_or(json!({}));
+
+        let idx = docs.len();
+        docs.push(SubjectDoc { id, stype, date, collects, name: name.clone(), name_cn: name_cn.clone(), images });
+        by_id.insert(id, idx);
+
+        let mut tokens = HashSet::<String>::new();
+
+        // raw names
+        let name_norm = normalize_token(&name);
+        let name_cn_norm = normalize_token(&name_cn);
+        if !name_norm.is_empty() {
+            tokens.insert(name_norm.clone());
+        }
+        if !name_cn_norm.is_empty() {
+            tokens.insert(name_cn_norm.clone());
+        }
+
+        // ascii word split (romaji / english)
+        for part in name
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .map(normalize_token)
+            .filter(|s| s.len() >= 2 && is_ascii_word(s))
+        {
+            tokens.insert(part);
+        }
+
+        // jieba segmentation for chinese name fields
+        if !name_cn.is_empty() {
+            for w in JIEBA.cut(&name_cn, false) {
+                let t = normalize_token(w);
+                if t.len() >= 2 {
+                    tokens.insert(t);
+                }
+            }
+        }
+
+        // pinyin expansions (full + initials)
+        if !name_cn_norm.is_empty() {
+            let (py_full, py_initials) = to_pinyin_full_and_initials(&name_cn_norm);
+            if py_full.len() >= 2 {
+                tokens.insert(py_full);
+            }
+            if py_initials.len() >= 2 {
+                tokens.insert(py_initials);
+            }
+        }
+
+        // index all tokens
+        for t in tokens {
+            postings.entry(t).or_default().push(idx);
+        }
+    }
+
+    Ok(SubjectSearchIndex { docs, postings })
+}
+
+fn build_character_search_index(conn: &Connection) -> anyhow::Result<CharacterSearchIndex> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, collects, comments, raw_json
+         FROM characters
+         WHERE role = 1
+         ORDER BY collects DESC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+
+    let mut docs: Vec<CharacterDoc> = Vec::new();
+    let mut postings: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for row in rows {
+        let (id, name, collects, comments, raw) = match row {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let v: Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let infobox = v.get("infobox").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string();
+
+        let idx = docs.len();
+        docs.push(CharacterDoc { id, name: name.clone(), infobox: infobox.clone(), summary, collects, comments });
+
+        let mut tokens = HashSet::<String>::new();
+
+        let name_norm = normalize_token(&name);
+        if !name_norm.is_empty() {
+            tokens.insert(name_norm.clone());
+        }
+
+        // tokenise by separators for latin/romaji names
+        for part in name
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .map(normalize_token)
+            .filter(|s| s.len() >= 2)
+        {
+            tokens.insert(part);
+        }
+
+        // jieba cut on the name (helps CN names stored in `name`)
+        for w in JIEBA.cut(&name, false) {
+            let t = normalize_token(w);
+            if t.len() >= 2 {
+                tokens.insert(t);
+            }
+        }
+
+        // Extract CN name from infobox (if present) and index it.
+        if let Some(cn) = extract_infobox_field_inline(&infobox, "简体中文名") {
+            let cn_norm = normalize_token(cn);
+            if cn_norm.len() >= 2 {
+                tokens.insert(cn_norm.clone());
+                for w in JIEBA.cut(cn, false) {
+                    let t = normalize_token(w);
+                    if t.len() >= 2 {
+                        tokens.insert(t);
+                    }
+                }
+                let (py_full, py_initials) = to_pinyin_full_and_initials(&cn_norm);
+                if py_full.len() >= 2 {
+                    tokens.insert(py_full);
+                }
+                if py_initials.len() >= 2 {
+                    tokens.insert(py_initials);
+                }
+            }
+        }
+
+        // Extract english/romaji alias from infobox and index it (lowercased, no spaces)
+        if let Some(en) = extract_alias_inline(&infobox, "英文名").or_else(|| extract_alias_inline(&infobox, "罗马字")) {
+            let en_norm = normalize_token(en);
+            if en_norm.len() >= 2 {
+                tokens.insert(en_norm);
+            }
+        }
+
+        for t in tokens {
+            postings.entry(t).or_default().push(idx);
+        }
+    }
+
+    Ok(CharacterSearchIndex { docs, postings })
+}
+
+fn extract_infobox_field_inline<'a>(infobox: &'a str, key: &str) -> Option<&'a str> {
+    let pattern = format!("|{}=", key);
+    let start = infobox.find(&pattern)? + pattern.len();
+    let rest = &infobox[start..];
+    let end = rest.find('\n').or_else(|| rest.find('\r')).unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn extract_alias_inline<'a>(infobox: &'a str, alias_key: &str) -> Option<&'a str> {
+    let search = format!("[{}|", alias_key);
+    let start = infobox.find(&search)? + search.len();
+    let rest = &infobox[start..];
+    let end = rest.find(']').unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 /// Build the in-memory candidate index from archive.sqlite.
@@ -170,14 +656,6 @@ fn build_candidate_index(conn: &Connection) -> anyhow::Result<CandidateIndex> {
     all.sort_unstable_by(|a, b| b.2.cmp(&a.2));
 
     Ok(CandidateIndex { by_type, all })
-}
-
-fn load_character_ids(conn: &Connection) -> anyhow::Result<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM characters")?;
-    let ids = stmt.query_map([], |row| row.get(0))?
-        .filter_map(Result::ok)
-        .collect::<Vec<i64>>();
-    Ok(ids)
 }
 
 /// Pre-load ALL character JSON and subject data into memory.
@@ -247,6 +725,20 @@ fn build_character_cache(conn: &Connection) -> anyhow::Result<CharacterCache> {
     }
 
     Ok(CharacterCache { char_json, char_subjects })
+}
+
+fn load_character_image_index(path: &str) -> anyhow::Result<CharacterImageIndex> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read CHARACTER_IMAGES_PATH at {}", path))?;
+    let list: Vec<CharacterImageEntry> = serde_json::from_str(&text)
+        .with_context(|| format!("Failed to parse character images JSON at {}", path))?;
+
+    let mut by_id: HashMap<i64, usize> = HashMap::with_capacity(list.len());
+    for (idx, entry) in list.iter().enumerate() {
+        by_id.insert(entry.id, idx);
+    }
+
+    Ok(CharacterImageIndex { list, by_id })
 }
 
 pub async fn with_archive_db<T, F>(pools: Arc<DbPools>, f: F) -> anyhow::Result<T>

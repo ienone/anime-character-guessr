@@ -19,7 +19,61 @@ fn emit_error(socket: &SocketRef, event: &str, message: &str) {
     );
 }
 
-fn broadcast_players(io: &SocketIo, room_id: &str, room: &Room, extra: Option<Value>) {
+fn merge_extra(a: Option<Value>, b: Option<Value>) -> Option<Value> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(Value::Object(mut a)), Some(Value::Object(b))) => {
+            for (k, v) in b {
+                a.insert(k, v);
+            }
+            Some(Value::Object(a))
+        }
+        // If types mismatch, last wins.
+        (_, Some(b)) => Some(b),
+    }
+}
+
+fn broadcast_players(io: &SocketIo, room_id: &str, room: &mut Room, extra: Option<Value>) {
+    // Coalesce short bursts of updatePlayers broadcasts for better performance and
+    // smoother UI (mirrors Node's broadcastPlayers cooldown).
+    const COOLDOWN_MS: i64 = 120;
+    let now = Utc::now().timestamp_millis();
+
+    let mut force_immediate = false;
+    let mut extra_no_force: Option<Value> = None;
+    if let Some(Value::Object(mut obj)) = extra {
+        if obj.remove("forceImmediate").and_then(|v| v.as_bool()).unwrap_or(false) {
+            force_immediate = true;
+        }
+        if !obj.is_empty() {
+            extra_no_force = Some(Value::Object(obj));
+        }
+    }
+
+    if !force_immediate {
+        if let Some(last) = room._last_players_broadcast_at {
+            if now - last < COOLDOWN_MS {
+                room._pending_player_broadcast_extra = merge_extra(
+                    room._pending_player_broadcast_extra.take(),
+                    extra_no_force,
+                );
+                // Mark as due; will be flushed at the next event boundary.
+                let due = last + COOLDOWN_MS;
+                room._player_broadcast_due_at = Some(
+                    room._player_broadcast_due_at
+                        .map(|prev| prev.min(due))
+                        .unwrap_or(due),
+                );
+                return;
+            }
+        }
+    }
+
+    let merged_extra = merge_extra(room._pending_player_broadcast_extra.take(), extra_no_force);
+    room._player_broadcast_due_at = None;
+    room._last_players_broadcast_at = Some(now);
+
     let mut payload = serde_json::Map::new();
     payload.insert("players".to_string(), json!(room.players));
     payload.insert("isPublic".to_string(), json!(room.is_public));
@@ -31,13 +85,38 @@ fn broadcast_players(io: &SocketIo, room_id: &str, room: &Room, extra: Option<Va
             .unwrap_or(Value::Null),
     );
 
-    if let Some(Value::Object(extra_obj)) = extra {
+    if let Some(Value::Object(extra_obj)) = merged_extra {
         for (k, v) in extra_obj {
             payload.insert(k, v);
         }
     }
 
     let _ = io.to(room_id.to_string()).emit("updatePlayers", &Value::Object(payload));
+}
+
+fn flush_players_if_due(io: &SocketIo, room_id: &str, room: &mut Room) {
+    let Some(due_at) = room._player_broadcast_due_at else {
+        return;
+    };
+    let now = Utc::now().timestamp_millis();
+    if now < due_at {
+        return;
+    }
+    // Clear due flag first to avoid recursion loops.
+    room._player_broadcast_due_at = None;
+    // Flush pending extras even if no new extra was requested.
+    broadcast_players(io, room_id, room, None);
+}
+
+fn broadcast_players_force(io: &SocketIo, room_id: &str, room: &mut Room) {
+    broadcast_players(
+        io,
+        room_id,
+        room,
+        Some(json!({
+            "forceImmediate": true
+        })),
+    );
 }
 
 fn emit_guess_history_update_to_allowed(io: &SocketIo, _room_id: &str, room: &Room, actor_id: &str) {
@@ -88,6 +167,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
         socket.on("createRoom", move |socket: SocketRef, Data::<Value>(data)| {
             let state = Arc::clone(&state_create);
             async move {
+                // flush pending broadcast if due (event boundary)
                 let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let username = data.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 
@@ -139,6 +219,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                     settings: None,
                     _last_players_broadcast_at: None,
                     _pending_player_broadcast_extra: None,
+                    _player_broadcast_due_at: None,
                 };
 
                 state.rooms.insert(room_id.clone(), room.clone());
@@ -207,6 +288,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                         settings: None,
                         _last_players_broadcast_at: None,
                         _pending_player_broadcast_extra: None,
+                        _player_broadcast_due_at: None,
                     };
 
                     state.rooms.insert(room_id.clone(), room.clone());
@@ -230,6 +312,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                     Some(r) => r,
                     None => return,
                 };
+                flush_players_if_due(&io_clone, &room_id, &mut room);
                 room.last_active = Utc::now().timestamp_millis();
 
                 if room.current_game.is_some() {
@@ -305,12 +388,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                         }
 
                         let _ = socket.join(room_id.clone());
-                        let payload = json!({
-                            "players": room.players,
-                            "isPublic": room.is_public,
-                            "answerSetterId": room.answer_setter_id,
-                        });
-                        let _ = io_clone.to(room_id.clone()).emit("updatePlayers", &payload);
+                        broadcast_players_force(&io_clone, &room_id, &mut room);
                         let _ = socket.emit("roomNameUpdated", &json!({ "roomName": room.room_name }));
 
                         // Emit snapshot
@@ -378,12 +456,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                             }
 
                             let _ = socket.join(room_id.clone());
-                            let payload = json!({
-                                "players": room.players,
-                                "isPublic": room.is_public,
-                                "answerSetterId": room.answer_setter_id,
-                            });
-                            let _ = io_clone.to(room_id.clone()).emit("updatePlayers", &payload);
+                            broadcast_players_force(&io_clone, &room_id, &mut room);
                             let _ = socket.emit("roomNameUpdated", &json!({ "roomName": room.room_name }));
 
                             if let Some(ref game) = room.current_game {
@@ -449,12 +522,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                 room.players.push(new_player);
                 let _ = socket.join(room_id.clone());
 
-                let payload = json!({
-                    "players": room.players,
-                    "isPublic": room.is_public,
-                    "answerSetterId": room.answer_setter_id,
-                });
-                let _ = io_clone.to(room_id.clone()).emit("updatePlayers", &payload);
+                broadcast_players_force(&io_clone, &room_id, &mut room);
                 let _ = socket.emit("roomNameUpdated", &json!({ "roomName": room.room_name }));
 
                 if let Some(ref game) = room.current_game {
@@ -533,12 +601,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>) {
                         game.sync_players_completed.remove(&socket.id.to_string());
                     }
 
-                    let payload = json!({
-                        "players": room.players,
-                        "isPublic": room.is_public,
-                        "answerSetterId": room.answer_setter_id,
-                    });
-                    let _ = io_clone.to(room_id.clone()).emit("updatePlayers", &payload);
+                    broadcast_players_force(&io_clone, &room_id, room);
                     break;
                 }
             }
@@ -555,6 +618,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
         async move {
             let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             let Some(player_idx) = room.players.iter().position(|p| p.id == socket.id.to_string()) else {
                 let _ = socket.emit("error", &json!({ "message": "连接中断了" }));
                 return;
@@ -568,8 +632,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
                 return;
             }
             room.players[player_idx].ready = !room.players[player_idx].ready;
-            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
-            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+            broadcast_players_force(&io_clone, &room_id, &mut room);
         }
     });
 
@@ -581,6 +644,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
         async move {
             let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
                 let _ = socket.emit("error", &json!({ "message": "只有房主可以更改设置" }));
                 return;
@@ -614,13 +678,13 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
         async move {
             let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
                 let _ = socket.emit("error", &json!({ "message": "只有房主可以更改房间状态" }));
                 return;
             }
             room.is_public = !room.is_public;
-            let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
-            let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+            broadcast_players_force(&io_clone, &room_id, &mut room);
         }
     });
 
@@ -633,6 +697,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let room_name = data.get("roomName").and_then(|v| v.as_str()).unwrap_or("").trim().chars().take(30).collect::<String>();
             let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
                 let _ = socket.emit("error", &json!({ "message": "只有房主可以修改房名" }));
                 return;
@@ -650,6 +715,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
         async move {
             let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             if !room.players.iter().any(|p| p.id == socket.id.to_string() && p.is_host) {
                 let _ = socket.emit("error", &json!({ "message": "只有房主可以进入出题模式" }));
                 return;
@@ -671,10 +737,10 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             if let Some(p) = room.players.iter_mut().find(|p| p.id == socket.id.to_string()) {
                 p.message = message;
-                let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
-                let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+                broadcast_players_force(&io_clone, &room_id, &mut room);
             }
         }
     });
@@ -688,6 +754,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let team = data.get("team").and_then(|v| v.as_str()).map(|s| s.to_string());
             let mut room = match state.rooms.get_mut(&room_id) { Some(r) => r, None => return };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             
             // Allow empty string to reset team, else '0'-'8'
             let team_parsed = match team.as_deref() {
@@ -698,8 +765,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
 
             if let Some(p) = room.players.iter_mut().find(|p| p.id == socket.id.to_string()) {
                 p.team = team_parsed;
-                let payload = json!({ "players": room.players, "isPublic": room.is_public, "answerSetterId": room.answer_setter_id });
-                let _ = io_clone.to(room_id).emit("updatePlayers", &payload);
+                broadcast_players_force(&io_clone, &room_id, &mut room);
             }
         }
     });
@@ -826,7 +892,9 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
                 "answerSetterId": setter_id,
                 "setterUsername": setter_name
             }));
-            broadcast_players(&io_clone, &room_id, &room, None);
+            broadcast_players(&io_clone, &room_id, &mut room, Some(json!({
+                "answerSetterId": setter_id
+            })));
         }
     });
 
@@ -876,10 +944,15 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             }));
             let _ = io_clone.to(room_id.clone()).emit("tagBanStateUpdate", &json!({ "tagBanState": [] }));
 
-            // Initial sync/nonstop progress (syncWaiting / nonstopProgress / syncGameEnding)
+            // Initial sync/nonstop progress (syncWaiting / nonstopProgress)
             gameplay::emit_sync_and_nonstop_state(&mut room, &room_id, &io_clone, true);
             
             info!("game started in {}", room_id);
+
+            // Mirror Node: ensure updatePlayers gets answerSetterId=null immediately after gameStart.
+            broadcast_players(&io_clone, &room_id, &mut room, Some(json!({
+                "answerSetterId": Value::Null
+            })));
         }
     });
 
@@ -931,7 +1004,9 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             }
 
             gameplay::emit_sync_and_nonstop_state(&mut room, &room_id, &io_clone, true);
-            broadcast_players(&io_clone, &room_id, &room, None);
+            broadcast_players(&io_clone, &room_id, &mut room, Some(json!({
+                "answerSetterId": Value::Null
+            })));
 
             let _ = io_clone.to(room_id.clone()).emit(
                 "gameStart",
@@ -990,6 +1065,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
                 Some(r) => r,
                 None => return,
             };
+            flush_players_if_due(&io_clone, &room_id, &mut room);
             room.last_active = Utc::now().timestamp_millis();
 
             let actor_id = socket.id.to_string();
@@ -1034,7 +1110,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             // Pre-check attempt limit before writing this guess
             let pre_limit = gameplay::enforce_attempt_limit(&mut room, &actor_id, false);
             if pre_limit.exhausted {
-                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_players(&io_clone, &room_id, &mut room, None);
                 broadcast_guess_history_update(&io_clone, &room_id, &room);
                 let _ = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
                 emit_error(&socket, "playerGuess", "已用尽可用次数");
@@ -1216,7 +1292,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
 
             let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
             if !finalized {
-                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_players(&io_clone, &room_id, &mut room, None);
             }
         }
     });
@@ -1473,7 +1549,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
 
             let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
             if !finalized {
-                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_players(&io_clone, &room_id, &mut room, None);
             }
         }
     });
@@ -1656,13 +1732,13 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
                         game.sync_players_completed.insert(id);
                     }
                 }
-                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_players(&io_clone, &room_id, &mut room, None);
                 gameplay::update_sync_progress(&mut room, &room_id, &io_clone);
             }
 
             let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
             if !finalized {
-                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_players(&io_clone, &room_id, &mut room, None);
             }
         }
     });
@@ -1738,7 +1814,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
             room.players[player_idx].temp_observer = true;
             let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
             if !finalized {
-                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_players(&io_clone, &room_id, &mut room, None);
             }
         }
     });
@@ -1784,7 +1860,7 @@ fn register_room_handlers(socket: SocketRef, state: Arc<ServerState>, io: Socket
 
             let finalized = gameplay::run_standard_flow(&mut room, &room_id, &io_clone, false, true);
             if !finalized {
-                broadcast_players(&io_clone, &room_id, &room, None);
+                broadcast_players(&io_clone, &room_id, &mut room, None);
             }
         }
     });

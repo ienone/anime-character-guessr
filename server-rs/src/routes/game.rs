@@ -36,11 +36,6 @@ pub fn assemble_character(cache: &CharacterCache, char_id: i64, settings: &GameS
     assemble_payload(char_id, char_val, subject_infos, settings)
 }
 
-/// Build a character payload for a *specific* character (used by `/api/game/character`).
-pub fn assemble_character_by_id(cache: &CharacterCache, char_id: i64, settings: &GameSettings) -> Result<Value> {
-    assemble_character(cache, char_id, settings)
-}
-
 /// Pick a random character consistent with `settings` using the pre-built
 /// in-memory index — zero DB round-trips for candidate selection.
 /// Returns `(char_id, payload)` after assembling from CharacterCache.
@@ -200,12 +195,11 @@ fn assemble_payload(
         .or_else(|| extract_alias(infobox_str, "罗马字"))
         .map(|s| s.to_string());
 
-    // Image from images field (prefer medium > large > grid)
-    let images = char_val.get("images");
-    let image = images.and_then(|i| i.get("medium").or_else(|| i.get("large")))
-        .and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let image_grid = images.and_then(|i| i.get("grid").or_else(|| i.get("small")))
-        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // Always serve images via our proxy endpoint; backend will fetch+cache as WebP.
+    // This avoids leaking external URLs to the client and works even if archive.sqlite
+    // strips the original "images" field from character raw_json.
+    let image = format!("/img/{}.webp", char_id);
+    let image_grid = format!("/img/{}.webp", char_id);
 
     // ── Filter subjects to relevant types + years ────────────────────────────
     let allowed_types = settings.subject_types();
@@ -423,4 +417,40 @@ fn extract_alias<'a>(infobox: &'a str, alias_key: &str) -> Option<&'a str> {
     let end = rest.find(']').unwrap_or(rest.len());
     let value = rest[..end].trim();
     if value.is_empty() { None } else { Some(value) }
+}
+
+pub fn parse_character_basic_fields(
+    char_id: i64,
+    char_val: &Value,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    i64,
+) {
+    let infobox_str = char_val.get("infobox").and_then(|v| v.as_str()).unwrap_or("");
+    let name_cn = extract_infobox_field(infobox_str, "简体中文名").map(|s| s.to_string());
+    let gender_raw = extract_infobox_field(infobox_str, "性别").map(|s| s.to_string());
+    let gender = match gender_raw.as_deref() {
+        Some("男") => "male",
+        Some("女") => "female",
+        _ => "?",
+    }.to_string();
+    let name_en = extract_alias(infobox_str, "英文名")
+        .or_else(|| extract_alias(infobox_str, "罗马字"))
+        .map(|s| s.to_string());
+
+    let summary = char_val.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let collects = char_val.get("collects").and_then(|v| v.as_i64()).unwrap_or(0);
+    let comments = char_val.get("comments").and_then(|v| v.as_i64()).unwrap_or(0);
+    let popularity = collects + comments;
+
+    // always use proxy urls
+    let image = Some(format!("/img/{}.webp", char_id));
+    let image_grid = Some(format!("/img/{}.webp", char_id));
+
+    (name_cn, name_en, image, image_grid, gender, summary, popularity)
 }

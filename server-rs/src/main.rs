@@ -37,6 +37,22 @@ async fn main() -> anyhow::Result<()> {
     // Register socket.io event handlers (pass shared state)
     socket::register_handlers(io.clone(), Arc::clone(&server_state));
 
+    // Graceful shutdown: notify clients (matches Node behavior).
+    // Best-effort: emit on Ctrl+C (portable across platforms).
+    {
+        let io_shutdown = io.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = io_shutdown.emit(
+                "serverShutdown",
+                &serde_json::json!({
+                    "message": "服务器已关闭，这可能是更新导致的重启或出现了Bug"
+                }),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+    }
+
     // Spawn room auto-cleanup background task (replaces autoClean.js)
     utils::start_room_cleanup(Arc::clone(&server_state), io.clone());
 

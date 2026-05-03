@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 use lazy_static::lazy_static;
+use std::time::Duration;
 
 lazy_static! {
     static ref PENDING_DOWNLOADS: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
@@ -103,10 +104,49 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
 
     info!("Downloading image for character {}: {}", id, url);
 
-    let resp = match reqwest::get(&url).await {
-        Ok(r) => r,
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent("anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)")
+        .build()
+    {
+        Ok(c) => c,
         Err(e) => {
-            error!("Failed to fetch image for {}: {}", id, e);
+            error!("Failed to build reqwest client for image {}: {}", id, e);
+            return;
+        }
+    };
+
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut resp_opt: Option<reqwest::Response> = None;
+    for attempt in 0..=1 {
+        match client.get(&url).send().await {
+            Ok(r) => {
+                match r.error_for_status() {
+                    Ok(ok) => {
+                        resp_opt = Some(ok);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e.into());
+                    }
+                }
+            }
+            Err(e) => last_err = Some(e.into()),
+        }
+        if attempt == 0 {
+            warn!("Retrying image download for {} after error: {}", id, last_err.as_ref().unwrap());
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    let resp = match resp_opt {
+        Some(r) => r,
+        None => {
+            error!(
+                "Failed to fetch image for {}: {}",
+                id,
+                last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())
+            );
             return;
         }
     };
@@ -124,8 +164,7 @@ pub async fn download_and_cache_image(id: i64, url: String, pools: Arc<DbPools>)
     let transcode_result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let img = image::load_from_memory(&bytes)?;
         let path = format!("{}/{}.webp", image_cache_dir, id);
-        img.save_with_format(&path, image::ImageFormat::WebP)
-           .or_else(|_| img.save_with_format(&path, image::ImageFormat::Jpeg))?;
+        img.save_with_format(&path, image::ImageFormat::WebP)?;
         Ok(path)
     })
     .await;
@@ -209,4 +248,3 @@ pub fn start_image_cache_cleanup(pools: Arc<DbPools>) {
         }
     });
 }
-

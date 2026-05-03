@@ -10,7 +10,9 @@ bytes = "1.11.1"
 chrono = "0.4.44"
 dashmap = "6.1.0"
 image = "0.25.10"
+jieba-rs = "0.9.0"
 lazy_static = "1.5.0"
+pinyin = "0.11.0"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.33.0"
 rand = "0.10.1"
@@ -21,6 +23,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 socketioxide = { version = "0.18.3", features = ["state"] }
 tokio = { version = "1.52.1", features = ["full"] }
+sysinfo = "0.32.1"
 tower-http = { version = "0.6.8", features = ["fs", "cors", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"

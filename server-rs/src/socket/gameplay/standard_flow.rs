@@ -174,21 +174,8 @@ pub fn emit_sync_and_nonstop_state(room: &mut Room, room_id: &str, io: &SocketIo
             let _ = io.to(room_id.to_string()).emit("syncWaiting", &payload);
         }
 
-        if game.sync_winner_found && !nonstop_mode {
-            let winner_username = game
-                .sync_winner
-                .as_ref()
-                .and_then(|w| w.get("username"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let _ = io.to(room_id.to_string()).emit(
-                "syncGameEnding",
-                &json!({
-                    "winnerUsername": winner_username,
-                    "message": format!("{} 已猜对！等待本轮结束...", winner_username),
-                }),
-            );
-        }
+        // Frontend currently does not register a `syncGameEnding` handler.
+        // Keep `syncWaiting` as the sole signal.
     }
 
     if nonstop_mode {
@@ -572,24 +559,11 @@ pub fn update_sync_progress(room: &mut Room, room_id: &str, io: &SocketIo) {
                 let _ = io.to(room_id.to_string()).emit("syncWaiting", &payload);
             }
 
-            let winner_username = game
-                .sync_winner
-                .as_ref()
-                .and_then(|w| w.get("username"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let _ = io.to(room_id.to_string()).emit(
-                "syncGameEnding",
-                &json!({
-                    "winnerUsername": winner_username,
-                    "message": format!("{} 已猜对！等待本轮结束...", winner_username),
-                }),
-            );
+            // Frontend currently has no `syncGameEnding` handler; keep `syncWaiting` as the sole signal.
 
             // finalize_standard_game needs &mut room; defer until we release the `game` borrow.
             // We'll return early after finalization.
-            #[allow(dropping_references)]
-            drop(game);
+            let _ = game;
             let _ = finalize_standard_game(room, room_id, io, true);
             return;
         }
@@ -666,19 +640,7 @@ pub fn update_sync_progress(room: &mut Room, room_id: &str, io: &SocketIo) {
             .unwrap_or(false);
 
         if !nonstop_mode && game.sync_winner_found {
-            let winner_username = game
-                .sync_winner
-                .as_ref()
-                .and_then(|w| w.get("username"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let _ = io.to(room_id.to_string()).emit(
-                "syncGameEnding",
-                &json!({
-                    "winnerUsername": winner_username,
-                    "message": format!("{} 已猜对！等待本轮结束...", winner_username),
-                }),
-            );
+            // Frontend currently has no `syncGameEnding` handler; keep `syncWaiting` as the sole signal.
         }
     }
 }
@@ -765,6 +727,43 @@ pub fn compute_partial_awardees_from_guess_history(room: &Room) -> HashSet<Strin
 
     for best in best_by_group.values() {
         awardees.insert(best.player_id.clone());
+    }
+
+    awardees
+}
+
+fn compute_partial_awardees_from_guess_history_guesses(guesses: &[Value]) -> HashSet<String> {
+    let mut first_partial_index_by_player: HashMap<String, usize> = HashMap::new();
+
+    for player_guesses in guesses {
+        let list = player_guesses.get("guesses").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for (idx, g) in list.iter().enumerate() {
+            let Some(player_id) = g.get("playerId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let is_partial = g
+                .get("isPartialCorrect")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_correct = g.get("isCorrect").and_then(|v| v.as_bool()).unwrap_or(false);
+            if is_partial && !is_correct {
+                first_partial_index_by_player.entry(player_id.to_string()).or_insert(idx);
+            }
+        }
+    }
+
+    let mut awardees = HashSet::new();
+    if first_partial_index_by_player.is_empty() {
+        return awardees;
+    }
+
+    // Without the full Room context, fall back to awarding all earliest partial-correct guessers.
+    // (The main caller only uses this for +1 partial bonus and already filters observers/setters upstream.)
+    let best_idx = first_partial_index_by_player.values().copied().min().unwrap_or(usize::MAX);
+    for (pid, idx) in first_partial_index_by_player {
+        if idx == best_idx {
+            awardees.insert(pid);
+        }
     }
 
     awardees
@@ -1085,106 +1084,155 @@ pub fn finalize_nonstop_game(room: &mut Room, room_id: &str, io: &SocketIo) -> b
 }
 
 pub fn finalize_standard_game(room: &mut Room, room_id: &str, io: &SocketIo, force: bool) -> bool {
-    // Phase 1 (scoped): mutable game borrow for early checks + tagBan merge, extract fields as owned.
-    // The block ends before compute_partial_awardees_from_guess_history needs &room.
-    let (nonstop_mode, sync_mode, first_winner, total_rounds, sync_ready_to_end, answer_character_id) = {
-        let Some(game) = room.current_game.as_mut() else {
-            return false;
-        };
-
-        let nonstop_mode = game
-            .settings.as_ref().and_then(|s| s.get("nonstopMode")).and_then(|v| v.as_bool()).unwrap_or(false);
-        if nonstop_mode { return false; }
-
-        let sync_mode = game
-            .settings.as_ref().and_then(|s| s.get("syncMode")).and_then(|v| v.as_bool()).unwrap_or(false);
-
-        if sync_mode {
-            let pending_list = game.tag_ban_state_pending.clone();
-            if !pending_list.is_empty() {
-                let mut tag_ban_changed = false;
-                for entry in pending_list {
-                    let Some(tag) = entry.get("tag").and_then(|v| v.as_str()) else { continue; };
-                    let tag = tag.trim();
-                    if tag.is_empty() { continue; }
-                    let revealer_list: Vec<String> = entry.get("revealer").and_then(|v| v.as_array())
-                        .cloned().unwrap_or_default().into_iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-                    let mut target_idx: Option<usize> = None;
-                    for (i, item) in game.tag_ban_state.iter().enumerate() {
-                        if item.get("tag").and_then(|v| v.as_str()) == Some(tag) { target_idx = Some(i); break; }
-                    }
-                    if target_idx.is_none() {
-                        game.tag_ban_state.push(json!({"tag": tag, "revealer": []}));
-                        target_idx = Some(game.tag_ban_state.len() - 1);
-                        tag_ban_changed = true;
-                    }
-                    let idx = target_idx.unwrap();
-                    let existing: HashSet<String> = game.tag_ban_state[idx].get("revealer")
-                        .and_then(|v| v.as_array()).cloned().unwrap_or_default().into_iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-                    let initial_size = existing.len();
-                    let mut merged = existing;
-                    for id in revealer_list { merged.insert(id); }
-                    if merged.len() != initial_size {
-                        let mut merged_list = merged.into_iter().map(Value::String).collect::<Vec<_>>();
-                        merged_list.sort_by(|a, b| a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")));
-                        if let Some(obj) = game.tag_ban_state[idx].as_object_mut() {
-                            obj.insert("revealer".to_string(), Value::Array(merged_list));
-                        }
-                        tag_ban_changed = true;
-                    }
-                }
-                game.tag_ban_state_pending.clear();
-                if tag_ban_changed {
-                    let _ = io.to(room_id.to_string()).emit("tagBanStateUpdate",
-                        &json!({"tagBanState": game.tag_ban_state}));
-                }
-            }
-        }
-
-        let first_winner = game.first_winner.clone();
-        let total_rounds = game.settings.as_ref()
-            .and_then(|s| s.get("maxAttempts")).and_then(|v| v.as_i64()).unwrap_or(10) as i32;
-        let sync_ready_to_end = game.sync_ready_to_end;
-        let answer_character_id = game.character.get("id").cloned();
-        (nonstop_mode, sync_mode, first_winner, total_rounds, sync_ready_to_end, answer_character_id)
-        // mutable game borrow released here
+    let Some(game) = room.current_game.as_mut() else {
+        return false;
     };
 
-    // Phase 2: no mutable game borrow active — freely use &room
-    let active_players: Vec<Player> = room.players.iter()
+    let nonstop_mode = game
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("nonstopMode"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if nonstop_mode {
+        return false;
+    }
+
+    let sync_mode = game
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("syncMode"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // merge pending tagBan into state in syncMode
+    if sync_mode {
+        let pending_list = game.tag_ban_state_pending.clone();
+        if !pending_list.is_empty() {
+            let mut tag_ban_changed = false;
+            for entry in pending_list {
+                let Some(tag) = entry.get("tag").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let tag = tag.trim();
+                if tag.is_empty() {
+                    continue;
+                }
+
+                let revealer_list: Vec<String> = entry
+                    .get("revealer")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+
+                let mut target_idx: Option<usize> = None;
+                for (i, item) in game.tag_ban_state.iter().enumerate() {
+                    if item.get("tag").and_then(|v| v.as_str()) == Some(tag) {
+                        target_idx = Some(i);
+                        break;
+                    }
+                }
+
+                if target_idx.is_none() {
+                    game.tag_ban_state.push(json!({"tag": tag, "revealer": []}));
+                    target_idx = Some(game.tag_ban_state.len() - 1);
+                    tag_ban_changed = true;
+                }
+
+                let idx = target_idx.unwrap();
+                let existing: HashSet<String> = game.tag_ban_state[idx]
+                    .get("revealer")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                let initial_size = existing.len();
+
+                let mut merged = existing;
+                for id in revealer_list {
+                    merged.insert(id);
+                }
+
+                if merged.len() != initial_size {
+                    let mut merged_list = merged.into_iter().map(Value::String).collect::<Vec<_>>();
+                    merged_list.sort_by(|a, b| a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")));
+                    if let Some(obj) = game.tag_ban_state[idx].as_object_mut() {
+                        obj.insert("revealer".to_string(), Value::Array(merged_list));
+                    }
+                    tag_ban_changed = true;
+                }
+            }
+
+            game.tag_ban_state_pending.clear();
+
+            if tag_ban_changed {
+                let _ = io.to(room_id.to_string()).emit(
+                    "tagBanStateUpdate",
+                    &json!({
+                        "tagBanState": game.tag_ban_state,
+                    }),
+                );
+            }
+        }
+    }
+
+    let active_players: Vec<Player> = room
+        .players
+        .iter()
         .filter(|p| !p.is_answer_setter && (p.team.as_deref() != Some("0") || p.temp_observer))
-        .cloned().collect();
+        .cloned()
+        .collect();
+
     let all_ended = active_players.iter().all(|p| has_ended_mark(p) || p.disconnected);
+
+    let first_winner = game.first_winner.clone();
     let sync_mode_effective = sync_mode && !nonstop_mode;
 
     let mut actual_winners: Vec<Player> = Vec::new();
+
     if sync_mode_effective {
-        actual_winners = active_players.iter()
-            .filter(|p| p.guesses.contains('\u{270c}') || p.guesses.contains('\u{1f451}'))
-            .cloned().collect();
+        actual_winners = active_players
+            .iter()
+            .filter(|p| p.guesses.contains('✌') || p.guesses.contains('👑'))
+            .cloned()
+            .collect();
     } else {
-        let mut bigwinner: Option<Player> = if first_winner.as_ref()
-            .and_then(|fw| fw.get("isBigWin").and_then(|v| v.as_bool())).unwrap_or(false)
+        let answer_id = game.character.get("id").cloned();
+
+        // bigwinner priority
+        let mut bigwinner: Option<Player> = if first_winner
+            .as_ref()
+            .and_then(|fw| fw.get("isBigWin").and_then(|v| v.as_bool()))
+            .unwrap_or(false)
         {
-            let fw_id = first_winner.as_ref().and_then(|fw| fw.get("id").and_then(|v| v.as_str())).unwrap_or("");
-            active_players.iter().find(|p| p.id == fw_id).cloned()
-                .or_else(|| active_players.iter().find(|p| p.guesses.contains('\u{1f451}')).cloned())
+            let fw_id = first_winner
+                .as_ref()
+                .and_then(|fw| fw.get("id").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            active_players
+                .iter()
+                .find(|p| p.id == fw_id)
+                .cloned()
+                .or_else(|| active_players.iter().find(|p| p.guesses.contains('👑')).cloned())
         } else {
-            active_players.iter().find(|p| p.guesses.contains('\u{1f451}')).cloned()
+            active_players.iter().find(|p| p.guesses.contains('👑')).cloned()
         };
 
         if bigwinner.is_none() {
-            if let Some(ref answer_id) = answer_character_id {
+            if let Some(answer_id) = answer_id {
                 let answer_id_str = answer_id.to_string();
                 if let Some(avatar_big_winner) = active_players.iter().find(|p| {
-                    (p.guesses.contains('\u{270c}') || p.guesses.contains('\u{1f451}'))
+                    (p.guesses.contains('✌') || p.guesses.contains('👑'))
                         && p.avatar_id.as_ref().map(|v| v.to_string()) == Some(answer_id_str.clone())
                 }) {
                     let mut aw = avatar_big_winner.clone();
-                    if !aw.guesses.contains('\u{1f451}') {
-                        aw.guesses = aw.guesses.replace('\u{270c}', "") + "\u{1f451}";
+                    if !aw.guesses.contains('👑') {
+                        aw.guesses = aw.guesses.replace('✌', "") + "👑";
                     }
                     bigwinner = Some(aw);
                 }
@@ -1192,43 +1240,86 @@ pub fn finalize_standard_game(room: &mut Room, room_id: &str, io: &SocketIo, for
         }
 
         let winner: Option<Player> = if bigwinner.is_none()
-            && first_winner.as_ref().and_then(|fw| fw.get("id").and_then(|v| v.as_str())).is_some()
-            && !first_winner.as_ref().and_then(|fw| fw.get("isBigWin").and_then(|v| v.as_bool())).unwrap_or(false)
+            && first_winner
+                .as_ref()
+                .and_then(|fw| fw.get("id").and_then(|v| v.as_str()))
+                .is_some()
+            && !first_winner
+                .as_ref()
+                .and_then(|fw| fw.get("isBigWin").and_then(|v| v.as_bool()))
+                .unwrap_or(false)
         {
-            let fw_id = first_winner.as_ref().and_then(|fw| fw.get("id").and_then(|v| v.as_str())).unwrap_or("");
-            active_players.iter().find(|p| p.id == fw_id).cloned()
-                .or_else(|| active_players.iter().find(|p| p.guesses.contains('\u{270c}')).cloned())
+            let fw_id = first_winner
+                .as_ref()
+                .and_then(|fw| fw.get("id").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            active_players
+                .iter()
+                .find(|p| p.id == fw_id)
+                .cloned()
+                .or_else(|| active_players.iter().find(|p| p.guesses.contains('✌')).cloned())
         } else if bigwinner.is_none() {
-            active_players.iter().find(|p| p.guesses.contains('\u{270c}')).cloned()
+            active_players.iter().find(|p| p.guesses.contains('✌')).cloned()
         } else {
             None
         };
 
-        if let Some(w) = bigwinner.or(winner) { actual_winners.push(w); }
+        let actual_winner = bigwinner.or(winner);
+        if let Some(w) = actual_winner {
+            actual_winners.push(w);
+        }
     }
 
     let actual_winner = actual_winners.first().cloned();
-    let should_wait = sync_mode_effective && actual_winner.is_some() && !all_ended && !sync_ready_to_end && !force;
-    if actual_winner.is_some() && should_wait {
-        let _ = io.to(room_id.to_string()).emit("updatePlayers", &json!({"players": room.players}));
+    let total_rounds = game
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("maxAttempts"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(10) as i32;
+
+    let should_wait_for_sync_round = sync_mode_effective
+        && actual_winner.is_some()
+        && !all_ended
+        && !game.sync_ready_to_end
+        && !force;
+
+    if actual_winner.is_some() && should_wait_for_sync_round {
+        let _ = io.to(room_id.to_string()).emit(
+            "updatePlayers",
+            &json!({
+                "players": room.players,
+            }),
+        );
         return false;
     }
-    if actual_winner.is_none() && !all_ended { return false; }
+
+    if actual_winner.is_none() && !all_ended {
+        return false;
+    }
 
     let answer_setter_idx = room.players.iter().position(|p| p.is_answer_setter);
-    // No mutable game borrow active — safe to pass &room
-    let partial_awardees = compute_partial_awardees_from_guess_history(room);
 
-    // Phase 3: scoring (re-acquires mutable borrows of room.players as needed)
-    let primary_winner: Option<Player> = if let Some(fw_id) = first_winner.as_ref()
+    // Avoid borrow conflict: `compute_partial_awardees_from_guess_history` only needs guess history.
+    let guesses_snapshot = game.guesses.clone();
+    let partial_awardees = compute_partial_awardees_from_guess_history_guesses(&guesses_snapshot);
+
+    // compute winners score
+    let mut winner_score_results: HashMap<String, Value> = HashMap::new();
+    let primary_winner: Option<Player> = if let Some(first_winner_id) = first_winner
+        .as_ref()
         .and_then(|fw| fw.get("id").and_then(|v| v.as_str()))
     {
-        actual_winners.iter().find(|p| p.id == fw_id).cloned().or_else(|| actual_winners.first().cloned())
+        actual_winners
+            .iter()
+            .find(|p| p.id == first_winner_id)
+            .cloned()
+            .or_else(|| actual_winners.first().cloned())
     } else {
         actual_winners.first().cloned()
     };
 
-    let mut winner_score_results: HashMap<String, Value> = HashMap::new();
+    // sync mode shared scoring
     let mut shared_detail_result: Option<Value> = None;
     let mut big_winner_actual_score: i32 = 0;
 
@@ -1237,17 +1328,24 @@ pub fn finalize_standard_game(room: &mut Room, room_id: &str, io: &SocketIo, for
             let score_result = calculate_winner_score(&pw.guesses, 2, total_rounds);
             let detail_result = calculate_winner_score(&pw.guesses, 0, total_rounds);
             shared_detail_result = Some(json!({"guessCount": detail_result.guess_count}));
+
             for w in &actual_winners {
                 if let Some(p_mut) = room.players.iter_mut().find(|p| p.id == w.id) {
                     p_mut.score += score_result.total_score;
                 }
-                winner_score_results.insert(w.id.clone(), json!({
-                    "totalScore": score_result.total_score,
-                    "guessCount": detail_result.guess_count,
-                    "bonuses": score_result.bonuses,
-                }));
+                winner_score_results.insert(
+                    w.id.clone(),
+                    json!({
+                        "totalScore": score_result.total_score,
+                        "guessCount": detail_result.guess_count,
+                        "bonuses": score_result.bonuses,
+                    }),
+                );
             }
-            if pw.guesses.contains('\u{1f451}') { big_winner_actual_score = score_result.total_score; }
+
+            if pw.guesses.contains('👑') {
+                big_winner_actual_score = score_result.total_score;
+            }
         }
     } else {
         for w in &actual_winners {
@@ -1255,17 +1353,22 @@ pub fn finalize_standard_game(room: &mut Room, room_id: &str, io: &SocketIo, for
             if let Some(p_mut) = room.players.iter_mut().find(|p| p.id == w.id) {
                 p_mut.score += score_result.total_score;
             }
-            winner_score_results.insert(w.id.clone(), json!({
-                "totalScore": score_result.total_score,
-                "guessCount": score_result.guess_count,
-                "bonuses": score_result.bonuses,
-            }));
+            winner_score_results.insert(
+                w.id.clone(),
+                json!({
+                    "totalScore": score_result.total_score,
+                    "guessCount": score_result.guess_count,
+                    "bonuses": score_result.bonuses,
+                }),
+            );
         }
+
         if let Some(pw) = primary_winner.clone().or_else(|| actual_winners.first().cloned()) {
             let detail = calculate_winner_score(&pw.guesses, 0, total_rounds);
             shared_detail_result = Some(json!({"guessCount": detail.guess_count}));
         }
-        for w in actual_winners.iter().filter(|p| p.guesses.contains('\u{1f451}')) {
+
+        for w in actual_winners.iter().filter(|p| p.guesses.contains('👑')) {
             let res = calculate_winner_score(&w.guesses, 2, total_rounds);
             big_winner_actual_score = big_winner_actual_score.max(res.total_score);
         }
@@ -1273,49 +1376,83 @@ pub fn finalize_standard_game(room: &mut Room, room_id: &str, io: &SocketIo, for
 
     let winner_id_set: HashSet<String> = actual_winners.iter().map(|w| w.id.clone()).collect();
     for p in &mut room.players {
-        if p.is_answer_setter || p.team.as_deref() == Some("0") || winner_id_set.contains(&p.id) { continue; }
-        if partial_awardees.contains(&p.id) { p.score += 1; }
+        if p.is_answer_setter {
+            continue;
+        }
+        if p.team.as_deref() == Some("0") {
+            continue;
+        }
+        if winner_id_set.contains(&p.id) {
+            continue;
+        }
+        if partial_awardees.contains(&p.id) {
+            p.score += 1;
+        }
     }
 
-    let winner_guess_count = shared_detail_result.as_ref()
-        .and_then(|d| d.get("guessCount")).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let winner_guess_count = shared_detail_result
+        .as_ref()
+        .and_then(|d| d.get("guessCount"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    // score changes
     let score_changes = build_score_changes_standard(&room.players, &actual_winners, &winner_score_results, &partial_awardees);
 
-    // Read guesses_payload via immutable ref (no mutable game borrow needed)
-    let guesses_payload = room.current_game.as_ref().map(|g| g.guesses.clone()).unwrap_or_default();
+    let guesses_payload = guesses_snapshot;
 
     let score_details = if let Some(setter_i) = answer_setter_idx {
         let primary_guesses = primary_winner.as_ref().map(|p| p.guesses.clone()).unwrap_or_default();
         let setter_score = calculate_setter_score(&primary_guesses, winner_guess_count, big_winner_actual_score, total_rounds);
         let setter_username = room.players[setter_i].username.clone();
         room.players[setter_i].score += setter_score;
+
         let setter_info = Some(json!({
-            "type": "setter", "username": setter_username, "score": setter_score,
+            "type": "setter",
+            "username": setter_username,
+            "score": setter_score,
             "reason": setter_score_reason(&primary_guesses, winner_guess_count, big_winner_actual_score, total_rounds)
         }));
+
         generate_score_details(&room.players, &score_changes, setter_info)
     } else {
         generate_score_details(&room.players, &score_changes, None)
     };
 
-    let _ = io.to(room_id.to_string()).emit("gameEnded", &json!({
-        "guesses": guesses_payload, "scoreDetails": score_details,
-    }));
+    let _ = io.to(room_id.to_string()).emit(
+        "gameEnded",
+        &json!({
+            "guesses": guesses_payload,
+            "scoreDetails": score_details,
+        }),
+    );
 
     revert_setter_observers(room, room_id, io);
-    for p in &mut room.players { p.is_answer_setter = false; }
+
+    for p in &mut room.players {
+        p.is_answer_setter = false;
+    }
+
     for p in &mut room.players {
         if p.joined_during_game == Some(true) {
-            p.team = None; p.joined_during_game = Some(false); p.ready = false;
+            p.team = None;
+            p.joined_during_game = Some(false);
+            p.ready = false;
         }
     }
+
     room.current_game = None;
-    let _ = io.to(room_id.to_string()).emit("updatePlayers", &json!({
-        "players": room.players, "isPublic": room.is_public, "answerSetterId": Value::Null,
-    }));
+    let _ = io.to(room_id.to_string()).emit(
+        "updatePlayers",
+        &json!({
+            "players": room.players,
+            "isPublic": room.is_public,
+            "answerSetterId": Value::Null,
+        }),
+    );
+
     true
 }
-
 
 pub fn run_standard_flow(
     room: &mut Room,

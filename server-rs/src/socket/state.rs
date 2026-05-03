@@ -109,6 +109,8 @@ pub struct Room {
     pub _last_players_broadcast_at: Option<i64>,
     #[serde(skip, default)]
     pub _pending_player_broadcast_extra: Option<Value>,
+    #[serde(skip, default)]
+    pub _player_broadcast_due_at: Option<i64>,
 }
 
 fn default_true() -> bool { true }
