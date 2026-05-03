@@ -15,25 +15,35 @@ node run_bench.js --target node
 
 # 同时对比两个后端（高负载）
 node run_bench.js --target both --concurrency 20 --requests 500
+
+# （可选）由脚本自动启动服务并测量启动时间（成功后自动关闭进程）
+node run_bench.js --spawn --target both --concurrency 20 --requests 500
 ```
 
 ## 命令行参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
+| `--mode` | `server-compare` | `server-compare`（对比 Node vs Rust）/ `api-compare`（直连 BGM vs 本地一次调用） |
 | `--target` | `both` | `node` / `rust` / `both` |
 | `--concurrency` | `10` | 并发请求数 |
 | `--requests` | `200` | 每个场景总请求数 |
 | `--nodeUrl` | `http://localhost:3000` | Node.js 服务地址 |
 | `--rustUrl` | `http://localhost:3001` | Rust 服务地址 |
 | `--output` | `./results` | 结果 JSON 保存目录 |
+| `--sampleMs` | `250` | 压测期间 `/metrics` 采样间隔（ms） |
+| `--warmupMs` | `500` | `/metrics` 采样前热身等待（ms） |
+| `--spawn` | `false` | 是否由脚本自动启动服务并测量启动时间（成功后自动关闭进程） |
+| `--startupTimeoutMs` | `20000` | 启动后等待 `/health` 通过的超时时间（ms） |
+| `--nodeCmd` | `node server.js` | `--spawn` 时启动 Node 服务的命令（工作目录为 `server/`） |
+| `--rustCmd` | `cargo run --release` | `--spawn` 时启动 Rust 服务的命令（工作目录为 `server-rs/`） |
 
 ---
 
 ## 实测结果（Rust server-rs）
 
 > 测试环境：Windows 11，archive.sqlite 约 127 MB（59,357 个角色，17,531 个作品，180,866 条关联关系）  
-> 运行参数：`--target rust --concurrency 20 --requests 500`（并发 20，共 500 请求/场景）
+> 运行参数：`--mode server-compare --target rust --concurrency 20 --requests 500 --sampleMs 250 --warmupMs 500`（并发 20，共 500 请求/场景）
 
 | 场景 | 说明 | 平均延迟 | P50 | P95 | P99 | RPS | 错误数 |
 |------|------|----------|-----|-----|-----|-----|--------|
@@ -125,6 +135,8 @@ POST /api/game/character        8     11.2     10.8     15.3      0
 results/
   rust_1746172000000.json
   node_1746172000000.json
+  server_compare_1746172000000.json
+  api_compare_1746172000000.json
 ```
 
 JSON 结构：`[{ scenario, requests, errors, durationMs, rps, avgMs, p50Ms, p95Ms, p99Ms }]`
