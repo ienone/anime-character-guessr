@@ -16,6 +16,7 @@ function Image({
   maxRetries = 10, 
   retryDelay = 5000, 
   fallbackSrc = '/assets/icon.jpg',
+  preferSource = false,
   onLoadSuccess,
   onLoadError,
   className = '',
@@ -44,15 +45,16 @@ function Image({
     };
   }, [src]);
 
-  // If src points to our `/img/:id.webp` proxy, resolve it via server first.
+  // If src points to our `/img/:id.webp` or `/img/subject/:id.webp` proxy, resolve it via server first.
   // This allows the server to attempt caching; if it can't fetch within the
   // configured time window, we fall back to direct-origin URL so the browser
   // can try loading it (client shows placeholder meanwhile).
   useEffect(() => {
-    const m = typeof src === 'string' ? src.match(/\/img\/(\d+)\.webp(?:\?.*)?$/) : null
+    const m = typeof src === 'string' ? src.match(/\/img\/(?:(subject)\/)?(\d+)\.webp(?:\?.*)?$/) : null
     if (!m) return
 
-    const id = m[1]
+    const isSubject = m[1] === 'subject'
+    const id = m[2]
     let cancelled = false
 
     async function resolve() {
@@ -62,13 +64,17 @@ function Image({
         if (fallbackSrc) setCurrentSrc(fallbackSrc)
 
         const base = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
-        const url = `${base}/api/img/resolve/${id}`
+        const url = preferSource
+          ? (isSubject ? `${base}/api/img/source/subject/${id}` : `${base}/api/img/source/${id}`)
+          : (isSubject ? `${base}/api/img/resolve/subject/${id}` : `${base}/api/img/resolve/${id}`)
         const res = await axios.get(url, { timeout: 1500 })
         if (cancelled || !mountedRef.current) return
 
         // Server returns JSON; prefer proxy url when cached, otherwise try sourceUrl.
         const data = res.data || {}
-        if (data.cached) {
+        if (preferSource && data.sourceUrl) {
+          setCurrentSrc(data.sourceUrl)
+        } else if (data.cached) {
           setCurrentSrc(data.imgUrl || src)
         } else if (data.sourceUrl) {
           // Show placeholder immediately, then try the origin URL directly.
@@ -87,7 +93,7 @@ function Image({
 
     resolve()
     return () => { cancelled = true }
-  }, [src, fallbackSrc]);
+  }, [src, fallbackSrc, preferSource]);
 
   const handleError = useCallback(() => {
     if (!mountedRef.current) return;

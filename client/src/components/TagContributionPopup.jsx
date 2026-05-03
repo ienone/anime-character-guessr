@@ -2,6 +2,7 @@ import '../styles/popups.css';
 import { useState, useEffect } from 'react';
 import { submitCharacterTags, proposeCustomTags, submitFeedbackTags } from '../utils/db';
 import { idToTags } from '../data/id_tags.js';
+import Image from './Image';
 
 function TagContributionPopup({ character, onClose }) {
   const [selectedTags, setSelectedTags] = useState([]);
@@ -25,7 +26,6 @@ function TagContributionPopup({ character, onClose }) {
   }, []);
 
   const handleTagVoteClick = (event, tag) => {
-    console.log(character);
     event.stopPropagation();
     setActiveVoteTag(activeVoteTag === tag ? null : tag);
   };
@@ -166,9 +166,10 @@ function TagContributionPopup({ character, onClose }) {
         <div className="popup-body">
           <div className="tag-contribution-container">
             <div className="character-preview">
-              <img 
+              <Image
                 src={character.image} 
                 alt={character.name} 
+                preferSource
                 className="character-preview-image"
               />
               <div className="character-preview-info">

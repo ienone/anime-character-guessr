@@ -3,6 +3,7 @@ import subaruIcon from '/assets/subaru.jpg';
 import { useState } from 'react';
 import TagContributionPopup from './TagContributionPopup';
 import { idToTags } from '../data/id_tags';
+import Image from './Image';
 
 function renderSummaryWithTags(summary) {
   if (!summary || typeof summary !== 'string') return summary;
@@ -123,9 +124,10 @@ function GameEndPopup({ result, answer, onClose }) {
         </div>
         <div className="popup-body">
           <div className="answer-character">
-            <img
+            <Image
               src={answer.image}
               alt={answer.name}
+              preferSource
               className="answer-character-image"
             />
             <div className="answer-character-info">

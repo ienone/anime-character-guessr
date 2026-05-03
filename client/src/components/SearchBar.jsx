@@ -1,6 +1,7 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import axios from '../utils/cached-axios';
 import { searchSubjects, getCharactersBySubjectId, getCharacterDetails } from '../utils/bangumi';
+import Image from './Image';
 import '../styles/search.css';
 import { submitGuessCharacterCount } from '../utils/db';
 
@@ -17,6 +18,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const [selectedSubject, setSelectedSubject] = useState(null);
   const [selectedItemIndex, setSelectedItemIndex] = useState(-1); // 当前键盘选中的项目索引
   const [isLoadingNewResults, setIsLoadingNewResults] = useState(false); // 标记是否正在加载更多结果
+  const [failedImages, setFailedImages] = useState(() => new Set());
   
   // DOM引用
   const searchContainerRef = useRef(null);
@@ -27,11 +29,134 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const INITIAL_LIMIT = 10;
   const MORE_LIMIT = 5;
 
+  const handleSearch = useCallback(async (reset = false) => {
+    if (!searchQuery.trim() || !finishInit) return;
+    
+    // Always use initial search parameters when reset is true
+    const currentLimit = reset ? INITIAL_LIMIT : MORE_LIMIT;
+    const currentOffset = reset ? 0 : offset;
+    const loadingState = reset ? setIsSearching : setIsLoadingMore;
+    
+    loadingState(true);
+    try {
+      const response = await axios.get(`${SERVER_URL}/api/archive/search/characters`, {
+        params: {
+          keyword: searchQuery.trim(),
+          limit: currentLimit,
+          offset: currentOffset
+        }
+      })
+      
+      const newResults = response.data.data.map(character => ({
+        id: character.id,
+        image: character.images?.grid || null,
+        name: character.name,
+        nameCn: character.infobox.find(item => item.key === "简体中文名")?.value || character.name,
+        nameEn: (() => {
+          const aliases = character.infobox.find(item => item.key === '别名')?.value;
+          if (aliases && Array.isArray(aliases)) {
+            const englishName = aliases.find(alias => alias.k === '英文名');
+            if (englishName) {
+              return englishName.v;
+            } else {
+              const romaji = aliases.find(alias => alias.k === '罗马字');
+              if (romaji) {
+                return romaji.v;
+              }
+            }
+          }
+          return character.name;
+        })(),
+        gender: character.gender || '?',
+        popularity: character.stat.collects+character.stat.comments
+      }));
+
+      if (reset) {
+        setSearchResults(newResults);
+        setOffset(INITIAL_LIMIT);
+      } else {
+        setSearchResults(prev => [...prev, ...newResults]);
+        setOffset(currentOffset + MORE_LIMIT);
+      }
+      
+      setHasMore(newResults.length === currentLimit);
+    } catch (error) {
+      console.error('Search failed:', error);
+      if (reset) {
+        setSearchResults([]);
+      }
+    } finally {
+      loadingState(false);
+    }
+  }, [searchQuery, finishInit, offset]);
+
+  const handleSubjectSearch = useCallback(async () => {
+    if (!searchQuery.trim() || !finishInit) return;
+    setIsSearching(true);
+    try {
+      const results = await searchSubjects(searchQuery);
+      setSearchResults(results);
+      setFailedImages(new Set());
+      setHasMore(false);
+    } catch (error) {
+      console.error('Subject search failed:', error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, [searchQuery, finishInit]);
+
+  const handleSubjectSelect = useCallback(async (subject) => {
+    setIsSearching(true);
+    setSelectedSubject(subject);
+    try {
+      const characters = await getCharactersBySubjectId(subject.id);
+      const formattedCharacters = await Promise.all(characters.map(async character => {
+        const details = await getCharacterDetails(character.id);
+        return {
+          id: character.id,
+          image: character.images?.grid || details.imageGrid || details.image || null,
+          name: character.name,
+          nameCn: details.nameCn,
+          gender: details.gender,
+          popularity: details.popularity
+        };
+      }));
+      setSearchResults(formattedCharacters);
+      setFailedImages(new Set());
+    } catch (error) {
+      console.error('Failed to fetch characters:', error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, []);
+
+  const handleLoadMore = useCallback(() => {
+    if (searchMode === 'character') {
+      handleSearch(false);
+    }
+  }, [searchMode, handleSearch]);
+
+  const handleCharacterSelect = useCallback((character) => {
+    if (!finishInit) return;
+    submitGuessCharacterCount(character.id, character.nameCn || character.name);
+    onCharacterSelect(character);
+    setSearchQuery('');
+    setSearchResults([]);
+    setFailedImages(new Set());
+    setOffset(0);
+    setHasMore(true);
+    setSelectedSubject(null);
+    setSearchMode('character');
+  }, [finishInit, onCharacterSelect]);
+
   // Handle click outside to close dropdown
   useEffect(() => {
     function handleClickOutside(event) {
       if (searchContainerRef.current && !searchContainerRef.current.contains(event.target)) {
         setSearchResults([]);
+        setFailedImages(new Set());
         setOffset(0);
         setHasMore(true);
         setSelectedSubject(null);
@@ -124,7 +249,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     return () => {
       document.removeEventListener('keydown', handleKeyboardNavigation);
     };
-  }, [searchResults, selectedItemIndex, searchMode, hasMore, selectedSubject]);
+  }, [searchResults, selectedItemIndex, searchMode, hasMore, selectedSubject, handleSubjectSelect, handleLoadMore, handleCharacterSelect]);
 
   // 当搜索结果变化时，处理选中索引的重置或保持
   useEffect(() => {
@@ -137,13 +262,14 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       // 正常情况下重置选中索引
       setSelectedItemIndex(-1);
     }
-  }, [searchResults]);
+  }, [searchResults, isLoadingNewResults, selectedItemIndex]);
 
   // Reset pagination when search query changes
   useEffect(() => {
     setOffset(0);
     setHasMore(true);
     setSearchResults([]);
+    setFailedImages(new Set());
     setSelectedSubject(null);
   }, [searchQuery]);
 
@@ -152,11 +278,12 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     if (!subjectSearch && searchMode === 'subject') {
       setSearchMode('character');
       setSearchResults([]);
+      setFailedImages(new Set());
       setOffset(0);
       setHasMore(true);
       setSelectedSubject(null);
     }
-  }, [subjectSearch]);
+  }, [subjectSearch, searchMode]);
 
   // Debounced search function for character search only
   useEffect(() => {
@@ -169,131 +296,41 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         handleSearch(true);
       } else {
         setSearchResults([]);
+        setFailedImages(new Set());
         setOffset(0);
         setHasMore(true);
       }
     }, 500);
 
     return () => clearTimeout(timeoutId);
-  }, [searchQuery, searchMode]);
+  }, [searchQuery, searchMode, handleSearch]);
 
-  const handleSearch = async (reset = false) => {
-    if (!searchQuery.trim() || !finishInit) return;
-    
-    // Always use initial search parameters when reset is true
-    const currentLimit = reset ? INITIAL_LIMIT : MORE_LIMIT;
-    const currentOffset = reset ? 0 : offset;
-    const loadingState = reset ? setIsSearching : setIsLoadingMore;
-    
-    loadingState(true);
-    try {
-      const response = await axios.get(`${SERVER_URL}/api/archive/search/characters`, {
-        params: {
-          keyword: searchQuery.trim(),
-          limit: currentLimit,
-          offset: currentOffset
-        }
-      })
-      
-      const newResults = response.data.data.map(character => ({
-        id: character.id,
-        image: character.images?.grid || null,
-        name: character.name,
-        nameCn: character.infobox.find(item => item.key === "简体中文名")?.value || character.name,
-        nameEn: (() => {
-          const aliases = character.infobox.find(item => item.key === '别名')?.value;
-          if (aliases && Array.isArray(aliases)) {
-            const englishName = aliases.find(alias => alias.k === '英文名');
-            if (englishName) {
-              return englishName.v;
-            } else {
-              const romaji = aliases.find(alias => alias.k === '罗马字');
-              if (romaji) {
-                return romaji.v;
-              }
-            }
-          }
-          return character.name;
-        })(),
-        gender: character.gender || '?',
-        popularity: character.stat.collects+character.stat.comments
-      }));
+  const markImageFailed = useCallback((key) => {
+    setFailedImages(prev => {
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
 
-      if (reset) {
-        setSearchResults(newResults);
-        setOffset(INITIAL_LIMIT);
-      } else {
-        setSearchResults(prev => [...prev, ...newResults]);
-        setOffset(currentOffset + MORE_LIMIT);
-      }
-      
-      setHasMore(newResults.length === currentLimit);
-    } catch (error) {
-      console.error('Search failed:', error);
-      if (reset) {
-        setSearchResults([]);
-      }
-    } finally {
-      loadingState(false);
+  const renderResultImage = (src, alt, key) => {
+    if (!src || failedImages.has(key)) {
+      return (
+        <div className="result-character-icon no-image">
+          无图片
+        </div>
+      );
     }
-  };
 
-  const handleSubjectSearch = async () => {
-    if (!searchQuery.trim() || !finishInit) return;
-    setIsSearching(true);
-    try {
-      const results = await searchSubjects(searchQuery);
-      setSearchResults(results);
-      setHasMore(false);
-    } catch (error) {
-      console.error('Subject search failed:', error);
-      setSearchResults([]);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const handleSubjectSelect = async (subject) => {
-    setIsSearching(true);
-    setSelectedSubject(subject);
-    try {
-      const characters = await getCharactersBySubjectId(subject.id);
-      const formattedCharacters = await Promise.all(characters.map(async character => {
-        const details = await getCharacterDetails(character.id);
-        return {
-          id: character.id,
-          image: character.images?.grid,
-          name: character.name,
-          nameCn: details.nameCn,
-          gender: details.gender,
-          popularity: details.popularity
-        };
-      }));
-      setSearchResults(formattedCharacters);
-    } catch (error) {
-      console.error('Failed to fetch characters:', error);
-      setSearchResults([]);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const handleLoadMore = () => {
-    if (searchMode === 'character') {
-      handleSearch(false);
-    }
-  };
-
-  const handleCharacterSelect = (character) => {
-    if (!finishInit) return;
-    submitGuessCharacterCount(character.id, character.nameCn || character.name);
-    onCharacterSelect(character);
-    setSearchQuery('');
-    setSearchResults([]);
-    setOffset(0);
-    setHasMore(true);
-    setSelectedSubject(null);
-    setSearchMode('character');
+    return (
+      <Image
+        src={src}
+        alt={alt}
+        className="result-character-icon"
+        fallbackSrc=""
+        onLoadError={() => markImageFailed(key)}
+      />
+    );
   };
 
   const renderSearchResults = () => {
@@ -312,17 +349,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
                 onClick={() => handleSubjectSelect(subject)}
                 ref={selectedItemIndex === index ? selectedItemRef : null}
               >
-                {subject.image ? (
-                  <img 
-                    src={subject.image} 
-                    alt={subject.name} 
-                    className="result-character-icon"
-                  />
-                ) : (
-                  <div className="result-character-icon no-image">
-                    无图片
-                  </div>
-                )}
+                {renderResultImage(subject.image, subject.name, `subject:${subject.id}`)}
                 <div className="result-character-info">
                   <div className="result-character-name">{subject.name}</div>
                   <div className="result-character-name-cn">{subject.name_cn}</div>
@@ -362,17 +389,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
                 onClick={() => handleCharacterSelect(character)}
                 ref={selectedItemIndex === index ? selectedItemRef : null}
               >
-                {character.image ? (
-                  <img 
-                    src={character.image} 
-                    alt={character.name} 
-                    className="result-character-icon"
-                  />
-                ) : (
-                  <div className="result-character-icon no-image">
-                    无图片
-                  </div>
-                )}
+                {renderResultImage(character.image, character.name, `character:${character.id}`)}
                 <div className="result-character-info">
                   <div className="result-character-name">{character.name}</div>
                   <div className="result-character-name-cn">{character.nameCn}</div>
