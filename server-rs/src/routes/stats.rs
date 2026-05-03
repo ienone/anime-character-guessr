@@ -1,13 +1,13 @@
+use crate::db::{self, DbPools};
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
-use crate::db::{self, DbPools};
 
 #[derive(Deserialize)]
 pub struct LimitQuery {
@@ -22,9 +22,16 @@ pub async fn answer_character_count(
 ) -> impl IntoResponse {
     let char_id = match body.get("characterId").and_then(|v| v.as_i64()) {
         Some(id) => id,
-        None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "characterId must be a number" }))).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "characterId must be a number" })),
+            )
+                .into_response();
+        }
     };
-    let char_name = body.get("characterName")
+    let char_name = body
+        .get("characterName")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim()
@@ -39,7 +46,8 @@ pub async fn answer_character_count(
             rusqlite::params![char_id, char_name],
         )?;
         Ok(())
-    }).await;
+    })
+    .await;
 
     match result {
         Ok(()) => Json(json!({ "message": "Character answer count updated successfully", "characterId": char_id })).into_response(),
@@ -55,9 +63,16 @@ pub async fn guess_character_count(
 ) -> impl IntoResponse {
     let char_id = match body.get("characterId").and_then(|v| v.as_i64()) {
         Some(id) => id,
-        None => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "characterId must be a number" }))).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "characterId must be a number" })),
+            )
+                .into_response();
+        }
     };
-    let char_name = body.get("characterName")
+    let char_name = body
+        .get("characterName")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim()
@@ -79,7 +94,8 @@ pub async fn guess_character_count(
             rusqlite::params![char_id, &char_name],
         )?;
         Ok(())
-    }).await;
+    })
+    .await;
 
     match result {
         Ok(()) => Json(json!({ "message": "Character guess count updated successfully", "characterId": char_id })).into_response(),
@@ -107,8 +123,16 @@ pub async fn character_usage(
 
     match result {
         Ok(Some(v)) => Json(v).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "Character usage not found" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Character usage not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -145,7 +169,11 @@ pub async fn leaderboard_characters(
 
     match result {
         Ok(rows) => Json(rows).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -173,7 +201,11 @@ pub async fn leaderboard_guesses(
 
     match result {
         Ok(rows) => Json(rows).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -209,7 +241,11 @@ pub async fn leaderboard_weekly(
 
     match result {
         Ok(rows) => Json(rows).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -220,7 +256,13 @@ pub async fn redeem(
 ) -> impl IntoResponse {
     let code = match q.get("code") {
         Some(c) if !c.is_empty() => c.clone(),
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Code is required" }))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Code is required" })),
+            )
+                .into_response();
+        }
     };
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -234,11 +276,22 @@ pub async fn redeem(
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(anyhow::anyhow!(e)),
         }
-    }).await;
+    })
+    .await;
 
     match result {
-        Ok(Some((avatar_id, avatar_image))) => Json(json!({ "avatarId": avatar_id, "avatarImage": avatar_image })).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "Invalid or expired code" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Some((avatar_id, avatar_image))) => {
+            Json(json!({ "avatarId": avatar_id, "avatarImage": avatar_image })).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Invalid or expired code" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }

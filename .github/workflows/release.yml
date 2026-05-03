@@ -1,0 +1,108 @@
+﻿name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SERVER_TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build-client:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: client
+        env:
+          VITE_SERVER_URL: ${{ vars.VITE_SERVER_URL }}
+        run: npm run build
+
+      - name: Package frontend
+        run: tar -czf client-dist.tar.gz -C client/dist .
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-dist
+          path: client-dist.tar.gz
+          if-no-files-found: error
+
+  build-server:
+    name: Build Rust server
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install musl toolchain packages
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.SERVER_TARGET }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
+          key: ${{ env.SERVER_TARGET }}
+
+      - name: Build server
+        working-directory: server-rs
+        run: cargo build --release --target ${{ env.SERVER_TARGET }}
+
+      - name: Package server
+        run: |
+          mkdir -p release/server-rs
+          cp server-rs/target/${{ env.SERVER_TARGET }}/release/server-rs release/server-rs/server-rs
+          cp deploy/anime-character-guessr.env.example release/server-rs/anime-character-guessr.env.example
+          cp deploy/anime-character-guessr.service release/server-rs/anime-character-guessr.service
+          cp deploy/nginx-site.conf release/server-rs/nginx-site.conf
+          tar -czf server-rs-${{ env.SERVER_TARGET }}.tar.gz -C release/server-rs .
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-rs-${{ env.SERVER_TARGET }}
+          path: server-rs-${{ env.SERVER_TARGET }}.tar.gz
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build-client
+      - build-server
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/**/*.tar.gz
+          generate_release_notes: true

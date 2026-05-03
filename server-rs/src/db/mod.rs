@@ -1,15 +1,15 @@
 use crate::config::Config;
 use anyhow::Context;
-use rusqlite::Connection;
+use jieba_rs::Jieba;
+use lazy_static::lazy_static;
+use pinyin::ToPinyin;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use std::sync::Arc;
-use std::collections::HashMap;
+use rusqlite::Connection;
 use serde_json::Value;
-use std::collections::{HashSet};
-use jieba_rs::Jieba;
-use pinyin::ToPinyin;
-use lazy_static::lazy_static;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 lazy_static! {
     static ref JIEBA: Jieba = Jieba::new();
@@ -33,8 +33,8 @@ pub struct CandidateIndex {
 #[derive(Clone)]
 pub struct SubjectRow {
     pub id: i64,
-    pub role: i64,        // 1 = main, 2 = supporting
-    pub stype: i64,       // subject type (2=anime, 4=game, …)
+    pub role: i64,  // 1 = main, 2 = supporting
+    pub stype: i64, // subject type (2=anime, 4=game, …)
     pub year: i32,
     pub score: f64,
     pub collects: i64,
@@ -280,7 +280,9 @@ impl CharacterSearchIndex {
             let a_doc = &self.docs[*a_idx];
             let b_doc = &self.docs[*b_idx];
             b_s.cmp(a_s)
-                .then_with(|| (b_doc.collects + b_doc.comments).cmp(&(a_doc.collects + a_doc.comments)))
+                .then_with(|| {
+                    (b_doc.collects + b_doc.comments).cmp(&(a_doc.collects + a_doc.comments))
+                })
                 .then_with(|| a_doc.id.cmp(&b_doc.id))
         });
 
@@ -323,8 +325,8 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
         .with_flags(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_init(|c| {
             c.pragma_update(None, "busy_timeout", "10000")?;
-            c.pragma_update(None, "cache_size", "-131072")?;   // 128 MB page cache
-            c.pragma_update(None, "mmap_size", "268435456")?;  // 256 MB mmap
+            c.pragma_update(None, "cache_size", "-131072")?; // 128 MB page cache
+            c.pragma_update(None, "mmap_size", "268435456")?; // 256 MB mmap
             c.pragma_update(None, "temp_store", "MEMORY")
         });
     let archive_db = Pool::builder()
@@ -333,11 +335,10 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
         .build(archive_manager)?;
 
     // Connect to app DB (read/write)
-    let app_manager = SqliteConnectionManager::file(&config.app_db_path)
-        .with_init(|c| {
-            c.pragma_update(None, "busy_timeout", "5000")?;
-            c.pragma_update(None, "synchronous", "NORMAL")
-        });
+    let app_manager = SqliteConnectionManager::file(&config.app_db_path).with_init(|c| {
+        c.pragma_update(None, "busy_timeout", "5000")?;
+        c.pragma_update(None, "synchronous", "NORMAL")
+    });
     let app_db = Pool::builder().max_size(20).build(app_manager)?;
 
     // Create app DB tables if they don't exist
@@ -362,7 +363,11 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
         t0.elapsed().as_secs_f64(),
         character_cache.char_json.len(),
         candidate_index.all.len(),
-        character_cache.char_subjects.values().map(|v| v.len()).sum::<usize>(),
+        character_cache
+            .char_subjects
+            .values()
+            .map(|v| v.len())
+            .sum::<usize>(),
     );
 
     Ok(Arc::new(DbPools {
@@ -407,11 +412,26 @@ fn build_subject_search_index(conn: &Connection) -> anyhow::Result<SubjectSearch
             Ok(v) => v,
             Err(_) => continue,
         };
-        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let name_cn = v.get("name_cn").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let name = v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name_cn = v
+            .get("name_cn")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let idx = docs.len();
-        docs.push(SubjectDoc { id, stype, date, collects, name: name.clone(), name_cn: name_cn.clone() });
+        docs.push(SubjectDoc {
+            id,
+            stype,
+            date,
+            collects,
+            name: name.clone(),
+            name_cn: name_cn.clone(),
+        });
         by_id.insert(id, idx);
 
         let mut tokens = HashSet::<String>::new();
@@ -497,11 +517,26 @@ fn build_character_search_index(conn: &Connection) -> anyhow::Result<CharacterSe
             Err(_) => continue,
         };
 
-        let infobox = v.get("infobox").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let infobox = v
+            .get("infobox")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let summary = v
+            .get("summary")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let idx = docs.len();
-        docs.push(CharacterDoc { id, name: name.clone(), infobox: infobox.clone(), summary, collects, comments });
+        docs.push(CharacterDoc {
+            id,
+            name: name.clone(),
+            infobox: infobox.clone(),
+            summary,
+            collects,
+            comments,
+        });
 
         let mut tokens = HashSet::<String>::new();
 
@@ -549,7 +584,9 @@ fn build_character_search_index(conn: &Connection) -> anyhow::Result<CharacterSe
         }
 
         // Extract english/romaji alias from infobox and index it (lowercased, no spaces)
-        if let Some(en) = extract_alias_inline(&infobox, "英文名").or_else(|| extract_alias_inline(&infobox, "罗马字")) {
+        if let Some(en) = extract_alias_inline(&infobox, "英文名")
+            .or_else(|| extract_alias_inline(&infobox, "罗马字"))
+        {
             let en_norm = normalize_token(en);
             if en_norm.len() >= 2 {
                 tokens.insert(en_norm);
@@ -568,7 +605,10 @@ fn extract_infobox_field_inline<'a>(infobox: &'a str, key: &str) -> Option<&'a s
     let pattern = format!("|{}=", key);
     let start = infobox.find(&pattern)? + pattern.len();
     let rest = &infobox[start..];
-    let end = rest.find('\n').or_else(|| rest.find('\r')).unwrap_or(rest.len());
+    let end = rest
+        .find('\n')
+        .or_else(|| rest.find('\r'))
+        .unwrap_or(rest.len());
     let value = rest[..end].trim();
     if value.is_empty() { None } else { Some(value) }
 }
@@ -599,16 +639,21 @@ fn build_candidate_index(conn: &Connection) -> anyhow::Result<CandidateIndex> {
 
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, i64>(0)?,  // character_id
-            row.get::<_, i64>(1)?,  // type
-            row.get::<_, i64>(2)?,  // collects
-            row.get::<_, i32>(3)?,  // year
+            row.get::<_, i64>(0)?, // character_id
+            row.get::<_, i64>(1)?, // type
+            row.get::<_, i64>(2)?, // collects
+            row.get::<_, i32>(3)?, // year
         ))
     })?;
 
     for row in rows {
-        let (char_id, stype, collects, year) = match row { Ok(v) => v, Err(_) => continue };
-        if year <= 0 || year > 2099 { continue; }
+        let (char_id, stype, collects, year) = match row {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if year <= 0 || year > 2099 {
+            continue;
+        }
         // For each character keep its primary (highest-collects) subject's type
         char_best.entry(char_id).or_insert((year, stype, collects));
     }
@@ -617,7 +662,10 @@ fn build_candidate_index(conn: &Connection) -> anyhow::Result<CandidateIndex> {
     let mut all: Vec<(i32, i64, i64)> = Vec::new();
 
     for (char_id, (year, stype, collects)) in char_best {
-        by_type.entry(stype).or_default().push((year, char_id, collects));
+        by_type
+            .entry(stype)
+            .or_default()
+            .push((year, char_id, collects));
         all.push((year, char_id, collects));
     }
 
@@ -660,43 +708,72 @@ fn build_character_cache(conn: &Connection) -> anyhow::Result<CharacterCache> {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, i64>(0)?,  // character_id
-                row.get::<_, i64>(1)?,  // role (sc.type)
-                row.get::<_, i64>(2)?,  // subject id
-                row.get::<_, String>(3)?,  // subject raw_json
-                row.get::<_, i64>(4)?,  // collects
+                row.get::<_, i64>(0)?,    // character_id
+                row.get::<_, i64>(1)?,    // role (sc.type)
+                row.get::<_, i64>(2)?,    // subject id
+                row.get::<_, String>(3)?, // subject raw_json
+                row.get::<_, i64>(4)?,    // collects
             ))
         })?;
 
         for row in rows {
-            let (char_id, role, sid, raw, collects) = match row { Ok(v) => v, Err(_) => continue };
-            let sval: Value = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => continue };
+            let (char_id, role, sid, raw, collects) = match row {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let sval: Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
 
             let stype = sval.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
-            let year = sval.get("date").and_then(|v| v.as_str())
+            let year = sval
+                .get("date")
+                .and_then(|v| v.as_str())
                 .and_then(|d| d.split('-').next())
                 .and_then(|y| y.parse::<i32>().ok())
                 .unwrap_or(-1);
             let score = sval.get("score").and_then(|v| v.as_f64()).unwrap_or(-1.0);
-            let name = sval.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let name_cn = sval.get("name_cn").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = sval
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name_cn = sval
+                .get("name_cn")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
             // Serialise tags/meta_tags back to compact strings to avoid storing full Value trees
-            let tags_json = sval.get("tags")
+            let tags_json = sval
+                .get("tags")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "[]".to_string());
-            let meta_tags_json = sval.get("meta_tags")
+            let meta_tags_json = sval
+                .get("meta_tags")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "[]".to_string());
 
             char_subjects.entry(char_id).or_default().push(SubjectRow {
-                id: sid, role, stype, year, score, collects,
-                name, name_cn, tags_json, meta_tags_json,
+                id: sid,
+                role,
+                stype,
+                year,
+                score,
+                collects,
+                name,
+                name_cn,
+                tags_json,
+                meta_tags_json,
             });
         }
     }
 
-    Ok(CharacterCache { char_json, char_subjects })
+    Ok(CharacterCache {
+        char_json,
+        char_subjects,
+    })
 }
 
 pub async fn with_archive_db<T, F>(pools: Arc<DbPools>, f: F) -> anyhow::Result<T>
@@ -706,7 +783,9 @@ where
 {
     let archive_db = pools.archive_db.clone();
     tokio::task::spawn_blocking(move || {
-        let mut conn = archive_db.get().map_err(|e| anyhow::anyhow!("archive_db pool error: {}", e))?;
+        let mut conn = archive_db
+            .get()
+            .map_err(|e| anyhow::anyhow!("archive_db pool error: {}", e))?;
         f(&mut conn)
     })
     .await
@@ -720,7 +799,9 @@ where
 {
     let app_db = pools.app_db.clone();
     tokio::task::spawn_blocking(move || {
-        let mut conn = app_db.get().map_err(|e| anyhow::anyhow!("app_db pool error: {}", e))?;
+        let mut conn = app_db
+            .get()
+            .map_err(|e| anyhow::anyhow!("app_db pool error: {}", e))?;
         f(&mut conn)
     })
     .await

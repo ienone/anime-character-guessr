@@ -11,23 +11,26 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::{sync::atomic::{AtomicU64, Ordering}, time::Instant};
-use tracing::{info, warn};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 use sysinfo::{Pid, System};
+use tracing::{info, warn};
 
 // ─── Global atomic counters ───────────────────────────────────────────────────
 
 static REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static REQUESTS_SLOW: AtomicU64 = AtomicU64::new(0);   // >500ms
-static REQUESTS_ERROR: AtomicU64 = AtomicU64::new(0);  // 5xx
+static REQUESTS_SLOW: AtomicU64 = AtomicU64::new(0); // >500ms
+static REQUESTS_ERROR: AtomicU64 = AtomicU64::new(0); // 5xx
 
 // Histogram buckets: cumulative counts of requests completing within N ms
-static BUCKET_10MS:   AtomicU64 = AtomicU64::new(0);
-static BUCKET_50MS:   AtomicU64 = AtomicU64::new(0);
-static BUCKET_100MS:  AtomicU64 = AtomicU64::new(0);
-static BUCKET_500MS:  AtomicU64 = AtomicU64::new(0);
+static BUCKET_10MS: AtomicU64 = AtomicU64::new(0);
+static BUCKET_50MS: AtomicU64 = AtomicU64::new(0);
+static BUCKET_100MS: AtomicU64 = AtomicU64::new(0);
+static BUCKET_500MS: AtomicU64 = AtomicU64::new(0);
 static BUCKET_1000MS: AtomicU64 = AtomicU64::new(0);
-static BUCKET_INF:    AtomicU64 = AtomicU64::new(0);
+static BUCKET_INF: AtomicU64 = AtomicU64::new(0);
 static LATENCY_SUM_MS: AtomicU64 = AtomicU64::new(0);
 
 // ─── Process metrics (sampled on /metrics) ───────────────────────────────────
@@ -54,12 +57,12 @@ pub async fn track_metrics(req: Request<Body>, next: Next) -> Response {
 
     // Histogram buckets
     match elapsed_ms {
-        0..=10    => BUCKET_10MS.fetch_add(1, Ordering::Relaxed),
-        11..=50   => BUCKET_50MS.fetch_add(1, Ordering::Relaxed),
-        51..=100  => BUCKET_100MS.fetch_add(1, Ordering::Relaxed),
+        0..=10 => BUCKET_10MS.fetch_add(1, Ordering::Relaxed),
+        11..=50 => BUCKET_50MS.fetch_add(1, Ordering::Relaxed),
+        51..=100 => BUCKET_100MS.fetch_add(1, Ordering::Relaxed),
         101..=500 => BUCKET_500MS.fetch_add(1, Ordering::Relaxed),
         501..=1000 => BUCKET_1000MS.fetch_add(1, Ordering::Relaxed),
-        _         => BUCKET_INF.fetch_add(1, Ordering::Relaxed),
+        _ => BUCKET_INF.fetch_add(1, Ordering::Relaxed),
     };
 
     if status.is_server_error() {
@@ -92,16 +95,16 @@ pub async fn track_metrics(req: Request<Body>, next: Next) -> Response {
 /// GET /metrics — Prometheus text format
 pub async fn metrics_handler() -> impl IntoResponse {
     let total = REQUESTS_TOTAL.load(Ordering::Relaxed);
-    let slow  = REQUESTS_SLOW.load(Ordering::Relaxed);
+    let slow = REQUESTS_SLOW.load(Ordering::Relaxed);
     let errors = REQUESTS_ERROR.load(Ordering::Relaxed);
     let sum_ms = LATENCY_SUM_MS.load(Ordering::Relaxed);
     let avg_ms = if total > 0 { sum_ms / total } else { 0 };
 
-    let b10  = BUCKET_10MS.load(Ordering::Relaxed);
-    let b50  = BUCKET_50MS.load(Ordering::Relaxed);
+    let b10 = BUCKET_10MS.load(Ordering::Relaxed);
+    let b50 = BUCKET_50MS.load(Ordering::Relaxed);
     let b100 = BUCKET_100MS.load(Ordering::Relaxed);
     let b500 = BUCKET_500MS.load(Ordering::Relaxed);
-    let b1000= BUCKET_1000MS.load(Ordering::Relaxed);
+    let b1000 = BUCKET_1000MS.load(Ordering::Relaxed);
     let binf = BUCKET_INF.load(Ordering::Relaxed);
 
     // Update process metrics snapshot (best effort).
@@ -147,14 +150,19 @@ pub async fn metrics_handler() -> impl IntoResponse {
          # HELP cpu_usage_percent Process CPU usage percent (0-100)\n\
          # TYPE cpu_usage_percent gauge\n\
          cpu_usage_percent {cpu_percent}\n",
-        total=total, slow=slow, errors=errors, avg_ms=avg_ms, sum_ms=sum_ms,
-        b10=b10+b50+b100+b500+b1000+binf,
-        b50=b50+b100+b500+b1000+binf,
-        b100=b100+b500+b1000+binf,
-        b500=b500+b1000+binf,
-        b1000=b1000+binf,
-        binf=binf,
-        rss_kb=rss_kb, cpu_percent=cpu_percent,
+        total = total,
+        slow = slow,
+        errors = errors,
+        avg_ms = avg_ms,
+        sum_ms = sum_ms,
+        b10 = b10 + b50 + b100 + b500 + b1000 + binf,
+        b50 = b50 + b100 + b500 + b1000 + binf,
+        b100 = b100 + b500 + b1000 + binf,
+        b500 = b500 + b1000 + binf,
+        b1000 = b1000 + binf,
+        binf = binf,
+        rss_kb = rss_kb,
+        cpu_percent = cpu_percent,
     );
 
     (

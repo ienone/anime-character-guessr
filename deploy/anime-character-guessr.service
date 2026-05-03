@@ -1,0 +1,21 @@
+﻿[Unit]
+Description=Anime Character Guessr Rust Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=animeguessr
+Group=animeguessr
+WorkingDirectory=/opt/anime-character-guessr
+EnvironmentFile=/opt/anime-character-guessr/anime-character-guessr.env
+ExecStart=/opt/anime-character-guessr/server-rs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/anime-character-guessr/data
+
+[Install]
+WantedBy=multi-user.target

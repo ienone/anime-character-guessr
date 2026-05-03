@@ -25,7 +25,6 @@ services:
       dockerfile: Dockerfile
       args:
         - VITE_SERVER_URL=${DOMAIN_NAME:-http://localhost}
-        - VITE_AES_SECRET=${AES_SECRET}
     container_name: client_app
     expose:
       - "80"

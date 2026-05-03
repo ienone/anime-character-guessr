@@ -12,22 +12,16 @@ pub struct EnforceResult {
 pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool) -> EnforceResult {
     // Enforce per-player guess limits and eliminate players after exhausting attempts.
     let Some(ref mut game) = room.current_game else {
-        return EnforceResult {
-            exhausted: false,
-        };
+        return EnforceResult { exhausted: false };
     };
 
     let Some(player) = room.players.iter().find(|p| p.id == player_id) else {
-        return EnforceResult {
-            exhausted: false,
-        };
+        return EnforceResult { exhausted: false };
     };
 
     // 出题人/旁观者/临时观战者不参与次数判定
     if player.is_answer_setter || player.team.as_deref() == Some("0") || player.temp_observer {
-        return EnforceResult {
-            exhausted: false,
-        };
+        return EnforceResult { exhausted: false };
     }
 
     let max_attempts = game
@@ -49,21 +43,15 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
 
     let attempt_count = super::marks::count_attempt_marks(&source_marks);
     if attempt_count < max_attempts {
-        return EnforceResult {
-            exhausted: false,
-        };
+        return EnforceResult { exhausted: false };
     }
 
     if super::marks::has_end_mark(&source_marks) {
-        return EnforceResult {
-            exhausted: true,
-        };
+        return EnforceResult { exhausted: true };
     }
 
     if is_correct {
-        return EnforceResult {
-            exhausted: true,
-        };
+        return EnforceResult { exhausted: true };
     }
 
     // Exhausted: apply skull mark (💀)
@@ -97,9 +85,7 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
         }
     }
 
-    EnforceResult {
-        exhausted: true,
-    }
+    EnforceResult { exhausted: true }
 }
 
 pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult {
@@ -151,7 +137,11 @@ pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult 
         .and_then(|s| s.get("syncMode"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let sync_round = room.current_game.as_ref().map(|g| g.sync_round).unwrap_or(1);
+    let sync_round = room
+        .current_game
+        .as_ref()
+        .map(|g| g.sync_round)
+        .unwrap_or(1);
 
     // Apply timeout mark to guesses (scope mutable borrows tightly)
     if is_team_mode {
@@ -202,4 +192,3 @@ pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult 
         affected_player_ids,
     }
 }
-

@@ -1,4 +1,4 @@
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{Json, extract::State, response::IntoResponse};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -58,4 +58,3 @@ pub async fn roulette(State(pools): State<Arc<DbPools>>) -> impl IntoResponse {
 
     Json(selected).into_response()
 }
-

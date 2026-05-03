@@ -43,10 +43,6 @@ WORKDIR /app
 # Copy the static binary
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/server-rs ./server-rs
 
-# (optional) assets folder kept for backwards-compat, but server no longer
-# depends on character_images.json at runtime.
-COPY assets ./assets
-
 # Runtime data directories (SQLite files are mounted via Docker volumes)
 RUN mkdir -p /data/images
 

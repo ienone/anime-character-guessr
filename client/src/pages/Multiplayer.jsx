@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { io } from 'socket.io-client';
-import { getRandomCharacter, getCharacterAppearances, generateFeedback } from '../utils/bangumi';
+import { getCharacterAppearances } from '../utils/bangumi';
 import SettingsPopup from '../components/SettingsPopup';
 import SearchBar from '../components/SearchBar';
 import GuessesTable from '../components/GuessesTable';
@@ -18,9 +18,7 @@ import Image from '../components/Image';
 import logCollector from '../utils/logCollector';
 import '../styles/Multiplayer.css';
 import '../styles/game.css';
-import CryptoJS from 'crypto-js';
 import axios from 'axios';
-const secret = import.meta.env.VITE_AES_SECRET || 'My-Secret-Key';
 const SOCKET_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '');
 
 const Multiplayer = () => {
@@ -129,6 +127,7 @@ const Multiplayer = () => {
   const isManualDisconnectRef = useRef(false);
   const isAutoReconnectingRef = useRef(false);
   const fetchRoomListRef = useRef(null);
+  const pendingGuessResolverRef = useRef(null);
 
   useEffect(() => {
     roomIdRef.current = roomId;
@@ -400,10 +399,12 @@ const Multiplayer = () => {
     newSocket.on('gameStart', ({ character, settings, players, isPublic, hints = null, isAnswerSetter: isAnswerSetterFlag }) => {
       // 每局开始先默认不显示答案卡片，避免网络卡顿/状态乱序导致短暂泄露
       setCanShowSelectedAnswer(false);
-      const decryptedCharacter = JSON.parse(CryptoJS.AES.decrypt(character, secret).toString(CryptoJS.enc.Utf8));
-      decryptedCharacter.rawTags = new Map(decryptedCharacter.rawTags);
-      setAnswerCharacter(decryptedCharacter);
-      answerCharacterRef.current = decryptedCharacter;
+      const visibleAnswer = character && character.id ? {
+        ...character,
+        rawTags: new Map(Object.entries(character.rawTags || {}))
+      } : null;
+      setAnswerCharacter(visibleAnswer);
+      answerCharacterRef.current = visibleAnswer;
       setGameSettings(settings);
       
       // Calculate guesses left based on current player's guess history
@@ -453,9 +454,9 @@ const Multiplayer = () => {
       let hintTexts = [];
       if (Array.isArray(settings?.useHints) && settings.useHints.length > 0 && hints) {
         hintTexts = hints;
-      } else if (Array.isArray(settings?.useHints) && settings.useHints.length > 0 && decryptedCharacter && decryptedCharacter.summary) {
+      } else if (Array.isArray(settings?.useHints) && settings.useHints.length > 0 && visibleAnswer && visibleAnswer.summary) {
         // Automatic mode - generate hints from summary
-        const sentences = decryptedCharacter.summary.replace('[mask]', '').replace('[/mask]','')
+        const sentences = visibleAnswer.summary.replace('[mask]', '').replace('[/mask]','')
           .split(/[。、，。！？ ""]/).filter(s => s.trim());
         if (sentences.length > 0) {
           const selectedIndices = new Set();
@@ -467,7 +468,7 @@ const Multiplayer = () => {
       }
       setHints(hintTexts);
       setUseImageHint(settings?.useImageHint ?? 0);
-      setImgHint((settings?.useImageHint ?? 0) > 0 ? decryptedCharacter.image : null);
+      setImgHint((settings?.useImageHint ?? 0) > 0 && visibleAnswer ? visibleAnswer.image : null);
       setGlobalGameEnd(false);
       setEndGameSettings(null); // 新局开始时清空上一局模式快照
       setScoreDetails(null);
@@ -575,7 +576,15 @@ const Multiplayer = () => {
       setGameSettings(settings);
     });
 
-    newSocket.on('gameEnded', ({ guesses, scoreDetails }) => {
+    newSocket.on('gameEnded', ({ guesses, scoreDetails, answerCharacter }) => {
+      if (answerCharacter) {
+        const revealedAnswer = {
+          ...answerCharacter,
+          rawTags: new Map(Object.entries(answerCharacter.rawTags || {}))
+        };
+        setAnswerCharacter(revealedAnswer);
+        answerCharacterRef.current = revealedAnswer;
+      }
       setEndGameSettings(gameSettingsRef.current); // 保存上一局的模式设置用于结算展示
       setScoreDetails(scoreDetails || null);
       setGlobalGameEnd(true);
@@ -585,6 +594,24 @@ const Multiplayer = () => {
       setIsObserver(false); // 重置旁观者状态，下一局开始时会重新判断
       setIsAnswerSetter(false);
       setCanShowSelectedAnswer(false);
+    });
+
+    newSocket.on('answerReveal', ({ character }) => {
+      if (!character) return;
+      const revealedAnswer = {
+        ...character,
+        rawTags: new Map(Object.entries(character.rawTags || {}))
+      };
+      setAnswerCharacter(revealedAnswer);
+      answerCharacterRef.current = revealedAnswer;
+      setCanShowSelectedAnswer(true);
+    });
+
+    newSocket.on('guessResult', (payload) => {
+      if (pendingGuessResolverRef.current) {
+        pendingGuessResolverRef.current(payload);
+        pendingGuessResolverRef.current = null;
+      }
     });
 
     newSocket.on('resetReadyStatus', () => {
@@ -615,44 +642,14 @@ const Multiplayer = () => {
     });
 
     // Listen for team guess broadcasts
-    newSocket.on('boardcastTeamGuess', ({ guessData, playerId, playerName }) => {
-      if (guessData.rawTags) {
-        guessData.rawTags = new Map(guessData.rawTags);
-      }
-    
-      const feedback = generateFeedback(guessData, answerCharacterRef.current, gameSettingsRef.current);
-    
-      const isCorrect = guessData.id === answerCharacterRef.current?.id;
-
-      const newGuess = {
-        id: guessData.id,
-        icon: guessData.image,
-        name: guessData.name,
-        nameCn: guessData.nameCn,
-        nameEn: guessData.nameEn,
-        gender: guessData.gender,
-        genderFeedback: isCorrect ? 'yes' : feedback.gender.feedback,
-        latestAppearance: guessData.latestAppearance,
-        latestAppearanceFeedback: isCorrect ? '=' : feedback.latestAppearance.feedback,
-        earliestAppearance: guessData.earliestAppearance,
-        earliestAppearanceFeedback: isCorrect ? '=' : feedback.earliestAppearance.feedback,
-        highestRating: guessData.highestRating,
-        ratingFeedback: isCorrect ? '=' : feedback.rating.feedback,
-        appearancesCount: guessData.appearances.length,
-        appearancesCountFeedback: isCorrect ? '=' : feedback.appearancesCount.feedback,
-        popularity: guessData.popularity,
-        popularityFeedback: isCorrect ? '=' : feedback.popularity.feedback,
-        appearanceIds: guessData.appearanceIds,
-        sharedAppearances: feedback.shared_appearances,
-        metaTags: feedback.metaTags.guess,
-        sharedMetaTags: feedback.metaTags.shared,
-        isAnswer: isCorrect,
+    newSocket.on('boardcastTeamGuess', ({ guess, playerId, playerName }) => {
+      if (!guess) return;
+      setGuesses(prev => [...prev, {
+        ...guess,
         playerId,
         playerName,
-        guessrName: guessData.guessrName || playerName // prefer guessData.guessrName if present
-      };
-    
-      setGuesses(prev => [...prev, newGuess]);
+        guessrName: guess.guessrName || playerName
+      }]);
       
       // 只有正在参与游戏的玩家（非旁观者、非出题人）才需要减少猜测次数和触发游戏结束
       // 旁观者和出题人只是接收猜测信息用于显示，不参与游戏逻辑
@@ -697,6 +694,8 @@ const Multiplayer = () => {
       newSocket.off('serverShutdown');
       newSocket.off('updateGameSettings');
       newSocket.off('gameEnded');
+      newSocket.off('answerReveal');
+      newSocket.off('guessResult');
       newSocket.off('resetReadyStatus');
       newSocket.off('boardcastTeamGuess');
       newSocket.off('resetTimer');
@@ -833,10 +832,7 @@ const Multiplayer = () => {
 
     // 血战模式下，猜对不结束游戏，只发送 nonstopWin 事件
     if (isWin && gameSettings.nonstopMode) {
-      socketRef.current?.emit('nonstopWin', {
-        roomId,
-        isBigWin: answerCharacter && sessionStorage.getItem('avatarId') == answerCharacter.id
-      });
+      socketRef.current?.emit('nonstopWin', { roomId });
       // 血战模式下猜对后进入观战状态，但不设置 gameEnd
       setGameEnd(true);
       setWaitingForSync(false); // 重置同步等待状态
@@ -847,23 +843,14 @@ const Multiplayer = () => {
     gameEndedRef.current = true;
     setGameEnd(true);
     setWaitingForSync(false); // 重置同步等待状态
-    // Emit game end event to server
-    if (answerCharacter && sessionStorage.getItem('avatarId') == answerCharacter.id) {
-      socketRef.current?.emit('gameEnd', {
-        roomId,
-        result: isWin ? 'bigwin' : 'lose'
-      });
-    }
-    else {
-      socketRef.current?.emit('gameEnd', {
-        roomId,
-        result: isWin ? 'win' : 'lose'
-      });
-    }
+    socketRef.current?.emit('gameEnd', {
+      roomId,
+      result: isWin ? 'win' : 'lose'
+    });
   };
 
   const handleCharacterSelect = async (character) => {
-    if (isGuessing || !answerCharacter || gameEnd) return;
+    if (isGuessing || gameEnd) return;
 
     // 旁观者和出题人不能猜测（用 canShowSelectedAnswer 作为本局“出题人视角”的门闩，防止状态抖动）
     if (isObserver || isAnswerSetter || canShowSelectedAnswer) {
@@ -881,19 +868,9 @@ const Multiplayer = () => {
         Array.isArray(playerHistory.guesses) &&
         playerHistory.guesses.some(guessEntry => guessEntry?.guessData?.id === character.id)
       );
-      const isCorrectAnswer = character.id === answerCharacter?.id;
-      // 非同步模式下，或（同步模式下自己已猜中/本轮已完成）才阻止
       if (duplicateInHistory) {
-        if (
-          (gameSettings.syncMode && isCorrectAnswer) // 同步+全局BP+答对，允许
-        ) {
-          // 允许同步模式下多名玩家本轮内猜中
-        } else if (gameSettings.nonstopMode && isCorrectAnswer) {
-          // 血战模式下允许多人猜正确答案
-        } else {
-          alert('【全局BP】已经被别人猜过了！请尝试其他角色');
-          return;
-        }
+        alert('【全局BP】已经被别人猜过了！请尝试其他角色');
+        return;
       }
     }
 
@@ -913,83 +890,34 @@ const Multiplayer = () => {
         console.warn('Invalid guessData, not emitting');
         return;
       }
-      const rawTagsMap = new Map(rawTagsEntries);
-      const feedback = generateFeedback({ ...guessData, rawTags: rawTagsMap }, answerCharacter, gameSettings);
-      const isCorrect = guessData.id === answerCharacter.id;
-      if (
-        gameSettings.tagBan &&
-        Array.isArray(feedback?.metaTags?.shared) &&
-        feedback.metaTags.shared.length > 0
-      ) {
+      const guessResult = await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          pendingGuessResolverRef.current = null;
+          reject(new Error('猜测响应超时'));
+        }, 10000);
+        pendingGuessResolverRef.current = (payload) => {
+          clearTimeout(timeoutId);
+          resolve(payload);
+        };
+        socketRef.current?.emit('playerGuess', {
+          roomId,
+          guessData
+        });
+      });
+
+      const { guess, isCorrect } = guessResult || {};
+      if (!guess) {
+        throw new Error('服务端猜测结果无效');
+      }
+      if (gameSettings.tagBan && Array.isArray(guess.sharedMetaTags) && guess.sharedMetaTags.length > 0) {
         socketRef.current?.emit('tagBanSharedMetaTags', {
           roomId,
-          tags: feedback.metaTags.shared
+          tags: guess.sharedMetaTags
         });
       }
-      // Send guess result to server (guessesLeft will be synced via guessHistoryUpdate)
-      socketRef.current?.emit('playerGuess', {
-        roomId,
-        guessResult: {
-          isCorrect,
-          isPartialCorrect: feedback.shared_appearances?.count > 0,
-          guessData
-        }
-      });
-      guessData.rawTags = rawTagsMap;
+      setGuesses(prevGuesses => [...prevGuesses, guess]);
       if (isCorrect) {
-        setGuesses(prevGuesses => [...prevGuesses, {
-          id: guessData.id,
-          icon: guessData.image,
-          name: guessData.name,
-          nameCn: guessData.nameCn,
-          nameEn: guessData.nameEn,
-          gender: guessData.gender,
-          genderFeedback: 'yes',
-          latestAppearance: guessData.latestAppearance,
-          latestAppearanceFeedback: '=',
-          earliestAppearance: guessData.earliestAppearance,
-          earliestAppearanceFeedback: '=',
-          highestRating: guessData.highestRating,
-          ratingFeedback: '=',
-          appearancesCount: guessData.appearances.length,
-          appearancesCountFeedback: '=',
-          popularity: guessData.popularity,
-          popularityFeedback: '=',
-          appearanceIds: guessData.appearanceIds,
-          sharedAppearances: {
-            first: appearances.appearances[0] || '',
-            count: appearances.appearances.length
-          },
-          metaTags: guessData.metaTags,
-          sharedMetaTags: guessData.metaTags,
-          isAnswer: true
-        }]);
         handleGameEnd(true);
-      } else {
-        setGuesses(prevGuesses => [...prevGuesses, {
-          id: guessData.id,
-          icon: guessData.image,
-          name: guessData.name,
-          nameCn: guessData.nameCn,
-          nameEn: guessData.nameEn,
-          gender: guessData.gender,
-          genderFeedback: feedback.gender.feedback,
-          latestAppearance: guessData.latestAppearance,
-          latestAppearanceFeedback: feedback.latestAppearance.feedback,
-          earliestAppearance: guessData.earliestAppearance,
-          earliestAppearanceFeedback: feedback.earliestAppearance.feedback,
-          highestRating: guessData.highestRating,
-          ratingFeedback: feedback.rating.feedback,
-          appearancesCount: guessData.appearances.length,
-          appearancesCountFeedback: feedback.appearancesCount.feedback,
-          popularity: guessData.popularity,
-          popularityFeedback: feedback.popularity.feedback,
-          appearanceIds: guessData.appearanceIds,
-          sharedAppearances: feedback.shared_appearances,
-          metaTags: feedback.metaTags.guess,
-          sharedMetaTags: feedback.metaTags.shared,
-          isAnswer: false
-        }]);
       }
     } catch (error) {
       console.error('Error processing guess:', error);
@@ -1071,52 +999,14 @@ const Multiplayer = () => {
         } catch (error) {
           console.error('Failed to update subject count:', error);
         }
-        try {
-          const character = await getRandomCharacter(gameSettings);
-          character.rawTags = Array.from(character.rawTags.entries());
-          const encryptedCharacter = CryptoJS.AES.encrypt(JSON.stringify(character), secret).toString();
-          socketRef.current?.emit('gameStart', {
-            roomId,
-            character: encryptedCharacter,
-            settings: gameSettings
-          });
-
-          // Update local state
-          setAnswerCharacter(character);
-          setGuessesLeft(gameSettings.maxAttempts);
-
-          // Prepare hints if enabled
-          let hintTexts = [];
-          if (Array.isArray(gameSettings.useHints) && gameSettings.useHints.length > 0 && character.summary) {
-            const sentences = character.summary.replace('[mask]', '').replace('[/mask]','')
-              .split(/[。、，。！？ ""]/).filter(s => s.trim());
-            if (sentences.length > 0) {
-              const selectedIndices = new Set();
-              while (selectedIndices.size < Math.min(gameSettings.useHints.length, sentences.length)) {
-                selectedIndices.add(Math.floor(Math.random() * sentences.length));
-              }
-              hintTexts = Array.from(selectedIndices).map(i => "……"+sentences[i].trim()+"……");
-            }
-          }
-          setHints(hintTexts);
-          setUseImageHint(gameSettings.useImageHint);
-          setImgHint(gameSettings.useImageHint > 0 ? character.image : null);
-          setGlobalGameEnd(false);
-          setScoreDetails(null);
-          setIsGameStarted(true);
-          setGameEnd(false);
-          setGuesses([]);
-        } catch (error) {
-          console.error('Failed to initialize game:', error);
-          alert('游戏初始化失败，请重试');
-          setIsGameStarting(false); // 重置标志以允许重试
-        }
+        socketRef.current?.emit('gameStart', {
+          roomId,
+          settings: gameSettings
+        });
       } finally {
         // 确保标志在超时后重置，防止永久锁定（超时时间设为5秒）
         setTimeout(() => {
-          if (isGameStarting) {
-            setIsGameStarting(false);
-          }
+          setIsGameStarting(false);
         }, 5000);
       }
     }
@@ -1171,10 +1061,9 @@ const Multiplayer = () => {
   const handleSetAnswer = async ({ character, hints }) => {
     try {
       character.rawTags = Array.from(character.rawTags.entries());
-      const encryptedCharacter = CryptoJS.AES.encrypt(JSON.stringify(character), secret).toString();
       socketRef.current?.emit('setAnswer', {
         roomId,
-        character: encryptedCharacter,
+        character,
         hints
       });
       setShowSetAnswerPopup(false);

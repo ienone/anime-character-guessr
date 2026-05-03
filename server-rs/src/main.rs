@@ -1,10 +1,10 @@
-use axum::{routing::get, Router};
+use axum::http::{HeaderValue, Method, header};
+use axum::{Router, routing::get};
 use socketioxide::SocketIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use axum::http::{HeaderValue, Method, header};
 use tracing::info;
 use tracing_subscriber;
 
@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
         .build_layer();
 
     // Register socket.io event handlers (pass shared state)
-    socket::register_handlers(io.clone(), Arc::clone(&server_state));
+    socket::register_handlers(io.clone(), Arc::clone(&server_state), Arc::clone(&db_pools));
 
     // Graceful shutdown: notify clients before the process exits.
     // Best-effort: emit on Ctrl+C (portable across platforms).
@@ -79,7 +79,9 @@ async fn main() -> anyhow::Result<()> {
         // CORS (must wrap Socket.IO too)
         .layer(cors)
         // Request metrics (outermost — measures full pipeline)
-        .layer(axum::middleware::from_fn(middleware::metrics::track_metrics));
+        .layer(axum::middleware::from_fn(
+            middleware::metrics::track_metrics,
+        ));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("Listening on {}", addr);

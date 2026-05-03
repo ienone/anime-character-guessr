@@ -43,4 +43,4 @@ Pull requests should describe the change, list checks run, link related issues, 
 
 ## Security & Configuration Tips
 
-Copy `.env.example` to `.env` for Docker-based local runs. Do not commit real `AES_SECRET`, MongoDB credentials, production domains, generated logs, or local build output.
+Copy `.env.example` to `.env` for Docker-based local runs. Do not commit real production domains, generated logs, or local build output.

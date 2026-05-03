@@ -1,5 +1,4 @@
 import axios from 'axios';
-import CryptoJS from 'crypto-js';
 import debounce from 'lodash.debounce';
 
 // 重试配置
@@ -109,7 +108,7 @@ class RequestCache {
   }
 
   _generateCacheKey(method, url, config) {
-    const configString = Object.keys(config).length === 0 ? '' : `:${CryptoJS.MD5(JSON.stringify(config)).toString()}`;
+    const configString = Object.keys(config).length === 0 ? '' : `:${JSON.stringify(config)}`;
     return `${method}:${url}${configString}`;
   }
 

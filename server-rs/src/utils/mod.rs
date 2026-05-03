@@ -1,14 +1,14 @@
-use std::sync::Arc;
-use crate::db::DbPools;
 use crate::db;
+use crate::db::DbPools;
 use crate::socket::state::ServerState;
-use socketioxide::SocketIo;
-use serde_json::json;
-use tracing::{error, info, warn};
 use dashmap::DashMap;
-use tokio::sync::broadcast;
 use lazy_static::lazy_static;
+use serde_json::json;
+use socketioxide::SocketIo;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
+use tracing::{error, info, warn};
 
 lazy_static! {
     static ref PENDING_DOWNLOADS: DashMap<String, broadcast::Sender<bool>> = DashMap::new();
@@ -111,12 +111,17 @@ pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
-        .user_agent("anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)")
+        .user_agent(
+            "anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)",
+        )
         .build()
     {
         Ok(c) => c,
         Err(e) => {
-            error!("Failed to build reqwest client for image {}: {}", cache_key, e);
+            error!(
+                "Failed to build reqwest client for image {}: {}",
+                cache_key, e
+            );
             return;
         }
     };
@@ -125,21 +130,23 @@ pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc
     let mut resp_opt: Option<reqwest::Response> = None;
     for attempt in 0..=1 {
         match client.get(&url).send().await {
-            Ok(r) => {
-                match r.error_for_status() {
-                    Ok(ok) => {
-                        resp_opt = Some(ok);
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = Some(e.into());
-                    }
+            Ok(r) => match r.error_for_status() {
+                Ok(ok) => {
+                    resp_opt = Some(ok);
+                    break;
                 }
-            }
+                Err(e) => {
+                    last_err = Some(e.into());
+                }
+            },
             Err(e) => last_err = Some(e.into()),
         }
         if attempt == 0 {
-            warn!("Retrying image download for {} after error: {}", cache_key, last_err.as_ref().unwrap());
+            warn!(
+                "Retrying image download for {} after error: {}",
+                cache_key,
+                last_err.as_ref().unwrap()
+            );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
@@ -150,7 +157,9 @@ pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc
             error!(
                 "Failed to fetch image for {}: {}",
                 cache_key,
-                last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())
+                last_err
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
             return;
         }
@@ -216,8 +225,13 @@ pub fn start_image_cache_cleanup(pools: Arc<DbPools>) {
                 let mut stmt = conn.prepare("SELECT count(*) FROM image_cache")?;
                 let count: i64 = stmt.query_row([], |row| row.get(0))?;
                 Ok(count)
-            }).await.unwrap_or_default();
-            info!("Image thumbnail cache cleanup skipped; {} thumbnails retained", count);
+            })
+            .await
+            .unwrap_or_default();
+            info!(
+                "Image thumbnail cache cleanup skipped; {} thumbnails retained",
+                count
+            );
         }
     });
 }

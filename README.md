@@ -39,7 +39,6 @@ cargo run
 DOMAIN_NAME=http://[你的 IP]
 SERVER_INTERNAL_PORT=3001
 NGINX_EXTERNAL_PORT=80
-AES_SECRET=YourSuperSecretKeyChangeMe
 ```
 
 启动：

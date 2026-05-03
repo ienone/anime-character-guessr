@@ -12,7 +12,7 @@ use chrono;
 const DEFAULT_DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
 const DEFAULT_DB_PATH: &str = "../archive.sqlite";
 const DEFAULT_APP_DB_PATH: &str = "../server-rs/data/app.sqlite";
-const DEFAULT_IMAGES_JSON_PATH: &str = "../server-rs/assets/character_images.json";
+const DEFAULT_IMAGES_JSON_PATH: &str = "../dump-2026-04-28.210420Z/character-images.jsonlines";
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -35,7 +35,7 @@ fn parse_args() -> Result<Args> {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "db-builder\n\nUSAGE:\n  db-builder [--mode <build-archive|migrate-app>] [--dump-dir <path>] [--out <path>] [--app-db <path>] [--images-path <path>]\n\nMODES:\n  build-archive  Build trimmed archive.sqlite from dump (default)\n  migrate-app    Populate app.sqlite caches (image sources + VAs) from dump/assets\n\nOPTIONS:\n  -m, --mode <mode>         build-archive | migrate-app (default: build-archive)\n  -d, --dump-dir <path>     Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>          Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  --app-db <path>           app.sqlite path (default: {DEFAULT_APP_DB_PATH})\n  --images-path <path>      character_images.json/.jsonl path (default: {DEFAULT_IMAGES_JSON_PATH})\n  -h, --help                Print help\n"
+                    "db-builder\n\nUSAGE:\n  db-builder [--mode <build-archive|migrate-app>] [--dump-dir <path>] [--out <path>] [--app-db <path>] [--images-path <path>]\n\nMODES:\n  build-archive  Build trimmed archive.sqlite from dump (default)\n  migrate-app    Populate app.sqlite caches (image sources + VAs) from dump files\n\nOPTIONS:\n  -m, --mode <mode>         build-archive | migrate-app (default: build-archive)\n  -d, --dump-dir <path>     Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>          Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  --app-db <path>           app.sqlite path (default: {DEFAULT_APP_DB_PATH})\n  --images-path <path>      character image source JSON/JSONL path (default: {DEFAULT_IMAGES_JSON_PATH})\n  -h, --help                Print help\n"
                 );
                 std::process::exit(0);
             }

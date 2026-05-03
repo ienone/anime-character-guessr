@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,7 +21,7 @@ pub struct Player {
     pub team: Option<String>,
     #[serde(default)]
     pub disconnected: bool,
-    
+
     // Optional fields
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_id: Option<Value>, // Can be number or string in JS
@@ -29,7 +29,7 @@ pub struct Player {
     pub avatar_image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joined_during_game: Option<bool>,
-    
+
     // Internal server states mapped to frontend
     #[serde(default, rename = "_tempObserver")]
     pub temp_observer: bool,
@@ -73,7 +73,7 @@ pub struct CurrentGame {
     pub tag_ban_state: Vec<Value>,
     #[serde(default)]
     pub tag_ban_state_pending: Vec<Value>,
-    
+
     // Internal timing states
     #[serde(skip, default)]
     pub _last_sync_waiting_key: Option<String>,
@@ -81,8 +81,12 @@ pub struct CurrentGame {
     pub _last_sync_waiting_at: i64,
 }
 
-fn default_sync_round() -> u32 { 1 }
-fn default_rank() -> u32 { 1 }
+fn default_sync_round() -> u32 {
+    1
+}
+fn default_rank() -> u32 {
+    1
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,7 +108,7 @@ pub struct Room {
     pub waiting_for_answer: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<Value>,
-    
+
     #[serde(skip, default)]
     pub _last_players_broadcast_at: Option<i64>,
     #[serde(skip, default)]
@@ -113,7 +117,9 @@ pub struct Room {
     pub _player_broadcast_due_at: Option<i64>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 use dashmap::DashMap;
 

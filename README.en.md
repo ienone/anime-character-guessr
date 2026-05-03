@@ -38,7 +38,6 @@ Create a root `.env` file:
 DOMAIN_NAME=http://[your IP]
 SERVER_INTERNAL_PORT=3001
 NGINX_EXTERNAL_PORT=80
-AES_SECRET=YourSuperSecretKeyChangeMe
 ```
 
 Start the stack:

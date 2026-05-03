@@ -81,7 +81,12 @@ pub fn calculate_setter_score(
     -1
 }
 
-pub fn calculate_nonstop_setter_score(has_big_winner: bool, big_winner_score: i32, winners_count: i32, total_players_count: i32) -> i32 {
+pub fn calculate_nonstop_setter_score(
+    has_big_winner: bool,
+    big_winner_score: i32,
+    winners_count: i32,
+    total_players_count: i32,
+) -> i32 {
     // Nonstop setter score scales by winner count and total active players.
     let total_players = std::cmp::max(1, total_players_count);
     let player_multiplier = std::cmp::max(1, ((total_players as f32) / 2.0).ceil() as i32);

@@ -1,13 +1,8 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use crate::db::{self, DbPools};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use crate::db::{self, DbPools};
 
 /// A single entry in the leaderboard response.
 #[derive(Debug, Serialize)]
@@ -30,9 +25,7 @@ pub struct ScoreSubmission {
 
 /// GET /api/leaderboard
 /// Returns the top 50 players ordered by total score.
-pub async fn get_leaderboard(
-    State(pools): State<Arc<DbPools>>,
-) -> impl IntoResponse {
+pub async fn get_leaderboard(State(pools): State<Arc<DbPools>>) -> impl IntoResponse {
     let result = db::with_app_db(Arc::clone(&pools), |conn| {
         let mut stmt = conn.prepare(
             "SELECT user_id, username, score, games_played,
