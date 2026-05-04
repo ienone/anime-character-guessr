@@ -224,11 +224,10 @@ async fn resolve_character_image(
     let pools_clone = Arc::clone(&pools);
     let source_clone = source_url.clone();
     let cache_key = id.to_string();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         utils::download_and_cache_image(cache_key, source_clone, pools_clone).await;
     });
-
-    let _ = tokio::time::timeout(Duration::from_millis(wait_ms), handle).await;
+    tokio::time::sleep(Duration::from_millis(wait_ms.min(250))).await;
 
     // Check again after the wait.
     let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -369,11 +368,10 @@ async fn resolve_subject_image(
     let pools_clone = Arc::clone(&pools);
     let source_clone = source_url.clone();
     let cache_key_for_dl = cache_key.clone();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         utils::download_and_cache_image(cache_key_for_dl, source_clone, pools_clone).await;
     });
-
-    let _ = tokio::time::timeout(Duration::from_millis(wait_ms), handle).await;
+    tokio::time::sleep(Duration::from_millis(wait_ms.min(250))).await;
 
     let cached_key = cache_key.clone();
     let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -966,51 +964,13 @@ async fn get_character_image(
         image_medium
     };
 
-    // 3. Download+transcode in background, but try to serve within a short time window
+    // 3. Download+transcode in background; never let an origin download hold /img.
     let pools_clone = Arc::clone(&pools);
     let url_clone = target_url.clone();
     let cache_key = id.to_string();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         utils::download_and_cache_image(cache_key, url_clone, pools_clone).await;
     });
-
-    // Give the background job a small chance to finish for better UX.
-    // If it doesn't finish quickly, redirect to the resolved origin URL so the browser
-    // can still display something, while caching continues in background.
-    match tokio::time::timeout(std::time::Duration::from_millis(1200), handle).await {
-        Ok(_) => {
-            let local_path: Option<String> =
-                match db::with_app_db(Arc::clone(&pools), move |conn| {
-                    Ok(conn
-                        .query_row(
-                            "SELECT local_path FROM image_cache WHERE id = ?1",
-                            [id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .ok())
-                })
-                .await
-                {
-                    Ok(v) => v,
-                    Err(_) => None,
-                };
-
-            if let Some(path) = local_path {
-                if let Ok(content) = tokio::fs::read(&path).await {
-                    let mut headers = header::HeaderMap::new();
-                    headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
-                    headers.insert(
-                        header::CACHE_CONTROL,
-                        "public, max-age=31536000".parse().unwrap(),
-                    );
-                    return (headers, content).into_response();
-                }
-            }
-        }
-        Err(_) => {
-            // timeout: keep going to fallback
-        }
-    }
 
     // Cache not ready: redirect to origin URL (client can still use /api/img/resolve for UX).
     Redirect::temporary(&target_url).into_response()
@@ -1280,46 +1240,13 @@ async fn get_subject_image(
         image_medium
     };
 
-    // 3. Download+transcode in background, but try to serve within a short window.
+    // 3. Download+transcode in background; never let an origin download hold /img.
     let pools_clone = Arc::clone(&pools);
     let url_clone = target_url.clone();
     let cache_key_for_dl = cache_key.clone();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         utils::download_and_cache_image(cache_key_for_dl, url_clone, pools_clone).await;
     });
-
-    if tokio::time::timeout(std::time::Duration::from_millis(1200), handle)
-        .await
-        .is_ok()
-    {
-        let key_lookup = cache_key.clone();
-        let local_path: Option<String> = match db::with_app_db(Arc::clone(&pools), move |conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT local_path FROM image_cache WHERE id = ?1",
-                    [key_lookup],
-                    |row| row.get(0),
-                )
-                .ok())
-        })
-        .await
-        {
-            Ok(v) => v,
-            Err(_) => None,
-        };
-
-        if let Some(path) = local_path {
-            if let Ok(content) = tokio::fs::read(&path).await {
-                let mut headers = header::HeaderMap::new();
-                headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
-                headers.insert(
-                    header::CACHE_CONTROL,
-                    "public, max-age=31536000".parse().unwrap(),
-                );
-                return (headers, content).into_response();
-            }
-        }
-    }
 
     Redirect::temporary(&target_url).into_response()
 }

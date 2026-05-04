@@ -3,32 +3,23 @@
 //! Mirrors the logic in client/src/utils/bangumi.js, but runs server-side
 //! against the pre-built archive.sqlite — no live Bangumi API calls needed.
 
-use crate::db::{CharacterCache, DbPools};
+use crate::db::{DbPools, SubjectRow};
 use anyhow::Result;
 use rand::prelude::IndexedRandom;
+use rusqlite::{Connection, params_from_iter};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 // ─── Public entry points ──────────────────────────────────────────────────────
 
-/// Build a complete character payload for single-player mode.
-/// Reads exclusively from the in-memory CharacterCache — zero DB round-trips.
 pub fn assemble_character(
-    cache: &CharacterCache,
+    conn: &Connection,
     char_id: i64,
     settings: &GameSettings,
 ) -> Result<Value> {
-    let char_val = cache
-        .char_json
-        .get(&char_id)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Character {} not found in cache", char_id))?;
-    let subjects = cache
-        .char_subjects
-        .get(&char_id)
-        .cloned()
-        .unwrap_or_default();
+    let char_val = load_character_value(conn, char_id)?;
+    let subjects = load_subject_rows(conn, char_id)?;
     let subject_infos: Vec<SubjectInfo> = subjects
         .into_iter()
         .map(|r| SubjectInfo {
@@ -47,12 +38,11 @@ pub fn assemble_character(
     assemble_payload(char_id, char_val, subject_infos, settings)
 }
 
-/// Pick a random character consistent with `settings` using the pre-built
-/// in-memory index — zero DB round-trips for candidate selection.
-/// Returns `(char_id, payload)` after assembling from CharacterCache.
+/// Pick a random character consistent with `settings` via indexed SQLite queries.
 pub fn random_character(pools: &Arc<DbPools>, settings: &GameSettings) -> Result<(i64, Value)> {
-    let char_id = pick_candidate(pools, settings)?;
-    let payload = assemble_character(&pools.character_cache, char_id, settings)?;
+    let conn = pools.archive_db.get()?;
+    let char_id = pick_candidate(&conn, settings)?;
+    let payload = assemble_character(&conn, char_id, settings)?;
     Ok((char_id, payload))
 }
 
@@ -62,7 +52,8 @@ pub fn character_by_id(
     char_id: i64,
     settings: &GameSettings,
 ) -> Result<Value> {
-    assemble_character(&pools.character_cache, char_id, settings)
+    let conn = pools.archive_db.get()?;
+    assemble_character(&conn, char_id, settings)
 }
 
 pub fn build_feedback(guess: &Value, answer: &Value, settings: &GameSettings) -> Value {
@@ -126,52 +117,66 @@ pub fn build_feedback(guess: &Value, answer: &Value, settings: &GameSettings) ->
     })
 }
 
-/// Select a candidate character_id from the in-memory index in O(n_filtered) time.
-fn pick_candidate(pools: &Arc<DbPools>, settings: &GameSettings) -> Result<i64> {
-    let idx = &pools.candidate_index;
-    let cache = &pools.character_cache;
+fn pick_candidate(conn: &Connection, settings: &GameSettings) -> Result<i64> {
     let types = settings.subject_types();
-
-    // Collect entries matching type + year constraints, verified to exist in char_json
-    let mut candidates: Vec<i64> = Vec::new();
-
-    let sources: Vec<&Vec<(i32, i64, i64)>> = if types.len() == 4 {
-        // "全部" mode — use pre-sorted all list
-        vec![&idx.all]
-    } else {
-        types.iter().filter_map(|t| idx.by_type.get(t)).collect()
-    };
-
     let top_n = settings.top_n_subjects.unwrap_or(1000).min(3000) as usize;
-
-    for bucket in sources {
-        for &(year, char_id, _collects) in bucket.iter().take(top_n) {
-            // Year filter
-            if let Some(sy) = settings.start_year {
-                if year < sy {
-                    continue;
-                }
-            }
-            if let Some(ey) = settings.end_year {
-                if year > ey {
-                    continue;
-                }
-            }
-            // Only include characters present in the cache
-            if !cache.char_json.contains_key(&char_id) {
-                continue;
-            }
-            candidates.push(char_id);
-        }
+    let type_placeholders = std::iter::repeat_n("?", types.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut sql = format!(
+        "WITH top_subjects AS (
+            SELECT id, collects
+            FROM subjects
+            WHERE nsfw = 0
+              AND date IS NOT NULL
+              AND date != ''
+              AND type IN ({type_placeholders})"
+    );
+    if settings.start_year.is_some() {
+        sql.push_str(" AND CAST(SUBSTR(date, 1, 4) AS INTEGER) >= ?");
     }
+    if settings.end_year.is_some() {
+        sql.push_str(" AND CAST(SUBSTR(date, 1, 4) AS INTEGER) <= ?");
+    }
+    sql.push_str(
+        " ORDER BY collects DESC
+          LIMIT ?
+        )
+        SELECT sc.character_id
+        FROM top_subjects ts
+        JOIN subject_characters sc ON sc.subject_id = ts.id
+        JOIN characters c ON c.id = sc.character_id",
+    );
+    if settings.main_character_only {
+        sql.push_str(" WHERE sc.type = 1");
+    }
+    sql.push_str(" ORDER BY ts.collects DESC LIMIT ?");
 
-    // Deduplicate (a character may appear in multiple type buckets)
+    let mut values: Vec<i64> = types;
+    if let Some(start_year) = settings.start_year {
+        values.push(start_year as i64);
+    }
+    if let Some(end_year) = settings.end_year {
+        values.push(end_year as i64);
+    }
+    values.push(top_n as i64);
+    values.push(settings.character_num.max(1).min(50) as i64);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut candidates = stmt
+        .query_map(params_from_iter(values), |row| row.get::<_, i64>(0))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
     candidates.sort_unstable();
     candidates.dedup();
 
     if candidates.is_empty() {
-        // Fallback: pick from all cached character IDs
-        candidates = cache.char_json.keys().copied().collect();
+        let mut stmt =
+            conn.prepare("SELECT id FROM characters WHERE role = 1 ORDER BY random() LIMIT 50")?;
+        candidates = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .filter_map(Result::ok)
+            .collect();
     }
 
     candidates
@@ -248,7 +253,6 @@ impl GameSettings {
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Flat subject info built from CharacterCache — no DB access needed.
 struct SubjectInfo {
     id: i64,
     role: i64,
@@ -262,7 +266,58 @@ struct SubjectInfo {
     meta_tags: Value,
 }
 
-/// Construct the full character payload from pre-loaded cache data.
+fn load_character_value(conn: &Connection, char_id: i64) -> Result<Value> {
+    conn.query_row(
+        "SELECT id, name, infobox, summary, collects, comments FROM characters WHERE id = ?1",
+        [char_id],
+        |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "name": row.get::<_, String>(1).unwrap_or_default(),
+                "infobox": row.get::<_, String>(2).unwrap_or_default(),
+                "summary": row.get::<_, String>(3).unwrap_or_default(),
+                "collects": row.get::<_, i64>(4).unwrap_or(0),
+                "comments": row.get::<_, i64>(5).unwrap_or(0),
+            }))
+        },
+    )
+    .map_err(|_| anyhow::anyhow!("Character {} not found in archive", char_id))
+}
+
+fn load_subject_rows(conn: &Connection, char_id: i64) -> Result<Vec<SubjectRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT sc.type, s.id, s.type, s.date, s.score,
+                s.collects, s.name, s.name_cn, s.tags_json, s.meta_tags_json
+         FROM subject_characters sc
+         JOIN subjects s ON sc.subject_id = s.id
+         WHERE sc.character_id = ?1
+         ORDER BY s.collects DESC",
+    )?;
+    let rows = stmt.query_map([char_id], |row| {
+        let date = row.get::<_, String>(3).unwrap_or_default();
+        let year = date
+            .split('-')
+            .next()
+            .and_then(|y| y.parse::<i32>().ok())
+            .unwrap_or(-1);
+        Ok(SubjectRow {
+            id: row.get::<_, i64>(1)?,
+            role: row.get::<_, i64>(0).unwrap_or(0),
+            stype: row.get::<_, i64>(2).unwrap_or(0),
+            year,
+            score: row.get::<_, f64>(4).unwrap_or(-1.0),
+            collects: row.get::<_, i64>(5).unwrap_or(0),
+            name: row.get::<_, String>(6).unwrap_or_default(),
+            name_cn: row.get::<_, String>(7).unwrap_or_default(),
+            tags_json: row.get::<_, String>(8).unwrap_or_else(|_| "[]".to_string()),
+            meta_tags_json: row.get::<_, String>(9).unwrap_or_else(|_| "[]".to_string()),
+        })
+    })?;
+
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+/// Construct the full character payload from archive rows.
 fn assemble_payload(
     char_id: i64,
     char_val: Value,

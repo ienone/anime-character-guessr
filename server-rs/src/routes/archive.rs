@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use rusqlite::{params, params_from_iter};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -33,26 +34,41 @@ async fn get_subject(State(pools): State<Arc<DbPools>>, Path(id): Path<i64>) -> 
     }
 
     let result = db::with_archive_db(Arc::clone(&pools), move |conn| {
-        let raw: Option<String> = conn
-            .query_row("SELECT raw_json FROM subjects WHERE id = ?1", [id], |row| {
-                row.get::<_, String>(0)
-            })
+        let subject: Option<Value> = conn
+            .query_row(
+                "SELECT id, type, name, name_cn, date, nsfw, rank, collects, score, tags_json, meta_tags_json
+                 FROM subjects WHERE id = ?1",
+                [id],
+                |row| {
+                    let tags_json = row.get::<_, String>(9).unwrap_or_else(|_| "[]".to_string());
+                    let meta_tags_json =
+                        row.get::<_, String>(10).unwrap_or_else(|_| "[]".to_string());
+                    let tags: Value = serde_json::from_str(&tags_json).unwrap_or_else(|_| json!([]));
+                    let meta_tags: Value =
+                        serde_json::from_str(&meta_tags_json).unwrap_or_else(|_| json!([]));
+                    Ok(json!({
+                        "id": row.get::<_, i64>(0)?,
+                        "type": row.get::<_, i64>(1).unwrap_or(0),
+                        "name": row.get::<_, String>(2).unwrap_or_default(),
+                        "name_cn": row.get::<_, String>(3).unwrap_or_default(),
+                        "date": row.get::<_, String>(4).unwrap_or_default(),
+                        "nsfw": row.get::<_, i64>(5).unwrap_or(0) != 0,
+                        "rank": row.get::<_, i64>(6).unwrap_or(0),
+                        "collection": { "collect": row.get::<_, i64>(7).unwrap_or(0) },
+                        "score": row.get::<_, f64>(8).unwrap_or(-1.0),
+                        "tags": tags,
+                        "meta_tags": meta_tags,
+                        "locked": false,
+                    }))
+                },
+            )
             .ok();
-        Ok(raw)
+        Ok(subject)
     })
     .await;
 
     match result {
-        Ok(Some(raw)) => {
-            let mut v: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
-            // BGM API sometimes returns locked; archive data may not contain it.
-            if v.get("locked").is_none() {
-                if let Value::Object(ref mut m) = v {
-                    m.insert("locked".to_string(), Value::Bool(false));
-                }
-            }
-            Json(v).into_response()
-        }
+        Ok(Some(v)) => Json(v).into_response(),
         Ok(None) => {
             // Fallback to live BGM API for subjects not present in archive.sqlite.
             // This still goes through the server (and is cached in-memory) so the client
@@ -104,7 +120,7 @@ async fn get_subject_characters(
 
     let result = db::with_archive_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT sc.character_id, sc.type, c.raw_json
+            "SELECT sc.character_id, sc.type, c.name
              FROM subject_characters sc
              JOIN characters c ON sc.character_id = c.id
              WHERE sc.subject_id = ?1
@@ -114,26 +130,17 @@ async fn get_subject_characters(
             Ok((
                 row.get::<_, i64>(0)?,    // character_id
                 row.get::<_, i64>(1)?,    // sc.type (1 main, 2 supporting)
-                row.get::<_, String>(2)?, // character raw_json
+                row.get::<_, String>(2)?, // character name
             ))
         })?;
 
         let mut out: Vec<Value> = Vec::new();
         for row in rows {
-            let (cid, role, raw) = match row {
+            let (cid, role, name) = match row {
                 Ok(v) => v,
                 Err(_) => continue,
             };
 
-            let v: Value = match serde_json::from_str(&raw) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let name = v
-                .get("name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
             let relation = if role == 1 { "主角" } else { "配角" };
             // Always serve images through our proxy (/img/:id.webp).
             // Frontend reads `character.images?.grid` for the dropdown thumbnail.
@@ -203,133 +210,160 @@ async fn get_character_basic(
             .into_response();
     }
 
-    let char_val_opt = pools.character_cache.char_json.get(&id);
-    if char_val_opt.is_none() {
-        // Fallback to BGM for characters not present in archive.sqlite
-        let cache_key = id.to_string();
-        if let Some(v) = super::cache_get_ttl(&super::CHARACTER_DETAILS_CACHE, &cache_key) {
-            return Json(v).into_response();
-        }
+    let local_result = db::with_archive_db(Arc::clone(&pools), move |conn| {
+        let local: Option<Value> = conn
+            .query_row(
+                "SELECT id, name, infobox, summary, collects, comments FROM characters WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(json!({
+                        "id": row.get::<_, i64>(0)?,
+                        "name": row.get::<_, String>(1).unwrap_or_default(),
+                        "infobox": row.get::<_, String>(2).unwrap_or_default(),
+                        "summary": row.get::<_, String>(3).unwrap_or_default(),
+                        "collects": row.get::<_, i64>(4).unwrap_or(0),
+                        "comments": row.get::<_, i64>(5).unwrap_or(0),
+                    }))
+                },
+            )
+            .ok();
+        Ok(local)
+    })
+    .await;
 
-        let url = format!("https://api.bgm.tv/v0/characters/{}", id);
-        match super::bgm_get(&url).await {
-            Ok(raw) => {
-                let name = raw
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let gender = raw.get("gender").and_then(|v| v.as_str()).unwrap_or("?");
-                let gender = match gender {
-                    "male" | "female" => gender,
-                    _ => "?",
-                };
-                let image = raw
-                    .get("images")
-                    .and_then(|imgs| {
-                        imgs.get("medium")
-                            .or_else(|| imgs.get("large"))
-                            .or_else(|| imgs.get("grid"))
-                    })
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "https://lain.bgm.tv/pic/user/l/icon.jpg".to_string());
-                let image_grid = raw
-                    .get("images")
-                    .and_then(|imgs| {
-                        imgs.get("grid")
-                            .or_else(|| imgs.get("medium"))
-                            .or_else(|| imgs.get("large"))
-                    })
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| image.clone());
+    let char_val = match local_result {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            // Fallback to BGM for characters not present in archive.sqlite
+            let cache_key = id.to_string();
+            if let Some(v) = super::cache_get_ttl(&super::CHARACTER_DETAILS_CACHE, &cache_key) {
+                return Json(v).into_response();
+            }
 
-                let stat_collects = raw
-                    .get("stat")
-                    .and_then(|s| s.get("collects"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let stat_comments = raw
-                    .get("stat")
-                    .and_then(|s| s.get("comments"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let popularity = stat_collects + stat_comments;
-                let summary = raw
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+            let url = format!("https://api.bgm.tv/v0/characters/{}", id);
+            match super::bgm_get(&url).await {
+                Ok(raw) => {
+                    let name = raw
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let gender = raw.get("gender").and_then(|v| v.as_str()).unwrap_or("?");
+                    let gender = match gender {
+                        "male" | "female" => gender,
+                        _ => "?",
+                    };
+                    let image = raw
+                        .get("images")
+                        .and_then(|imgs| {
+                            imgs.get("medium")
+                                .or_else(|| imgs.get("large"))
+                                .or_else(|| imgs.get("grid"))
+                        })
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "https://lain.bgm.tv/pic/user/l/icon.jpg".to_string());
+                    let image_grid = raw
+                        .get("images")
+                        .and_then(|imgs| {
+                            imgs.get("grid")
+                                .or_else(|| imgs.get("medium"))
+                                .or_else(|| imgs.get("large"))
+                        })
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| image.clone());
 
-                // Try to extract nameCn/nameEn similarly to frontend fallback logic.
-                let name_cn = raw
-                    .get("name_cn")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        raw.get("infobox")
-                            .and_then(|v| v.as_array())
-                            .and_then(|arr| {
-                                arr.iter().find(|it| {
-                                    it.get("key").and_then(|k| k.as_str()) == Some("简体中文名")
+                    let stat_collects = raw
+                        .get("stat")
+                        .and_then(|s| s.get("collects"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let stat_comments = raw
+                        .get("stat")
+                        .and_then(|s| s.get("comments"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let popularity = stat_collects + stat_comments;
+                    let summary = raw
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let name_cn = raw
+                        .get("name_cn")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            raw.get("infobox")
+                                .and_then(|v| v.as_array())
+                                .and_then(|arr| {
+                                    arr.iter().find(|it| {
+                                        it.get("key").and_then(|k| k.as_str()) == Some("简体中文名")
+                                    })
                                 })
-                            })
-                            .and_then(|it| it.get("value"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    });
-
-                let name_en = raw
-                    .get("infobox")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| {
-                        arr.iter()
-                            .find(|it| it.get("key").and_then(|k| k.as_str()) == Some("别名"))
-                    })
-                    .and_then(|it| it.get("value"))
-                    .and_then(|v| v.as_array())
-                    .and_then(|aliases| {
-                        let find_alias = |k: &str| {
-                            aliases
-                                .iter()
-                                .find(|a| a.get("k").and_then(|v| v.as_str()) == Some(k))
-                                .and_then(|a| a.get("v").and_then(|v| v.as_str()))
+                                .and_then(|it| it.get("value"))
+                                .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
-                        };
-                        find_alias("英文名").or_else(|| find_alias("罗马字"))
-                    });
+                        });
 
-                let out = json!({
-                    "id": id,
-                    "name": name,
-                    "nameCn": name_cn,
-                    "nameEn": name_en,
-                    "gender": gender,
-                    "image": image,
-                    "imageGrid": image_grid,
-                    "summary": summary,
-                    "popularity": popularity,
-                });
-                super::cache_put_ttl(
-                    &super::CHARACTER_DETAILS_CACHE,
-                    cache_key,
-                    10 * 60 * 1000,
-                    out.clone(),
-                );
-                return Json(out).into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
+                    let name_en = raw
+                        .get("infobox")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| {
+                            arr.iter()
+                                .find(|it| it.get("key").and_then(|k| k.as_str()) == Some("别名"))
+                        })
+                        .and_then(|it| it.get("value"))
+                        .and_then(|v| v.as_array())
+                        .and_then(|aliases| {
+                            let find_alias = |k: &str| {
+                                aliases
+                                    .iter()
+                                    .find(|a| a.get("k").and_then(|v| v.as_str()) == Some(k))
+                                    .and_then(|a| a.get("v").and_then(|v| v.as_str()))
+                                    .map(|s| s.to_string())
+                            };
+                            find_alias("英文名").or_else(|| find_alias("罗马字"))
+                        });
+
+                    let out = json!({
+                        "id": id,
+                        "name": name,
+                        "nameCn": name_cn,
+                        "nameEn": name_en,
+                        "gender": gender,
+                        "image": image,
+                        "imageGrid": image_grid,
+                        "summary": summary,
+                        "popularity": popularity,
+                    });
+                    super::cache_put_ttl(
+                        &super::CHARACTER_DETAILS_CACHE,
+                        cache_key,
+                        10 * 60 * 1000,
+                        out.clone(),
+                    );
+                    return Json(out).into_response();
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
             }
         }
-    }
-
-    let char_val = char_val_opt.expect("checked above");
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
 
     let name = char_val
         .get("name")
@@ -337,7 +371,7 @@ async fn get_character_basic(
         .unwrap_or("")
         .to_string();
     let (name_cn, name_en, image, image_grid, gender, summary, popularity) =
-        game::parse_character_basic_fields(id, char_val);
+        game::parse_character_basic_fields(id, &char_val);
 
     Json(json!({
         "id": id,
@@ -388,32 +422,70 @@ async fn search_subjects(
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec![2, 4]);
 
-    let list = pools
-        .subject_search_index
-        .search(&keyword, &types, limit)
-        .into_iter()
-        .map(|doc| {
-            // Always serve through our subject image proxy. BGM offline dump has
-            // no image URLs for subjects; the proxy resolves + caches lazily.
-            let img_url = format!("/img/subject/{}.webp", doc.id);
-            json!({
-                "id": doc.id,
-                "type": doc.stype,
-                "date": doc.date,
-                "name": doc.name,
-                "name_cn": doc.name_cn,
+    let keyword_for_db = keyword.clone();
+    let result = db::with_archive_db(Arc::clone(&pools), move |conn| {
+        let type_placeholders = std::iter::repeat_n("?", types.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT s.id, s.type, s.date, s.collects, s.name, s.name_cn
+             FROM subject_fts f
+             JOIN subjects s ON s.id = f.rowid
+             WHERE subject_fts MATCH ?
+               AND s.nsfw = 0
+               AND s.type IN ({type_placeholders})
+               AND (s.name LIKE ? OR s.name_cn LIKE ?)
+             ORDER BY s.collects DESC, bm25(subject_fts)
+             LIMIT ?"
+        );
+        let fts_query = subject_fts_query(&keyword_for_db);
+        let like = format!("%{}%", keyword_for_db);
+        let mut values: Vec<String> = types.into_iter().map(|v| v.to_string()).collect();
+        values.insert(0, fts_query);
+        values.push(like.clone());
+        values.push(like);
+        values.push(limit.to_string());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1).unwrap_or(0),
+                row.get::<_, String>(2).unwrap_or_default(),
+                row.get::<_, String>(4).unwrap_or_default(),
+                row.get::<_, String>(5).unwrap_or_default(),
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, stype, date, name, name_cn) = row?;
+            let img_url = format!("/img/subject/{}.webp", id);
+            out.push(json!({
+                "id": id,
+                "type": stype,
+                "date": date,
+                "name": name,
+                "name_cn": name_cn,
                 "images": { "grid": img_url, "medium": img_url, "common": img_url },
-            })
-        })
-        .collect::<Vec<_>>();
+            }));
+        }
+        Ok(out)
+    })
+    .await;
 
-    Json(json!({ "data": list })).into_response()
+    match result {
+        Ok(list) => Json(json!({ "data": list })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /api/archive/search/characters?keyword=xxx&limit=10&offset=0
 ///
 /// Local replacement for `POST /v0/search/characters` used by the character search UI.
-/// Runs entirely against archive.sqlite via prebuilt in-memory index (no BGM dependency).
+/// Runs entirely against archive.sqlite via indexed on-demand queries (no BGM dependency).
 async fn search_characters(
     State(pools): State<Arc<DbPools>>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -439,11 +511,36 @@ async fn search_characters(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0) as usize;
 
-    let list = pools
-        .character_search_index
-        .search(&keyword, offset, limit)
-        .into_iter()
-        .map(|doc| {
+    let result = db::with_archive_db(Arc::clone(&pools), move |conn| {
+        let fts_query = character_fts_query(&keyword);
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.name, c.collects, c.comments, c.infobox, c.summary
+             FROM character_fts f
+             JOIN characters c ON c.id = f.rowid
+             WHERE character_fts MATCH ?1
+               AND c.role = 1
+               AND (c.name LIKE ?2 OR c.infobox LIKE ?2)
+             ORDER BY c.collects + c.comments DESC, bm25(character_fts)
+             LIMIT ?3 OFFSET ?4",
+        )?;
+        let like = format!("%{}%", keyword);
+        let rows = stmt.query_map(
+            params![fts_query, like, limit as i64, offset as i64],
+            |row| {
+                Ok(crate::db::CharacterDoc {
+                    id: row.get::<_, i64>(0)?,
+                    name: row.get::<_, String>(1).unwrap_or_default(),
+                    collects: row.get::<_, i64>(2).unwrap_or(0),
+                    comments: row.get::<_, i64>(3).unwrap_or(0),
+                    infobox: row.get::<_, String>(4).unwrap_or_default(),
+                    summary: row.get::<_, String>(5).unwrap_or_default(),
+                })
+            },
+        )?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let doc = row?;
             // Parse common display fields from archive infobox text.
             let (name_cn, name_en_any, image, _image_grid, gender, _summary, popularity) =
                 game::parse_character_basic_fields(
@@ -473,7 +570,7 @@ async fn search_characters(
                 .filter(|s| !s.is_empty());
             let _name_en = en.clone().or_else(|| romaji.clone()).or(name_en_any);
 
-            json!({
+            out.push(json!({
                 "id": doc.id,
                 "name": doc.name,
                 "gender": gender,
@@ -487,9 +584,36 @@ async fn search_characters(
                 ],
                 "stat": { "collects": doc.collects, "comments": doc.comments },
                 "popularity": popularity,
-            })
-        })
-        .collect::<Vec<_>>();
+            }));
+        }
+        Ok(out)
+    })
+    .await;
 
-    Json(json!({ "data": list })).into_response()
+    match result {
+        Ok(list) => Json(json!({ "data": list })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+fn subject_fts_query(keyword: &str) -> String {
+    fts_query_with_char_fallback(keyword)
+}
+
+fn character_fts_query(keyword: &str) -> String {
+    fts_query_with_char_fallback(keyword)
+}
+
+fn fts_query_with_char_fallback(keyword: &str) -> String {
+    keyword
+        .split_whitespace()
+        .map(|part| part.replace('"', ""))
+        .filter(|part| !part.is_empty())
+        .map(|part| format!("{}*", part))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }

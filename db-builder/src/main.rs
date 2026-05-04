@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use chrono;
 use rusqlite::Connection;
 use serde_json::Value;
-use chrono;
 
 const DEFAULT_DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
 const DEFAULT_DB_PATH: &str = "../archive.sqlite";
@@ -44,9 +44,7 @@ fn parse_args() -> Result<Args> {
                 mode = Some(v);
             }
             "-d" | "--dump-dir" => {
-                let v = it
-                    .next()
-                    .context("--dump-dir requires a value")?;
+                let v = it.next().context("--dump-dir requires a value")?;
                 dump_dir = Some(PathBuf::from(v));
             }
             "-o" | "--out" => {
@@ -116,7 +114,10 @@ fn main() -> Result<()> {
             // ==========================================
             println!("\nStep 2: 扫描 subject-characters.jsonlines...");
             let valid_chars = process_relations(&mut db, &args.dump_dir, &valid_subjects)?;
-            println!("符合条件的核心角色 (主角/配角) 且属于热门作品的集合数: {}", valid_chars.len());
+            println!(
+                "符合条件的核心角色 (主角/配角) 且属于热门作品的集合数: {}",
+                valid_chars.len()
+            );
 
             // ==========================================
             // 第三层漏斗：过滤角色详细信息 (Character)
@@ -124,11 +125,14 @@ fn main() -> Result<()> {
             println!("\nStep 3: 扫描并过滤 character.jsonlines...");
             process_characters(&mut db, &args.dump_dir, &valid_chars)?;
 
+            println!("\nStep 4: 构建 SQLite FTS5 搜索索引...");
+            build_search_indexes(&mut db)?;
+
             // ==========================================
             // 清理与优化
             // ==========================================
             println!("\n执行 SQLite 空间优化与索引构建...");
-            db.execute_batch("VACUUM; OPTIMIZE;")?;
+            db.execute_batch("VACUUM; PRAGMA optimize;")?;
 
             println!("构建完成！耗时: {:.2?}", start_time.elapsed());
         }
@@ -139,7 +143,12 @@ fn main() -> Result<()> {
             println!("app_db: {}", args.app_db.display());
             println!("images_path: {}", args.images_path.display());
 
-            migrate_app_db(&args.dump_dir, &args.out_db, &args.app_db, &args.images_path)?;
+            migrate_app_db(
+                &args.dump_dir,
+                &args.out_db,
+                &args.app_db,
+                &args.images_path,
+            )?;
             println!("迁移完成！耗时: {:.2?}", start_time.elapsed());
         }
         other => anyhow::bail!("Unknown mode: {other}"),
@@ -164,19 +173,34 @@ fn ensure_app_schema(app: &Connection) -> Result<()> {
             fetched_at_ms INTEGER NOT NULL DEFAULT 0,
             source TEXT NOT NULL DEFAULT ''
         );
-        "
+        ",
     )?;
     Ok(())
 }
 
-fn migrate_app_db(dump_dir: &Path, archive_db_path: &Path, app_db_path: &Path, images_json_path: &Path) -> Result<()> {
+fn migrate_app_db(
+    dump_dir: &Path,
+    archive_db_path: &Path,
+    app_db_path: &Path,
+    images_json_path: &Path,
+) -> Result<()> {
     // Load valid subject/character sets from archive.sqlite so we only cache within game scope.
     let archive = Connection::open(archive_db_path)?;
     let mut stmt = archive.prepare("SELECT id FROM subjects")?;
-    let valid_subjects: HashSet<i64> = stmt.query_map([], |row| row.get::<_, i64>(0))?.filter_map(Result::ok).collect();
+    let valid_subjects: HashSet<i64> = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .filter_map(Result::ok)
+        .collect();
     let mut stmt2 = archive.prepare("SELECT id FROM characters")?;
-    let valid_chars: HashSet<i64> = stmt2.query_map([], |row| row.get::<_, i64>(0))?.filter_map(Result::ok).collect();
-    println!("valid subjects: {}, valid chars: {}", valid_subjects.len(), valid_chars.len());
+    let valid_chars: HashSet<i64> = stmt2
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .filter_map(Result::ok)
+        .collect();
+    println!(
+        "valid subjects: {}, valid chars: {}",
+        valid_subjects.len(),
+        valid_chars.len()
+    );
 
     let mut app = Connection::open(app_db_path)?;
     ensure_app_schema(&app)?;
@@ -186,53 +210,89 @@ fn migrate_app_db(dump_dir: &Path, archive_db_path: &Path, app_db_path: &Path, i
     //  - JSON array:    [{ id, image_medium: [..], image_grid: [..], ... }, ...]
     //  - JSONL:         one JSON object per line (same schema)
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let imported_imgs = import_character_image_sources(&mut app, images_json_path, &valid_chars, now_ms)?;
+    let imported_imgs =
+        import_character_image_sources(&mut app, images_json_path, &valid_chars, now_ms)?;
     println!("imported image sources: {}", imported_imgs);
 
     // ── 2) Build character_vas from dump (person + person-characters) ──
     // Load seiyu person id -> name
     let mut seiyu_names: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
     {
-        let file = File::open(dump_dir.join("person.jsonlines"))
-            .with_context(|| format!("failed to open {}", dump_dir.join("person.jsonlines").display()))?;
+        let file = File::open(dump_dir.join("person.jsonlines")).with_context(|| {
+            format!(
+                "failed to open {}",
+                dump_dir.join("person.jsonlines").display()
+            )
+        })?;
         let reader = BufReader::new(file);
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let v: Value = serde_json::from_str(&line)?;
             let id = v["id"].as_i64().unwrap_or(0);
-            if id == 0 { continue; }
-            let careers = v.get("career").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            if id == 0 {
+                continue;
+            }
+            let careers = v
+                .get("career")
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
             let is_seiyu = careers.iter().any(|c| c.as_str() == Some("seiyu"));
-            if !is_seiyu { continue; }
+            if !is_seiyu {
+                continue;
+            }
             let name = v["name"].as_str().unwrap_or("").trim().to_string();
-            if name.is_empty() { continue; }
+            if name.is_empty() {
+                continue;
+            }
             seiyu_names.insert(id, name);
         }
     }
     println!("seiyu persons: {}", seiyu_names.len());
 
-    let mut va_by_char: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    let mut va_by_char: std::collections::HashMap<i64, Vec<String>> =
+        std::collections::HashMap::new();
     {
-        let file = File::open(dump_dir.join("person-characters.jsonlines"))
-            .with_context(|| format!("failed to open {}", dump_dir.join("person-characters.jsonlines").display()))?;
+        let file = File::open(dump_dir.join("person-characters.jsonlines")).with_context(|| {
+            format!(
+                "failed to open {}",
+                dump_dir.join("person-characters.jsonlines").display()
+            )
+        })?;
         let reader = BufReader::new(file);
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let v: Value = serde_json::from_str(&line)?;
             // type==0 is the dominant mapping (voice actor)
-            if v["type"].as_i64().unwrap_or(-1) != 0 { continue; }
+            if v["type"].as_i64().unwrap_or(-1) != 0 {
+                continue;
+            }
             let subject_id = v["subject_id"].as_i64().unwrap_or(0);
             let character_id = v["character_id"].as_i64().unwrap_or(0);
             let person_id = v["person_id"].as_i64().unwrap_or(0);
-            if subject_id == 0 || character_id == 0 || person_id == 0 { continue; }
-            if !valid_subjects.contains(&subject_id) { continue; }
-            if !valid_chars.contains(&character_id) { continue; }
-            let Some(name) = seiyu_names.get(&person_id) else { continue; };
+            if subject_id == 0 || character_id == 0 || person_id == 0 {
+                continue;
+            }
+            if !valid_subjects.contains(&subject_id) {
+                continue;
+            }
+            if !valid_chars.contains(&character_id) {
+                continue;
+            }
+            let Some(name) = seiyu_names.get(&person_id) else {
+                continue;
+            };
 
             let entry = va_by_char.entry(character_id).or_insert_with(Vec::new);
-            if entry.len() >= 8 { continue; }
+            if entry.len() >= 8 {
+                continue;
+            }
             if !entry.iter().any(|n| n == name) {
                 entry.push(name.clone());
             }
@@ -248,7 +308,7 @@ fn migrate_app_db(dump_dir: &Path, archive_db_path: &Path, app_db_path: &Path, i
              ON CONFLICT(character_id) DO UPDATE SET\n\
                va_names_json=excluded.va_names_json,\n\
                fetched_at_ms=excluded.fetched_at_ms,\n\
-               source=excluded.source"
+               source=excluded.source",
         )?;
         let mut written_vas = 0;
         for (cid, names) in va_by_char {
@@ -262,9 +322,14 @@ fn migrate_app_db(dump_dir: &Path, archive_db_path: &Path, app_db_path: &Path, i
     }
 
     // Final coverage summary
-    let img_cnt: i64 = app.query_row("SELECT COUNT(1) FROM character_image_sources", [], |r| r.get(0))?;
+    let img_cnt: i64 = app.query_row("SELECT COUNT(1) FROM character_image_sources", [], |r| {
+        r.get(0)
+    })?;
     let va_cnt: i64 = app.query_row("SELECT COUNT(1) FROM character_vas", [], |r| r.get(0))?;
-    println!("app.sqlite totals: image_sources={} vas={}", img_cnt, va_cnt);
+    println!(
+        "app.sqlite totals: image_sources={} vas={}",
+        img_cnt, va_cnt
+    );
 
     Ok(())
 }
@@ -296,7 +361,9 @@ fn import_character_image_sources(
 
     // Helper: write one entry
     let mut write_item = |item: Value, source: &str| -> Result<()> {
-        let Some(id) = item.get("id").and_then(|x| x.as_i64()) else { return Ok(()); };
+        let Some(id) = item.get("id").and_then(|x| x.as_i64()) else {
+            return Ok(());
+        };
         if !valid_chars.contains(&id) {
             return Ok(());
         }
@@ -332,8 +399,12 @@ fn import_character_image_sources(
             if t.is_empty() {
                 continue;
             }
-            let v: Value = serde_json::from_str(t)
-                .with_context(|| format!("failed to parse images jsonl line for {}", images_path.display()))?;
+            let v: Value = serde_json::from_str(t).with_context(|| {
+                format!(
+                    "failed to parse images jsonl line for {}",
+                    images_path.display()
+                )
+            })?;
             write_item(v, "jsonl")?;
         }
     } else {
@@ -365,7 +436,9 @@ fn init_db(db: &mut Connection) -> Result<()> {
             nsfw INTEGER,
             rank INTEGER,
             collects INTEGER,
-            raw_json TEXT
+            score REAL,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            meta_tags_json TEXT NOT NULL DEFAULT '[]'
         );
 
         DROP TABLE IF EXISTS characters;
@@ -375,7 +448,8 @@ fn init_db(db: &mut Connection) -> Result<()> {
             role INTEGER,
             collects INTEGER,
             comments INTEGER,
-            raw_json TEXT
+            infobox TEXT,
+            summary TEXT
         );
 
         DROP TABLE IF EXISTS subject_characters;
@@ -386,27 +460,54 @@ fn init_db(db: &mut Connection) -> Result<()> {
             order_num INTEGER
         );
         CREATE INDEX idx_sub_char ON subject_characters(subject_id, character_id);
-        "
+        CREATE INDEX idx_char_sub ON subject_characters(character_id, subject_id);
+        CREATE INDEX idx_subjects_picker ON subjects(type, nsfw, collects DESC, date);
+        CREATE INDEX idx_characters_role_pop ON characters(role, collects DESC, comments DESC);
+
+        DROP TABLE IF EXISTS subject_fts;
+        CREATE VIRTUAL TABLE subject_fts USING fts5(
+            name,
+            name_cn,
+            content='',
+            contentless_delete=1,
+            tokenize='unicode61'
+        );
+
+        DROP TABLE IF EXISTS character_fts;
+        CREATE VIRTUAL TABLE character_fts USING fts5(
+            name,
+            aliases,
+            content='',
+            contentless_delete=1,
+            tokenize='unicode61'
+        );
+        ",
     )?;
     Ok(())
 }
 
 fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>> {
-    let file = File::open(dump_dir.join("subject.jsonlines"))
-        .with_context(|| format!("failed to open {}", dump_dir.join("subject.jsonlines").display()))?;
+    let file = File::open(dump_dir.join("subject.jsonlines")).with_context(|| {
+        format!(
+            "failed to open {}",
+            dump_dir.join("subject.jsonlines").display()
+        )
+    })?;
     let reader = BufReader::new(file);
     let mut valid_ids = HashSet::new();
 
     let tx = db.transaction()?;
     {
         let mut stmt = tx.prepare(
-            "INSERT INTO subjects (id, type, name, name_cn, date, nsfw, rank, collects, raw_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            "INSERT INTO subjects (id, type, name, name_cn, date, nsfw, rank, collects, score, tags_json, meta_tags_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
         )?;
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let v: Value = serde_json::from_str(&line)?;
 
             let id = v["id"].as_i64().unwrap_or(0);
@@ -426,10 +527,10 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
             let rank = v["rank"].as_i64().unwrap_or(0);
             let fav = &v["favorite"];
             let collects = fav["wish"].as_i64().unwrap_or(0)
-                         + fav["done"].as_i64().unwrap_or(0)
-                         + fav["doing"].as_i64().unwrap_or(0)
-                         + fav["on_hold"].as_i64().unwrap_or(0)
-                         + fav["dropped"].as_i64().unwrap_or(0);
+                + fav["done"].as_i64().unwrap_or(0)
+                + fav["doing"].as_i64().unwrap_or(0)
+                + fav["on_hold"].as_i64().unwrap_or(0)
+                + fav["dropped"].as_i64().unwrap_or(0);
 
             // 规则 3：过滤零热度作品 (动漫>=100或有排名，游戏>=50或有排名)
             let is_anime_valid = type_id == 2 && (collects >= 100 || rank > 0);
@@ -437,6 +538,14 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
 
             if is_anime_valid || is_game_valid {
                 valid_ids.insert(id);
+                let tags_json = v
+                    .get("tags")
+                    .map(|x| x.to_string())
+                    .unwrap_or_else(|| "[]".to_string());
+                let meta_tags_json = v
+                    .get("meta_tags")
+                    .map(|x| x.to_string())
+                    .unwrap_or_else(|| "[]".to_string());
                 stmt.execute((
                     id,
                     type_id,
@@ -446,7 +555,9 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
                     nsfw as i32,
                     rank,
                     collects,
-                    line.as_str() // 存入完整 raw_json 备用
+                    v["score"].as_f64().unwrap_or(-1.0),
+                    tags_json,
+                    meta_tags_json,
                 ))?;
             }
         }
@@ -455,9 +566,17 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
     Ok(valid_ids)
 }
 
-fn process_relations(db: &mut Connection, dump_dir: &Path, valid_subjects: &HashSet<i64>) -> Result<HashSet<i64>> {
-    let file = File::open(dump_dir.join("subject-characters.jsonlines"))
-        .with_context(|| format!("failed to open {}", dump_dir.join("subject-characters.jsonlines").display()))?;
+fn process_relations(
+    db: &mut Connection,
+    dump_dir: &Path,
+    valid_subjects: &HashSet<i64>,
+) -> Result<HashSet<i64>> {
+    let file = File::open(dump_dir.join("subject-characters.jsonlines")).with_context(|| {
+        format!(
+            "failed to open {}",
+            dump_dir.join("subject-characters.jsonlines").display()
+        )
+    })?;
     let reader = BufReader::new(file);
     let mut valid_chars = HashSet::new();
 
@@ -465,12 +584,14 @@ fn process_relations(db: &mut Connection, dump_dir: &Path, valid_subjects: &Hash
     {
         let mut stmt = tx.prepare(
             "INSERT INTO subject_characters (subject_id, character_id, type, order_num)
-             VALUES (?1, ?2, ?3, ?4)"
+             VALUES (?1, ?2, ?3, ?4)",
         )?;
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let v: Value = serde_json::from_str(&line)?;
 
             let sub_id = v["subject_id"].as_i64().unwrap_or(0);
@@ -488,23 +609,33 @@ fn process_relations(db: &mut Connection, dump_dir: &Path, valid_subjects: &Hash
     Ok(valid_chars)
 }
 
-fn process_characters(db: &mut Connection, dump_dir: &Path, valid_chars: &HashSet<i64>) -> Result<()> {
-    let file = File::open(dump_dir.join("character.jsonlines"))
-        .with_context(|| format!("failed to open {}", dump_dir.join("character.jsonlines").display()))?;
+fn process_characters(
+    db: &mut Connection,
+    dump_dir: &Path,
+    valid_chars: &HashSet<i64>,
+) -> Result<()> {
+    let file = File::open(dump_dir.join("character.jsonlines")).with_context(|| {
+        format!(
+            "failed to open {}",
+            dump_dir.join("character.jsonlines").display()
+        )
+    })?;
     let reader = BufReader::new(file);
-    
+
     let mut total_kept = 0;
 
     let tx = db.transaction()?;
     {
         let mut stmt = tx.prepare(
-            "INSERT INTO characters (id, name, role, collects, comments, raw_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+            "INSERT INTO characters (id, name, role, collects, comments, infobox, summary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let v: Value = serde_json::from_str(&line)?;
 
             let id = v["id"].as_i64().unwrap_or(0);
@@ -519,7 +650,8 @@ fn process_characters(db: &mut Connection, dump_dir: &Path, valid_chars: &HashSe
                     v["role"].as_i64().unwrap_or(0),
                     collects,
                     v["comments"].as_i64().unwrap_or(0),
-                    line.as_str()
+                    v["infobox"].as_str().unwrap_or(""),
+                    v["summary"].as_str().unwrap_or(""),
                 ))?;
             }
         }
@@ -527,4 +659,79 @@ fn process_characters(db: &mut Connection, dump_dir: &Path, valid_chars: &HashSe
     tx.commit()?;
     println!("实际最终写入库的优质角色数量: {}", total_kept);
     Ok(())
+}
+
+fn build_search_indexes(db: &mut Connection) -> Result<()> {
+    db.execute(
+        "INSERT INTO subject_fts(rowid, name, name_cn)
+         SELECT id, name, name_cn FROM subjects",
+        [],
+    )?;
+    let character_rows = {
+        let mut stmt =
+            db.prepare("SELECT id, name, infobox FROM characters WHERE role = 1 ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1).unwrap_or_default(),
+                row.get::<_, String>(2).unwrap_or_default(),
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    let tx = db.transaction()?;
+    {
+        let mut stmt =
+            tx.prepare("INSERT INTO character_fts(rowid, name, aliases) VALUES (?1, ?2, ?3)")?;
+        for (id, name, infobox) in character_rows {
+            stmt.execute((id, name, character_search_aliases(&infobox)))?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn character_search_aliases(infobox: &str) -> String {
+    [
+        extract_infobox_field(infobox, "简体中文名"),
+        extract_alias(infobox, "英文名"),
+        extract_alias(infobox, "罗马字"),
+        extract_alias(infobox, "日文名"),
+        extract_alias(infobox, "昵称"),
+        extract_alias(infobox, "重要绰号"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn extract_infobox_field(infobox: &str, key: &str) -> Option<String> {
+    let pattern = format!("|{}=", key);
+    let start = infobox.find(&pattern)? + pattern.len();
+    let rest = &infobox[start..];
+    let end = rest
+        .find('\n')
+        .or_else(|| rest.find('\r'))
+        .unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn extract_alias(infobox: &str, alias_key: &str) -> Option<String> {
+    let search = format!("[{}|", alias_key);
+    let start = infobox.find(&search)? + search.len();
+    let rest = &infobox[start..];
+    let end = rest.find(']').unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }

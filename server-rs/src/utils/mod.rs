@@ -7,11 +7,13 @@ use serde_json::json;
 use socketioxide::SocketIo;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 lazy_static! {
     static ref PENDING_DOWNLOADS: DashMap<String, broadcast::Sender<bool>> = DashMap::new();
+    static ref IMAGE_DOWNLOAD_SEMAPHORE: Semaphore = Semaphore::new(8);
 }
 
 struct CleanupPending(String, broadcast::Sender<bool>);
@@ -75,6 +77,17 @@ pub fn start_room_cleanup(state: Arc<ServerState>, io: SocketIo) {
 /// character, `"s:123"` for a subject). It is also used to derive the
 /// on-disk filename (colons replaced with underscores).
 pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc<DbPools>) {
+    if let Err(e) = tokio::time::timeout(
+        Duration::from_secs(12),
+        download_and_cache_image_inner(cache_key.clone(), url, pools),
+    )
+    .await
+    {
+        warn!("Image download hard-timeout for {}: {}", cache_key, e);
+    }
+}
+
+async fn download_and_cache_image_inner(cache_key: String, url: String, pools: Arc<DbPools>) {
     // Coalesce duplicate requests
     let rx_opt = {
         if let Some(entry) = PENDING_DOWNLOADS.get(&cache_key) {
@@ -86,7 +99,7 @@ pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc
 
     if let Some(mut rx) = rx_opt {
         // A task is already downloading this image, wait for it
-        let _ = rx.recv().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
         return;
     }
 
@@ -107,10 +120,16 @@ pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc
         return;
     }
 
+    let Ok(_permit) = IMAGE_DOWNLOAD_SEMAPHORE.acquire().await else {
+        warn!("Image download semaphore closed for {}", cache_key);
+        return;
+    };
+
     info!("Downloading image for {}: {}", cache_key, url);
 
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(6))
         .user_agent(
             "anime-character-guessr/2.0 (https://github.com/hammerlink/anime-character-guessr)",
         )
@@ -126,52 +145,39 @@ pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc
         }
     };
 
-    let mut last_err: Option<anyhow::Error> = None;
-    let mut resp_opt: Option<reqwest::Response> = None;
-    for attempt in 0..=1 {
-        match client.get(&url).send().await {
-            Ok(r) => match r.error_for_status() {
-                Ok(ok) => {
-                    resp_opt = Some(ok);
-                    break;
-                }
-                Err(e) => {
-                    last_err = Some(e.into());
-                }
-            },
-            Err(e) => last_err = Some(e.into()),
-        }
-        if attempt == 0 {
-            warn!(
-                "Retrying image download for {} after error: {}",
-                cache_key,
-                last_err.as_ref().unwrap()
-            );
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    }
-
-    let resp = match resp_opt {
-        Some(r) => r,
-        None => {
-            error!(
-                "Failed to fetch image for {}: {}",
-                cache_key,
-                last_err
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "unknown error".to_string())
-            );
+    let resp = match client.get(&url).send().await {
+        Ok(r) => match r.error_for_status() {
+            Ok(ok) => ok,
+            Err(e) => {
+                error!("Failed to fetch image for {}: {}", cache_key, e);
+                return;
+            }
+        },
+        Err(e) => {
+            error!("Failed to fetch image for {}: {}", cache_key, e);
             return;
         }
     };
 
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
+    let bytes = match tokio::time::timeout(Duration::from_secs(4), resp.bytes()).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
             error!("Failed to read image bytes for {}: {}", cache_key, e);
             return;
         }
+        Err(_) => {
+            error!("Timed out reading image bytes for {}", cache_key);
+            return;
+        }
     };
+    if bytes.len() > 5 * 1024 * 1024 {
+        error!(
+            "Image response too large for {}: {} bytes",
+            cache_key,
+            bytes.len()
+        );
+        return;
+    }
 
     // Filename: replace ':' with '_' for safe paths (e.g. "s:123" → "s_123.webp").
     let file_basename = cache_key.replace(':', "_");
