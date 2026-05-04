@@ -12,6 +12,7 @@ mod config;
 mod db;
 mod middleware;
 mod routes;
+mod search_index;
 mod socket;
 mod utils;
 

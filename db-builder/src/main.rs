@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -8,11 +8,14 @@ use anyhow::{Context, Result};
 use chrono;
 use rusqlite::Connection;
 use serde_json::Value;
+use tantivy::schema::{FAST, STORED, STRING, Schema, TantivyDocument, TEXT};
+use tantivy::{doc, Index};
 
 const DEFAULT_DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
 const DEFAULT_DB_PATH: &str = "../archive.sqlite";
 const DEFAULT_APP_DB_PATH: &str = "../server-rs/data/app.sqlite";
 const DEFAULT_IMAGES_JSON_PATH: &str = "../dump-2026-04-28.210420Z/character-images.jsonlines";
+const DEFAULT_TANTIVY_INDEX_DIR: &str = "../server-rs/data/tantivy";
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -20,6 +23,7 @@ struct Args {
     out_db: PathBuf,
     app_db: PathBuf,
     images_path: PathBuf,
+    tantivy_index_dir: PathBuf,
     mode: String, // build-archive | rebuild-fts | migrate-app
 }
 
@@ -28,6 +32,7 @@ fn parse_args() -> Result<Args> {
     let mut out_db: Option<PathBuf> = None;
     let mut app_db: Option<PathBuf> = None;
     let mut images_path: Option<PathBuf> = None;
+    let mut tantivy_index_dir: Option<PathBuf> = None;
     let mut mode: Option<String> = None;
 
     let mut it = std::env::args().skip(1);
@@ -35,7 +40,7 @@ fn parse_args() -> Result<Args> {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "db-builder\n\nUSAGE:\n  db-builder [--mode <build-archive|rebuild-fts|migrate-app>] [--dump-dir <path>] [--out <path>] [--app-db <path>] [--images-path <path>]\n\nMODES:\n  build-archive  Build trimmed archive.sqlite from dump (default)\n  rebuild-fts    Rebuild FTS search indexes on an existing archive.sqlite\n  migrate-app    Populate app.sqlite caches (image sources + VAs) from dump files\n\nOPTIONS:\n  -m, --mode <mode>         build-archive | rebuild-fts | migrate-app (default: build-archive)\n  -d, --dump-dir <path>     Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>          Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  --app-db <path>           app.sqlite path (default: {DEFAULT_APP_DB_PATH})\n  --images-path <path>      character image source JSON/JSONL path (default: {DEFAULT_IMAGES_JSON_PATH})\n  -h, --help                Print help\n"
+                    "db-builder\n\nUSAGE:\n  db-builder [--mode <build-archive|rebuild-fts|build-tantivy|migrate-app>] [--dump-dir <path>] [--out <path>] [--app-db <path>] [--images-path <path>] [--tantivy-dir <path>]\n\nMODES:\n  build-archive  Build trimmed archive.sqlite from dump (default)\n  rebuild-fts    Rebuild FTS search indexes on an existing archive.sqlite\n  build-tantivy  Build Tantivy search indexes from archive.sqlite\n  migrate-app    Populate app.sqlite caches (image sources + VAs) from dump files\n\nOPTIONS:\n  -m, --mode <mode>         build-archive | rebuild-fts | build-tantivy | migrate-app (default: build-archive)\n  -d, --dump-dir <path>     Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>          Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  --app-db <path>           app.sqlite path (default: {DEFAULT_APP_DB_PATH})\n  --images-path <path>      character image source JSON/JSONL path (default: {DEFAULT_IMAGES_JSON_PATH})\n  --tantivy-dir <path>      Tantivy index output dir (default: {DEFAULT_TANTIVY_INDEX_DIR})\n  -h, --help                Print help\n"
                 );
                 std::process::exit(0);
             }
@@ -58,6 +63,10 @@ fn parse_args() -> Result<Args> {
             "--images-path" => {
                 let v = it.next().context("--images-path requires a value")?;
                 images_path = Some(PathBuf::from(v));
+            }
+            "--tantivy-dir" => {
+                let v = it.next().context("--tantivy-dir requires a value")?;
+                tantivy_index_dir = Some(PathBuf::from(v));
             }
             // Backwards-compat
             "--images-json" => {
@@ -85,6 +94,8 @@ fn parse_args() -> Result<Args> {
         out_db: out_db.unwrap_or_else(|| PathBuf::from(DEFAULT_DB_PATH)),
         app_db: app_db.unwrap_or_else(|| PathBuf::from(DEFAULT_APP_DB_PATH)),
         images_path: images_path.unwrap_or_else(|| PathBuf::from(DEFAULT_IMAGES_JSON_PATH)),
+        tantivy_index_dir: tantivy_index_dir
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_TANTIVY_INDEX_DIR)),
         mode: mode.unwrap_or_else(|| "build-archive".to_string()),
     })
 }
@@ -131,6 +142,9 @@ fn main() -> Result<()> {
             println!("\nStep 5: 构建 SQLite FTS5 搜索索引...");
             build_search_indexes(&mut db, &args.dump_dir)?;
 
+            println!("\nStep 6: 构建 Tantivy 搜索索引...");
+            build_tantivy_indexes(&args.out_db, &args.tantivy_index_dir)?;
+
             // ==========================================
             // 清理与优化
             // ==========================================
@@ -150,6 +164,13 @@ fn main() -> Result<()> {
             build_search_indexes(&mut db, &args.dump_dir)?;
             db.execute_batch("VACUUM; PRAGMA optimize;")?;
             println!("FTS 重建完成！耗时: {:.2?}", start_time.elapsed());
+        }
+        "build-tantivy" => {
+            println!("开始构建 Tantivy 搜索索引...");
+            println!("archive_db: {}", args.out_db.display());
+            println!("tantivy_dir: {}", args.tantivy_index_dir.display());
+            build_tantivy_indexes(&args.out_db, &args.tantivy_index_dir)?;
+            println!("Tantivy 索引构建完成！耗时: {:.2?}", start_time.elapsed());
         }
         "migrate-app" => {
             println!("开始迁移 app.sqlite 缓存数据（图片源 + 声优）...");
@@ -370,6 +391,172 @@ fn migrate_app_db(
         img_cnt, va_cnt
     );
 
+    Ok(())
+}
+
+fn build_tantivy_indexes(archive_db_path: &Path, index_dir: &Path) -> Result<()> {
+    let archive = Connection::open(archive_db_path)?;
+    ensure_archive_search_schema(&archive)?;
+    fs::create_dir_all(index_dir)?;
+    build_tantivy_character_index(&archive, &index_dir.join("characters"))?;
+    build_tantivy_subject_index(&archive, &index_dir.join("subjects"))?;
+    Ok(())
+}
+
+fn build_tantivy_character_index(db: &Connection, index_dir: &Path) -> Result<()> {
+    recreate_dir(index_dir)?;
+
+    let mut schema_builder = Schema::builder();
+    let id = schema_builder.add_u64_field("id", STORED | FAST);
+    let name = schema_builder.add_text_field("name", TEXT | STORED);
+    let name_cn = schema_builder.add_text_field("name_cn", TEXT | STORED);
+    let name_en = schema_builder.add_text_field("name_en", TEXT | STORED);
+    let romaji = schema_builder.add_text_field("romaji", TEXT | STORED);
+    let gender = schema_builder.add_text_field("gender", STRING | STORED);
+    let popularity = schema_builder.add_u64_field("popularity", STORED | FAST);
+    let aliases = schema_builder.add_text_field("aliases", TEXT | STORED);
+    let search_terms = schema_builder.add_text_field("search_terms", TEXT);
+    let default_subject_id = schema_builder.add_u64_field("default_subject_id", STORED | FAST);
+    let default_subject_name = schema_builder.add_text_field("default_subject_name", STORED);
+    let default_subject_name_cn = schema_builder.add_text_field("default_subject_name_cn", STORED);
+    let schema = schema_builder.build();
+
+    let index = Index::create_in_dir(index_dir, schema)?;
+    let mut writer = index.writer_with_num_threads::<TantivyDocument>(1, 32_000_000)?;
+    let mut stmt = db.prepare(
+        "SELECT d.character_id, d.name, d.name_cn, d.name_en, d.romaji, d.gender, d.popularity,
+                d.aliases, ds.id, ds.name, ds.name_cn
+         FROM character_search_docs d
+         LEFT JOIN subjects ds ON ds.id = (
+             SELECT sc.subject_id
+             FROM subject_characters sc
+             JOIN subjects s2 ON s2.id = sc.subject_id
+             WHERE sc.character_id = d.character_id
+             ORDER BY CASE WHEN sc.type = 1 THEN 0 ELSE 1 END,
+                      s2.popularity DESC,
+                      sc.order_num ASC
+             LIMIT 1
+         )
+         ORDER BY d.character_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1).unwrap_or_default(),
+            row.get::<_, String>(2).unwrap_or_default(),
+            row.get::<_, String>(3).unwrap_or_default(),
+            row.get::<_, String>(4).unwrap_or_default(),
+            row.get::<_, String>(5).unwrap_or_else(|_| "?".to_string()),
+            row.get::<_, i64>(6).unwrap_or(0),
+            row.get::<_, String>(7).unwrap_or_default(),
+            row.get::<_, Option<i64>>(8).unwrap_or(None),
+            row.get::<_, String>(9).unwrap_or_default(),
+            row.get::<_, String>(10).unwrap_or_default(),
+        ))
+    })?;
+
+    let mut count = 0usize;
+    for row in rows {
+        let (
+            cid,
+            cname,
+            cname_cn,
+            cname_en,
+            cromaji,
+            cgender,
+            cpopularity,
+            caliases,
+            subject_id,
+            subject_name,
+            subject_name_cn,
+        ) = row?;
+        let terms = expanded_tantivy_search_terms(&[
+            cname.as_str(),
+            cname_cn.as_str(),
+            cname_en.as_str(),
+            cromaji.as_str(),
+            caliases.as_str(),
+        ]);
+        writer.add_document(doc!(
+            id => cid as u64,
+            name => cname,
+            name_cn => cname_cn,
+            name_en => cname_en,
+            romaji => cromaji,
+            gender => cgender,
+            popularity => cpopularity.max(0) as u64,
+            aliases => caliases,
+            search_terms => terms,
+            default_subject_id => subject_id.unwrap_or(0).max(0) as u64,
+            default_subject_name => subject_name,
+            default_subject_name_cn => subject_name_cn,
+        ))?;
+        count += 1;
+    }
+    writer.commit()?;
+    writer.wait_merging_threads()?;
+    println!("Tantivy characters indexed: {count}");
+    Ok(())
+}
+
+fn build_tantivy_subject_index(db: &Connection, index_dir: &Path) -> Result<()> {
+    recreate_dir(index_dir)?;
+
+    let mut schema_builder = Schema::builder();
+    let id = schema_builder.add_u64_field("id", STORED | FAST);
+    let stype = schema_builder.add_u64_field("type", STORED | FAST);
+    let date = schema_builder.add_text_field("date", STORED);
+    let popularity = schema_builder.add_u64_field("popularity", STORED | FAST);
+    let name = schema_builder.add_text_field("name", TEXT | STORED);
+    let name_cn = schema_builder.add_text_field("name_cn", TEXT | STORED);
+    let search_terms = schema_builder.add_text_field("search_terms", TEXT);
+    let schema = schema_builder.build();
+
+    let index = Index::create_in_dir(index_dir, schema)?;
+    let mut writer = index.writer_with_num_threads::<TantivyDocument>(1, 16_000_000)?;
+    let mut stmt = db.prepare(
+        "SELECT id, type, date, popularity, name, name_cn
+         FROM subjects
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1).unwrap_or(0),
+            row.get::<_, String>(2).unwrap_or_default(),
+            row.get::<_, i64>(3).unwrap_or(0),
+            row.get::<_, String>(4).unwrap_or_default(),
+            row.get::<_, String>(5).unwrap_or_default(),
+        ))
+    })?;
+
+    let mut count = 0usize;
+    for row in rows {
+        let (sid, subject_type, sdate, spopularity, sname, sname_cn) = row?;
+        let terms = expanded_tantivy_search_terms(&[sname.as_str(), sname_cn.as_str()]);
+        writer.add_document(doc!(
+            id => sid as u64,
+            stype => subject_type.max(0) as u64,
+            date => sdate,
+            popularity => spopularity.max(0) as u64,
+            name => sname,
+            name_cn => sname_cn,
+            search_terms => terms,
+        ))?;
+        count += 1;
+    }
+    writer.commit()?;
+    writer.wait_merging_threads()?;
+    println!("Tantivy subjects indexed: {count}");
+    Ok(())
+}
+
+fn recreate_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
     Ok(())
 }
 
@@ -1098,6 +1285,87 @@ fn infobox_aliases(infobox: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn expanded_tantivy_search_terms(values: &[&str]) -> String {
+    let mut terms = HashSet::new();
+    for value in values {
+        for token in search_tokens(value) {
+            terms.insert(token.clone());
+            for term in cjk_sub_terms(&token) {
+                terms.insert(term);
+            }
+        }
+    }
+    let mut out = terms.into_iter().collect::<Vec<_>>();
+    out.sort_unstable();
+    out.join(" ")
+}
+
+fn search_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    ',' | '，'
+                        | '、'
+                        | '/'
+                        | '\\'
+                        | '／'
+                        | '|'
+                        | ';'
+                        | '；'
+                        | ':'
+                        | '：'
+                        | '('
+                        | ')'
+                        | '（'
+                        | '）'
+                        | '['
+                        | ']'
+                        | '【'
+                        | '】'
+                        | '・'
+                        | '·'
+                        | '「'
+                        | '」'
+                        | '"'
+                        | '\''
+                )
+        })
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn cjk_sub_terms(token: &str) -> Vec<String> {
+    let chars = token.chars().collect::<Vec<_>>();
+    if chars.len() < 2 || !chars.iter().any(|ch| is_cjk(*ch)) {
+        return Vec::new();
+    }
+
+    let mut terms = Vec::new();
+    for start in 0..chars.len() {
+        for len in 2..=3 {
+            if start + len <= chars.len() {
+                terms.push(chars[start..start + len].iter().collect());
+            }
+        }
+    }
+    if chars.len() > 2 {
+        for start in 1..chars.len() - 1 {
+            terms.push(chars[start..].iter().collect());
+        }
+    }
+    terms
+}
+
+fn is_cjk(ch: char) -> bool {
+    ('\u{3400}'..='\u{9fff}').contains(&ch)
+        || ('\u{f900}'..='\u{faff}').contains(&ch)
+        || ('\u{3040}'..='\u{30ff}').contains(&ch)
 }
 
 fn extract_infobox_field(infobox: &str, key: &str) -> Option<String> {

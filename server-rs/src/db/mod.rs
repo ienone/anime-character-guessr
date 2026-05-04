@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::search_index::TantivySearch;
 use anyhow::Context;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -41,6 +42,7 @@ pub struct CharacterSearchDoc {
 pub struct DbPools {
     pub archive_db: Pool<SqliteConnectionManager>,
     pub app_db: Pool<SqliteConnectionManager>,
+    pub tantivy_search: Option<Arc<TantivySearch>>,
     /// Directory for locally cached/transcoded character images.
     pub image_cache_dir: String,
 }
@@ -85,11 +87,27 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
         validate_archive_schema(&archive_conn)?;
     }
 
+    let tantivy_search = match TantivySearch::open(&config.tantivy_index_dir) {
+        Ok(search) => {
+            tracing::info!(path = %config.tantivy_index_dir, "Tantivy search indexes ready");
+            Some(Arc::new(search))
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %config.tantivy_index_dir,
+                error = %e,
+                "Tantivy search indexes unavailable; falling back to SQLite FTS"
+            );
+            None
+        }
+    };
+
     tracing::info!("Archive DB ready in low-memory on-demand mode");
 
     Ok(Arc::new(DbPools {
         archive_db,
         app_db,
+        tantivy_search,
         image_cache_dir: config.image_cache_dir.clone(),
     }))
 }

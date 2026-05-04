@@ -570,6 +570,27 @@ async fn search_subjects(
     if let Some(cached) = search_cache_get(&cache_key) {
         return Json(json!({ "data": cached })).into_response();
     }
+    if let Some(search) = pools.tantivy_search.clone() {
+        let keyword_for_search = keyword.clone();
+        let types_for_search = types.clone();
+        let cache_key_for_search = cache_key.clone();
+        match tokio::task::spawn_blocking(move || {
+            search.search_subjects(&keyword_for_search, &types_for_search, limit)
+        })
+        .await
+        {
+            Ok(Ok(list)) => {
+                search_cache_put(cache_key_for_search, Value::Array(list.clone()));
+                return Json(json!({ "data": list })).into_response();
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(keyword = %keyword, error = %e, "Tantivy subject search failed; falling back to SQLite");
+            }
+            Err(e) => {
+                tracing::warn!(keyword = %keyword, error = %e, "Tantivy subject search task failed; falling back to SQLite");
+            }
+        }
+    }
     let cache_key_for_db = cache_key.clone();
     let result = db::with_archive_db_timed(
         Arc::clone(&pools),
@@ -699,6 +720,26 @@ async fn search_characters(
     let cache_key = format!("characters|{}|{}|{}", keyword, limit, offset);
     if let Some(cached) = search_cache_get(&cache_key) {
         return Json(json!({ "data": cached })).into_response();
+    }
+    if let Some(search) = pools.tantivy_search.clone() {
+        let keyword_for_search = keyword.clone();
+        let cache_key_for_search = cache_key.clone();
+        match tokio::task::spawn_blocking(move || {
+            search.search_characters(&keyword_for_search, limit, offset)
+        })
+        .await
+        {
+            Ok(Ok(list)) => {
+                search_cache_put(cache_key_for_search, Value::Array(list.clone()));
+                return Json(json!({ "data": list })).into_response();
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(keyword = %keyword, error = %e, "Tantivy character search failed; falling back to SQLite");
+            }
+            Err(e) => {
+                tracing::warn!(keyword = %keyword, error = %e, "Tantivy character search task failed; falling back to SQLite");
+            }
+        }
     }
     let cache_key_for_db = cache_key.clone();
     let result = db::with_archive_db_timed(
