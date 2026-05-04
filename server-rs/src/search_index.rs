@@ -28,7 +28,14 @@ impl TantivySearch {
         Ok(Self {
             characters: TantivyIndex::open(
                 &root.join("characters"),
-                &["name", "name_cn", "name_en", "romaji", "aliases", "search_terms"],
+                &[
+                    "name",
+                    "name_cn",
+                    "name_en",
+                    "romaji",
+                    "aliases",
+                    "search_terms",
+                ],
             )
             .context("open character Tantivy index")?,
             subjects: TantivyIndex::open(
@@ -169,7 +176,9 @@ impl TantivyIndex {
         let searcher = self.reader.searcher();
         let top_docs = searcher.search(
             &query,
-            &TopDocs::with_limit(limit).and_offset(offset).order_by_score(),
+            &TopDocs::with_limit(limit)
+                .and_offset(offset)
+                .order_by_score(),
         )?;
         let mut out = Vec::new();
         for (score, doc_address) in top_docs {
@@ -227,7 +236,12 @@ fn sanitize_query(keyword: &str) -> String {
     keyword
         .trim()
         .chars()
-        .filter(|ch| !matches!(ch, '"' | '\'' | ':' | '^' | '(' | ')' | '{' | '}' | '[' | ']'))
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '"' | '\'' | ':' | '^' | '(' | ')' | '{' | '}' | '[' | ']'
+            )
+        })
         .collect::<String>()
 }
 

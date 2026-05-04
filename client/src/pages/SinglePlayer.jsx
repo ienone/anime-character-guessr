@@ -37,7 +37,7 @@ function SinglePlayer() {
     startYear: new Date().getFullYear()-10,
     endYear: new Date().getFullYear(),
     useSubjectPerYear: false,
-    topNSubjects: 50,
+    topNSubjects: 0,
     metaTags: ["", "", ""],
     useIndex: false,
     indexId: null,

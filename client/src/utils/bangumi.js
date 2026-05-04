@@ -26,6 +26,19 @@ function setCachedSubjectSearch(key, value) {
   })
 }
 
+function describeBackendError(error, fallback) {
+  if (error?.response) {
+    const status = error.response.status
+    const data = error.response.data
+    const detail = data?.error || data?.message || (typeof data === 'string' ? data : '')
+    return `${fallback}：服务器返回 ${status}${detail ? `，${detail}` : ''}`
+  }
+  if (error?.request) {
+    return `${fallback}：无法连接服务器，请确认后端已启动且前端的服务器地址配置正确`
+  }
+  return `${fallback}：${error?.message || '未知错误'}`
+}
+
 // ─── Backend-backed implementations ──────────────────────────────────────────
 
 /**
@@ -33,20 +46,26 @@ function setCachedSubjectSearch(key, value) {
  * Returns the same shape as getRandomCharacter's result.
  */
 async function backendGetRandomCharacter(gameSettings) {
-  const response = await perfAxios.post(`${SERVER_URL}/api/game/random`, {
-    startYear: gameSettings.startYear,
-    endYear: gameSettings.endYear,
-    metaTags: gameSettings.metaTags,
-    topNSubjects: gameSettings.topNSubjects,
-    commonTags: gameSettings.commonTags,
-    subjectTagNum: gameSettings.subjectTagNum,
-    characterTagNum: gameSettings.characterTagNum,
-    mainCharacterOnly: gameSettings.mainCharacterOnly,
-    characterNum: gameSettings.characterNum,
-    useSubjectPerYear: gameSettings.useSubjectPerYear,
-  })
+  let response
+  try {
+    response = await perfAxios.post(`${SERVER_URL}/api/game/random`, {
+      startYear: gameSettings.startYear,
+      endYear: gameSettings.endYear,
+      metaTags: gameSettings.metaTags,
+      topNSubjects: gameSettings.topNSubjects,
+      commonTags: gameSettings.commonTags,
+      subjectTagNum: gameSettings.subjectTagNum,
+      characterTagNum: gameSettings.characterTagNum,
+      mainCharacterOnly: gameSettings.mainCharacterOnly,
+      characterNum: gameSettings.characterNum,
+      useSubjectPerYear: gameSettings.useSubjectPerYear,
+      addedSubjects: gameSettings.addedSubjects,
+    })
+  } catch (error) {
+    throw new Error(describeBackendError(error, '随机出题失败'))
+  }
   const char = response.data
-  if (!char || char.error) throw new Error(char?.error || '后端返回数据异常')
+  if (!char || char.error) throw new Error(char?.error || '随机出题失败：后端没有返回有效角色')
 
   // Normalize rawTags: backend returns an object, frontend expects a Map
   const rawTagsObj = char.rawTags || {}
@@ -59,19 +78,24 @@ async function backendGetRandomCharacter(gameSettings) {
  * Used during the guess phase.
  */
 async function backendGetCharacterAppearances(characterId, gameSettings) {
-  const response = await perfAxios.post(`${SERVER_URL}/api/game/character`, {
-    id: characterId,
-    settings: {
-      startYear: gameSettings.startYear,
-      endYear: gameSettings.endYear,
-      metaTags: gameSettings.metaTags,
-      commonTags: gameSettings.commonTags,
-      subjectTagNum: gameSettings.subjectTagNum,
-      characterTagNum: gameSettings.characterTagNum,
-    },
-  })
+  let response
+  try {
+    response = await perfAxios.post(`${SERVER_URL}/api/game/character`, {
+      id: characterId,
+      settings: {
+        startYear: gameSettings.startYear,
+        endYear: gameSettings.endYear,
+        metaTags: gameSettings.metaTags,
+        commonTags: gameSettings.commonTags,
+        subjectTagNum: gameSettings.subjectTagNum,
+        characterTagNum: gameSettings.characterTagNum,
+      },
+    })
+  } catch (error) {
+    throw new Error(describeBackendError(error, '获取角色登场信息失败'))
+  }
   const char = response.data
-  if (!char || char.error) throw new Error(char?.error || '后端返回数据异常')
+  if (!char || char.error) throw new Error(char?.error || '获取角色登场信息失败：后端没有返回有效角色')
 
   const rawTagsObj = char.rawTags || {}
   char.rawTags = new Map(Object.entries(rawTagsObj).map(([k, v]) => [k, v]))

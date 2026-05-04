@@ -745,13 +745,13 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             >年榜</span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <div className="compact-input-container" style={{ width: '60px' }} title="前N部">
+                            <div className="compact-input-container" style={{ width: '60px' }} title="前N部；0表示全范围">
                                 <input 
                                     className="compact-input"
                                     type="number" 
                                     value={gameSettings.topNSubjects === undefined ? '' : gameSettings.topNSubjects}
                                     onChange={(e) => {
-                                        const value = e.target.value === '' ? 100 : Math.max(0, parseInt(e.target.value));
+                                        const value = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value));
                                         onSettingsChange('topNSubjects', value);
                                     }}
                                     min="0"
@@ -759,7 +759,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                     disabled={gameSettings.useIndex}
                                 />
                             </div>
-                            <span style={{ fontSize: '13px', marginLeft: '8px' }}>部</span>
+                            <span style={{ fontSize: '13px', marginLeft: '8px' }}>{gameSettings.topNSubjects > 0 ? '部' : '全范围'}</span>
                         </div>
                     </div>
                 </div>

@@ -6,6 +6,7 @@
 use crate::db::{DbPools, SubjectRow};
 use anyhow::Result;
 use rand::prelude::IndexedRandom;
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, params_from_iter};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -119,50 +120,130 @@ pub fn build_feedback(guess: &Value, answer: &Value, settings: &GameSettings) ->
 
 fn pick_candidate(conn: &Connection, settings: &GameSettings) -> Result<i64> {
     let types = settings.subject_types();
-    let top_n = settings.top_n_subjects.unwrap_or(1000).min(3000) as usize;
+    let top_n = settings
+        .top_n_subjects
+        .filter(|n| *n > 0)
+        .map(|n| n.min(3000) as usize);
+    let characters_per_subject = settings.character_num.max(1).min(50);
+    let added_subject_ids = settings.added_subject_ids.clone();
     let type_placeholders = std::iter::repeat_n("?", types.len())
         .collect::<Vec<_>>()
         .join(",");
-    let mut sql = format!(
-        "WITH top_subjects AS (
-            SELECT id, popularity
-            FROM subjects
-            WHERE year > 0
-              AND type IN ({type_placeholders})"
-    );
+    let added_placeholders = std::iter::repeat_n("?", added_subject_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let subject_filter_sql = settings.subject_filter_sql();
+    let mut sql = if settings.use_subject_per_year && top_n.is_some() {
+        format!(
+            "WITH ranked_subjects AS (
+                SELECT
+                    s.id,
+                    s.popularity,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY s.year
+                        ORDER BY s.popularity DESC, s.id ASC
+                    ) AS year_rank
+                FROM subjects s
+                LEFT JOIN subject_details d ON d.subject_id = s.id
+                WHERE s.year > 0
+                  AND s.type IN ({type_placeholders})"
+        )
+    } else if top_n.is_some() {
+        format!(
+            "WITH top_subjects AS (
+                SELECT id, popularity
+                FROM (
+                    SELECT s.id, s.popularity
+                    FROM subjects s
+                    LEFT JOIN subject_details d ON d.subject_id = s.id
+                    WHERE s.year > 0
+                      AND s.type IN ({type_placeholders})"
+        )
+    } else {
+        format!(
+            "WITH top_subjects AS (
+                SELECT s.id, s.popularity
+                FROM subjects s
+                LEFT JOIN subject_details d ON d.subject_id = s.id
+                WHERE s.year > 0
+                  AND s.type IN ({type_placeholders})"
+        )
+    };
     if settings.start_year.is_some() {
-        sql.push_str(" AND year >= ?");
+        sql.push_str(" AND s.year >= ?");
     }
     if settings.end_year.is_some() {
-        sql.push_str(" AND year <= ?");
+        sql.push_str(" AND s.year <= ?");
+    }
+    sql.push_str(&subject_filter_sql);
+    if settings.use_subject_per_year && top_n.is_some() {
+        sql.push_str(
+            ")
+            , top_subjects AS (
+                SELECT id, popularity
+                FROM ranked_subjects
+                WHERE year_rank <= ?",
+        );
+    } else if top_n.is_some() {
+        sql.push_str(
+            " ORDER BY popularity DESC
+              LIMIT ?
+                )",
+        );
+    }
+    if !added_subject_ids.is_empty() {
+        sql.push_str(&format!(
+            "
+            UNION
+            SELECT id, popularity
+            FROM subjects
+            WHERE id IN ({added_placeholders})"
+        ));
     }
     sql.push_str(
-        " ORDER BY popularity DESC
-          LIMIT ?
-        )
-        SELECT sc.character_id
-        FROM top_subjects ts
-        JOIN subject_characters sc ON sc.subject_id = ts.id
-        JOIN characters c ON c.id = sc.character_id",
+        "
+        ),
+        ranked_characters AS (
+            SELECT
+                sc.character_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY sc.subject_id
+                    ORDER BY
+                        CASE WHEN sc.type = 1 THEN 0 ELSE 1 END,
+                        c.popularity DESC,
+                        sc.character_id ASC
+                ) AS subject_rank
+            FROM top_subjects ts
+            JOIN subject_characters sc ON sc.subject_id = ts.id
+            JOIN characters c ON c.id = sc.character_id",
     );
     if settings.main_character_only {
         sql.push_str(" WHERE sc.type = 1");
     }
-    sql.push_str(" ORDER BY ts.popularity DESC LIMIT ?");
+    sql.push_str(
+        ")
+        SELECT DISTINCT character_id
+        FROM ranked_characters
+        WHERE subject_rank <= ?",
+    );
 
-    let mut values: Vec<i64> = types;
+    let mut values: Vec<SqlValue> = types.into_iter().map(SqlValue::Integer).collect();
     if let Some(start_year) = settings.start_year {
-        values.push(start_year as i64);
+        values.push(SqlValue::Integer(start_year as i64));
     }
     if let Some(end_year) = settings.end_year {
-        values.push(end_year as i64);
+        values.push(SqlValue::Integer(end_year as i64));
     }
-    values.push(top_n as i64);
-    values.push(settings.character_num.max(1).min(50) as i64);
+    values.extend(settings.subject_filter_values());
+    if let Some(top_n) = top_n {
+        values.push(SqlValue::Integer(top_n as i64));
+    }
+    values.extend(added_subject_ids.into_iter().map(SqlValue::Integer));
+    values.push(SqlValue::Integer(characters_per_subject as i64));
 
     let mut stmt = conn.prepare(&sql)?;
     let mut candidates = stmt
-        .query_map(params_from_iter(values), |row| row.get::<_, i64>(0))?
+        .query_map(params_from_iter(values.iter()), |row| row.get::<_, i64>(0))?
         .filter_map(Result::ok)
         .collect::<Vec<_>>();
     candidates.sort_unstable();
@@ -200,6 +281,8 @@ pub struct GameSettings {
     pub character_tag_num: usize,
     pub main_character_only: bool,
     pub character_num: usize,
+    pub use_subject_per_year: bool,
+    pub added_subject_ids: Vec<i64>,
 }
 
 impl GameSettings {
@@ -212,6 +295,107 @@ impl GameSettings {
             "全部" => vec![1, 2, 4, 6],
             _ => vec![2], // default: anime
         }
+    }
+
+    fn primary_meta_filter(&self) -> Option<&str> {
+        let primary = self.meta_tags.first().map(|s| s.as_str()).unwrap_or("");
+        match primary {
+            "" | "全部" | "游戏" | "书籍" | "三次元" | "Galgame" => None,
+            tag => Some(tag),
+        }
+    }
+
+    fn source_filter(&self) -> Option<&str> {
+        self.meta_tags
+            .get(1)
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn genre_filter(&self) -> Option<&str> {
+        self.meta_tags
+            .get(2)
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn subject_filter_sql(&self) -> String {
+        let mut sql = String::new();
+        if self.primary_meta_filter().is_some() {
+            sql.push_str(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM json_each(COALESCE(d.meta_tags_json, '[]')) mt
+                    WHERE mt.value = ?
+                )",
+            );
+        }
+        if let Some(source) = self.source_filter() {
+            let placeholders = std::iter::repeat_n("?", source_aliases(source).len())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM json_each(COALESCE(d.tags_json, '[]')) tg
+                    WHERE json_extract(tg.value, '$.name') IN ({placeholders})
+                )"
+            ));
+        }
+        if self.genre_filter().is_some() {
+            sql.push_str(
+                " AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM json_each(COALESCE(d.meta_tags_json, '[]')) mt
+                        WHERE mt.value = ?
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM json_each(COALESCE(d.tags_json, '[]')) tg
+                        WHERE json_extract(tg.value, '$.name') = ?
+                    )
+                )",
+            );
+        }
+        sql
+    }
+
+    fn subject_filter_values(&self) -> Vec<SqlValue> {
+        let mut values = Vec::new();
+        if let Some(primary) = self.primary_meta_filter() {
+            values.push(SqlValue::Text(primary.to_string()));
+        }
+        if let Some(source) = self.source_filter() {
+            values.extend(source_aliases(source).into_iter().map(SqlValue::Text));
+        }
+        if let Some(genre) = self.genre_filter() {
+            values.push(SqlValue::Text(genre.to_string()));
+            values.push(SqlValue::Text(genre.to_string()));
+        }
+        values
+    }
+
+    fn matches_subject(&self, subject: &SubjectInfo) -> bool {
+        if let Some(primary) = self.primary_meta_filter() {
+            if !json_string_array_contains(&subject.meta_tags, primary) {
+                return false;
+            }
+        }
+        if let Some(source) = self.source_filter() {
+            let aliases = source_aliases(source);
+            if !json_tag_array_contains_any(&subject.tags, &aliases) {
+                return false;
+            }
+        }
+        if let Some(genre) = self.genre_filter() {
+            if !json_string_array_contains(&subject.meta_tags, genre)
+                && !json_tag_array_contains_any(&subject.tags, &[genre.to_string()])
+            {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn from_json(v: &Value) -> Self {
@@ -245,6 +429,24 @@ impl GameSettings {
                 .and_then(|x| x.as_bool())
                 .unwrap_or(true),
             character_num: v.get("characterNum").and_then(|x| x.as_u64()).unwrap_or(6) as usize,
+            use_subject_per_year: v
+                .get("useSubjectPerYear")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            added_subject_ids: v
+                .get("addedSubjects")
+                .and_then(|x| x.as_array())
+                .map(|subjects| {
+                    subjects
+                        .iter()
+                        .filter_map(|subject| {
+                            subject
+                                .as_i64()
+                                .or_else(|| subject.get("id").and_then(|id| id.as_i64()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -262,6 +464,40 @@ struct SubjectInfo {
     name_cn: String,
     tags: Value,
     meta_tags: Value,
+}
+
+fn source_aliases(source: &str) -> Vec<String> {
+    match source {
+        "原创" => vec!["原创", "原创动画"],
+        "漫画改" => vec!["漫画改", "漫改", "漫画改编"],
+        "游戏改" => vec!["游戏改", "游戏改编", "GAL改"],
+        "小说改" => vec!["小说改", "小说改编", "轻小说改", "轻改", "网文改"],
+        other => vec![other],
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn json_string_array_contains(value: &Value, needle: &str) -> bool {
+    value
+        .as_array()
+        .map(|items| items.iter().any(|item| item.as_str() == Some(needle)))
+        .unwrap_or(false)
+}
+
+fn json_tag_array_contains_any(value: &Value, needles: &[String]) -> bool {
+    value
+        .as_array()
+        .map(|items| {
+            items.iter().any(|item| {
+                item.get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| needles.iter().any(|needle| needle == name))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn load_character_value(conn: &Connection, char_id: i64) -> Result<Value> {
@@ -371,6 +607,9 @@ fn assemble_payload(
         .iter()
         .filter(|s| {
             if !allowed_types.contains(&s.stype) {
+                return false;
+            }
+            if !settings.matches_subject(s) {
                 return false;
             }
             if s.year <= 0 || s.year > current_year {
@@ -733,11 +972,24 @@ fn year_guess_value(guess: i64, _answer: i64) -> Value {
 }
 
 fn raw_tag_keys(value: &Value) -> Vec<String> {
-    value
-        .get("rawTags")
-        .and_then(|v| v.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default()
+    match value.get("rawTags") {
+        Some(Value::Object(obj)) => obj.keys().cloned().collect(),
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Value::String(tag) => Some(tag.clone()),
+                Value::Array(pair) => pair.first().and_then(Value::as_str).map(str::to_string),
+                Value::Object(obj) => obj
+                    .get("tag")
+                    .or_else(|| obj.get("name"))
+                    .or_else(|| obj.get("key"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn common_tag_feedback(
