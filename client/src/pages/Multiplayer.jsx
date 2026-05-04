@@ -21,6 +21,73 @@ import '../styles/game.css';
 import axios from 'axios';
 const SOCKET_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '');
 
+const SOCKET_EVENT_LABELS = {
+  createRoom: '创建房间失败',
+  joinRoom: '加入房间失败',
+  gameStart: '开始游戏失败',
+  setAnswer: '设置答案失败',
+  playerGuess: '提交猜测失败',
+  nonstopWin: '血战模式结算失败',
+  gameEnd: '结束游戏失败',
+  enterObserverMode: '进入旁观失败',
+  timeOut: '计时处理失败'
+};
+
+const SOCKET_ERROR_HINTS = [
+  {
+    test: message => message.includes('当前标签页的连接没有绑定到房间玩家'),
+    hint: '常见原因：同一浏览器开了多个同名标签页，或旧标签页被服务端判定为当前玩家。'
+  },
+  {
+    test: message => message.includes('旁观者'),
+    hint: '如果你是游戏开始后加入的玩家，本局会自动作为旁观者，下一局才能参与猜测。'
+  },
+  {
+    test: message => message.includes('名字已经在房间里'),
+    hint: '同一个房间内用户名必须唯一；同设备多标签页也需要使用不同名字。'
+  },
+  {
+    test: message => message.includes('游戏未开始') || message.includes('本轮已经结束'),
+    hint: '请等待房主开始下一局，或刷新页面同步当前房间状态。'
+  }
+];
+
+function formatSocketError(message, event) {
+  const rawMessage = String(message || '未知错误');
+  const match = rawMessage.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+  const eventName = event || match?.[1] || '';
+  const detail = match?.[2] || rawMessage;
+  const title = SOCKET_EVENT_LABELS[eventName] || '操作失败';
+  const hint = SOCKET_ERROR_HINTS.find(item => item.test(detail))?.hint;
+  return hint ? `${title}: ${detail}\n${hint}` : `${title}: ${detail}`;
+}
+
+function describeGuessError(error) {
+  const message = error?.message || '提交猜测失败';
+  if (message.includes('猜测响应超时')) {
+    return '提交猜测超时：服务端没有在 10 秒内返回结果。\n可能是连接断开、房间状态已变化，或当前标签页不再是房间内的有效玩家。请刷新页面后重试。';
+  }
+  if (message.startsWith('playerGuess:')) {
+    return formatSocketError(message, 'playerGuess');
+  }
+  if (message.includes('Network Error')) {
+    return '获取角色登场信息失败：无法连接服务器。请确认后端仍在运行，且前端访问地址和服务器地址一致。';
+  }
+  return message;
+}
+
+function getAttemptCount(player) {
+  return Array.isArray(player?.attemptMarks) ? player.attemptMarks.length : 0;
+}
+
+function hasRoundResult(player) {
+  return Boolean(player?.roundResult);
+}
+
+function isWinnerResult(result) {
+  return result === 'win' || result === 'bigWin' || result === 'teamWin';
+}
+
 const Multiplayer = () => {
   const navigate = useNavigate();
   const { roomId } = useParams();
@@ -39,6 +106,7 @@ const Multiplayer = () => {
   const roomIdRef = useRef(roomId);
   const usernameRef = useRef(username);
   const isJoinedRef = useRef(isJoined);
+  const isHostRef = useRef(isHost);
   const [error, setError] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [isPublic, setIsPublic] = useState(true);
@@ -57,7 +125,7 @@ const Multiplayer = () => {
     // 默认设置
     startYear: new Date().getFullYear()-5, // 起始年份
     endYear: new Date().getFullYear(), // 结束年份
-    topNSubjects: 20, // 条目数
+    topNSubjects: 0, // 条目数，0 表示全范围
     useSubjectPerYear: false, // 每年独立计算热度
     metaTags: ["", "", ""], // 筛选用标签
     useIndex: false, // 使用指定目录
@@ -128,6 +196,7 @@ const Multiplayer = () => {
   const isAutoReconnectingRef = useRef(false);
   const fetchRoomListRef = useRef(null);
   const pendingGuessResolverRef = useRef(null);
+  const pendingGuessRejectRef = useRef(null);
 
   useEffect(() => {
     roomIdRef.current = roomId;
@@ -140,6 +209,10 @@ const Multiplayer = () => {
   useEffect(() => {
     isJoinedRef.current = isJoined;
   }, [isJoined]);
+
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
   const allSpectators = useMemo(() => {
     if (!players || players.length === 0) return false;
     return players.every(p => p.disconnected || p.team === '0');
@@ -187,17 +260,12 @@ const Multiplayer = () => {
         return;
       }
 
-      // 直接从 player.guesses 字符串计算已使用的次数
-      const marks = String(player.guesses || '').match(/(?:⏱️?|💡|✔|❌)/g);
-      const used = marks ? marks.length : 0;
+      const used = getAttemptCount(player);
       const max = gameSettingsRef.current?.maxAttempts || 10;
       const left = Math.max(0, max - used);
       setGuessesLeft(left);
 
-      // 检查是否包含死亡标记（💀）- 服务器已判定玩家死亡
-      const isDead = player.guesses.includes('💀');
-
-      if (isDead) {
+      if (player.roundResult === 'dead') {
         // 已被服务器判死，进入旁观状态，避免重复触发结束逻辑
         setIsObserver(true);
         // 死亡后属于“临时旁观者”，允许看到答案卡片
@@ -218,6 +286,8 @@ const Multiplayer = () => {
       // Sync isHost state from player list to ensure correctness
       const me = players.find(p => p.id === newSocket.id);
       if (me) {
+        setIsJoined(true);
+        setError('');
         setIsHost(me.isHost);
         // 同时检查是否应该进入旁观模式（防止网络卡顿导致的状态不同步）
         if (me.team === '0') {
@@ -231,6 +301,12 @@ const Multiplayer = () => {
 
     newSocket.on('roomNameUpdated', ({ roomName: updatedRoomName }) => {
       setRoomName(updatedRoomName || '');
+    });
+
+    newSocket.on('roomsUpdated', () => {
+      if (roomListExpandedRef.current && !isJoinedRef.current) {
+        fetchRoomListRef.current?.();
+      }
     });
 
     newSocket.on('waitForAnswer', ({ answerSetterId }) => {
@@ -409,8 +485,7 @@ const Multiplayer = () => {
       
       // Calculate guesses left based on current player's guess history
       const currentPlayer = players?.find(p => p.id === newSocket.id);
-      const initialMarks = String(currentPlayer?.guesses || '').match(/(?:⏱️?|💡|✔|❌)/g);
-      const guessesMade = initialMarks ? initialMarks.length : 0;
+      const guessesMade = getAttemptCount(currentPlayer);
       const remainingGuesses = Math.max(0, (settings?.maxAttempts ?? 10) - guessesMade);
       setGuessesLeft(remainingGuesses);
       
@@ -418,12 +493,7 @@ const Multiplayer = () => {
       const observerFlag = currentPlayer?.team === '0';
       
       // 检查当前玩家是否已经结束游戏（重连时恢复状态）
-      const playerGuesses = currentPlayer?.guesses || '';
-      const hasGameEnded = playerGuesses.includes('✌') || 
-                          playerGuesses.includes('👑') || 
-                          playerGuesses.includes('💀') || 
-                          playerGuesses.includes('🏳️') ||
-                          playerGuesses.includes('🏆');
+      const hasGameEnded = hasRoundResult(currentPlayer);
       
       if (hasGameEnded) {
         // 玩家已经结束游戏，恢复结束状态
@@ -535,7 +605,7 @@ const Multiplayer = () => {
       }
     });
 
-    newSocket.on('error', ({ message }) => {
+    newSocket.on('error', ({ message, event }) => {
       if (
         isAutoReconnectingRef.current &&
         isJoinedRef.current &&
@@ -553,8 +623,26 @@ const Multiplayer = () => {
         }, 500);
         return;
       }
-      alert(`错误: ${message}`);
-      setError(message);
+      if (
+        typeof message === 'string' &&
+        message.startsWith('playerGuess:') &&
+        pendingGuessRejectRef.current
+      ) {
+        pendingGuessRejectRef.current(new Error(message));
+        pendingGuessResolverRef.current = null;
+        pendingGuessRejectRef.current = null;
+        return;
+      }
+
+      const formattedMessage = formatSocketError(message, event);
+      alert(formattedMessage);
+      setError(formattedMessage);
+      if (
+        typeof message === 'string' &&
+        (message.startsWith('createRoom:') || message.startsWith('joinRoom:'))
+      ) {
+        setIsJoined(false);
+      }
       // 只在特定情况下将玩家踢出房间，游戏开始相关错误不应该踢出房主
       if (message && message.includes('头像被用了😭😭😭')) {
         sessionStorage.removeItem('avatarId');
@@ -573,7 +661,12 @@ const Multiplayer = () => {
     });
 
     newSocket.on('updateGameSettings', ({ settings }) => {
-      setGameSettings(settings);
+      setGameSettings(prevSettings => {
+        if (JSON.stringify(prevSettings) === JSON.stringify(settings)) {
+          return prevSettings;
+        }
+        return settings;
+      });
     });
 
     newSocket.on('gameEnded', ({ guesses, scoreDetails, answerCharacter }) => {
@@ -704,6 +797,7 @@ const Multiplayer = () => {
       newSocket.off('nonstopProgress');
       newSocket.off('teamWin');
       newSocket.off('roomNameUpdated');
+      newSocket.off('roomsUpdated');
       newSocket.off('tagBanStateUpdate');
       newSocket.off('connect');
       newSocket.off('disconnect');
@@ -756,7 +850,6 @@ const Multiplayer = () => {
           
           socketRef.current?.emit('joinRoom', { roomId, username: pendingUsername, ...avatarPayload });
           socketRef.current?.emit('requestGameSettings', { roomId });
-          setIsJoined(true);
         }, 100);
       }
     }
@@ -766,7 +859,7 @@ const Multiplayer = () => {
     if (isHost && isJoined) {
       socketRef.current?.emit('updateGameSettings', { roomId, settings: gameSettings });
     }
-  }, [showSettings, isHost, isJoined, roomId, gameSettings]);
+  }, [isHost, isJoined, roomId, gameSettings]);
 
   useEffect(() => {
     gameSettingsRef.current = gameSettings;
@@ -809,7 +902,6 @@ const Multiplayer = () => {
     // 保存用户名到 cookie，有效期 30 天
     const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toUTCString();
     document.cookie = `multiplayerUsername=${encodeURIComponent(username)}; expires=${expires}; path=/`;
-    setIsJoined(true);
   };
 
   const handleReadyToggle = () => {
@@ -823,8 +915,29 @@ const Multiplayer = () => {
     }));
   };
 
-  const copyRoomUrl = () => {
-    navigator.clipboard.writeText(roomUrl);
+  const copyRoomUrl = async () => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(roomUrl);
+        return;
+      }
+      const input = document.createElement('textarea');
+      input.value = roomUrl;
+      input.setAttribute('readonly', '');
+      input.style.position = 'fixed';
+      input.style.left = '-9999px';
+      document.body.appendChild(input);
+      input.select();
+      input.setSelectionRange(0, input.value.length);
+      const copied = document.execCommand('copy');
+      document.body.removeChild(input);
+      if (!copied) {
+        throw new Error('copy command failed');
+      }
+    } catch (error) {
+      console.error('复制失败:', error);
+      alert('复制失败，请手动复制房间链接');
+    }
   };
 
   const handleGameEnd = (isWin) => {
@@ -880,24 +993,33 @@ const Multiplayer = () => {
     try {
       const appearances = await getCharacterAppearances(character.id, gameSettings);
 
-      const rawTagsEntries = Array.from(appearances.rawTags?.entries?.() || []);
+      const rawTags = Object.fromEntries(appearances.rawTags?.entries?.() || []);
       const guessData = {
         ...character,
         ...appearances,
-        rawTags: rawTagsEntries
+        rawTags
       };
       if (!guessData || !guessData.id || !guessData.name) {
         console.warn('Invalid guessData, not emitting');
-        return;
+        throw new Error('提交猜测失败：搜索结果缺少角色 ID 或名称，请重新选择角色');
+      }
+      if (!socketRef.current?.connected) {
+        throw new Error('提交猜测失败：WebSocket 未连接，请等待重连或刷新页面');
       }
       const guessResult = await new Promise((resolve, reject) => {
         const timeoutId = setTimeout(() => {
           pendingGuessResolverRef.current = null;
+          pendingGuessRejectRef.current = null;
           reject(new Error('猜测响应超时'));
         }, 10000);
         pendingGuessResolverRef.current = (payload) => {
           clearTimeout(timeoutId);
+          pendingGuessRejectRef.current = null;
           resolve(payload);
+        };
+        pendingGuessRejectRef.current = (error) => {
+          clearTimeout(timeoutId);
+          reject(error);
         };
         socketRef.current?.emit('playerGuess', {
           roomId,
@@ -907,7 +1029,7 @@ const Multiplayer = () => {
 
       const { guess, isCorrect } = guessResult || {};
       if (!guess) {
-        throw new Error('服务端猜测结果无效');
+        throw new Error('提交猜测失败：服务端返回了空结果，请刷新页面同步房间状态后重试');
       }
       if (gameSettings.tagBan && Array.isArray(guess.sharedMetaTags) && guess.sharedMetaTags.length > 0) {
         socketRef.current?.emit('tagBanSharedMetaTags', {
@@ -921,7 +1043,7 @@ const Multiplayer = () => {
       }
     } catch (error) {
       console.error('Error processing guess:', error);
-      alert('出错了，请重试');
+      alert(describeGuessError(error));
     } finally {
       setIsGuessing(false);
       setShouldResetTimer(false);
@@ -934,8 +1056,7 @@ const Multiplayer = () => {
     // 已结束/观战状态不再发送超时
     const myId = socketRef.current?.id || socket?.id;
     const me = latestPlayersRef.current.find(p => p?.id === myId);
-    const endedMarks = ['✌','👑','💀','🏳️','🏆'];
-    if (me && endedMarks.some(mark => (me.guesses || '').includes(mark))) return;
+    if (hasRoundResult(me)) return;
 
     // 客户端侧防抖，避免网络卡顿导致短时间内多次触发
     const now = Date.now();
@@ -1060,10 +1181,13 @@ const Multiplayer = () => {
 
   const handleSetAnswer = async ({ character, hints }) => {
     try {
-      character.rawTags = Array.from(character.rawTags.entries());
+      const rawTags = Object.fromEntries(character.rawTags?.entries?.() || []);
       socketRef.current?.emit('setAnswer', {
         roomId,
-        character,
+        character: {
+          ...character,
+          rawTags
+        },
         hints
       });
       setShowSetAnswerPopup(false);
@@ -1593,7 +1717,7 @@ const Multiplayer = () => {
                     <Timer
                       timeLimit={gameSettings.timeLimit}
                       onTimeUp={handleTimeUp}
-                      isActive={!isGuessing && !waitingForSync}
+                      isActive={!isGuessing && !waitingForSync && !isObserver && !isAnswerSetter && !canShowSelectedAnswer}
                       reset={shouldResetTimer}
                     />
                   )}
@@ -1877,14 +2001,9 @@ const Multiplayer = () => {
                           {(() => {
                             // 判断当前玩家是否猜对
                             const currentPlayer = players.find(p => p.id === socket?.id);
-                            const playerGuesses = currentPlayer?.guesses || '';
                             const isObserver = currentPlayer?.team === '0';
-                            const isCurrentPlayerWin = playerGuesses.includes('✌') || playerGuesses.includes('👑') || playerGuesses.includes('🏆');
-                            const isCurrentPlayerLose = !isCurrentPlayerWin && (
-                              playerGuesses.includes('💀') || // 次数用尽
-                              playerGuesses.includes('🏳️') || // 投降
-                              (playerGuesses.length > 0 && !playerGuesses.includes('⏱️')) // 已参与但未获胜（排除仅超时）
-                            );
+                            const isCurrentPlayerWin = isWinnerResult(currentPlayer?.roundResult);
+                            const isCurrentPlayerLose = Boolean(currentPlayer?.roundResult) && !isCurrentPlayerWin;
                             let answerButtonClass = 'answer-character-button';
                             if (isObserver) {
                               answerButtonClass = 'answer-character-button';

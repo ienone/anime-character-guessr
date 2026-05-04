@@ -14,7 +14,9 @@ pub struct Player {
     #[serde(default)]
     pub ready: bool,
     #[serde(default)]
-    pub guesses: String,
+    pub attempt_marks: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_result: Option<String>,
     #[serde(default)]
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,7 +50,9 @@ pub struct CurrentGame {
     #[serde(default)]
     pub guesses: Vec<Value>,
     #[serde(default)]
-    pub team_guesses: HashMap<String, String>,
+    pub team_attempt_marks: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub team_round_results: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Value>,
     #[serde(default = "default_sync_round")]

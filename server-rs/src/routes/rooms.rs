@@ -12,6 +12,7 @@ use socketioxide::SocketIo;
 use std::sync::Arc;
 
 use crate::socket::state::ServerState;
+use crate::socket::{broadcast_lobby_rooms_updated, emit_to_room};
 
 #[derive(Clone)]
 pub struct RoomState {
@@ -151,10 +152,15 @@ async fn clean_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
     let count = stale_ids.len();
     for room_id in stale_ids {
         rs.state.rooms.remove(&room_id);
-        let _ = rs.io.to(room_id.clone()).emit(
+        emit_to_room(
+            &rs.io,
+            room_id.clone(),
             "roomClosed",
-            &json!({ "message": "房间因长时间无活动已关闭" }),
+            json!({ "message": "房间因长时间无活动已关闭" }),
         );
+    }
+    if count > 0 {
+        broadcast_lobby_rooms_updated(&rs.io);
     }
     Json(json!({ "message": format!("已清理{}个房间", count), "cleaned": count }))
 }
@@ -181,10 +187,13 @@ async fn close_room_get(
     };
     let message = "房间被管理关闭，如有疑问请添加首页QQ群".to_string();
     rs.state.rooms.remove(&room_id);
-    let _ = rs
-        .io
-        .to(room_id.clone())
-        .emit("roomClosed", &json!({ "message": message }));
+    emit_to_room(
+        &rs.io,
+        room_id.clone(),
+        "roomClosed",
+        json!({ "message": message }),
+    );
+    broadcast_lobby_rooms_updated(&rs.io);
     Json(json!({
         "message": "房间已关闭",
         "roomId": room_id,
@@ -217,10 +226,13 @@ async fn close_room_post(
         _ => "房间被管理关闭，如有疑问请添加首页QQ群".to_string(),
     };
     rs.state.rooms.remove(&room_id);
-    let _ = rs
-        .io
-        .to(room_id.clone())
-        .emit("roomClosed", &json!({ "message": message }));
+    emit_to_room(
+        &rs.io,
+        room_id.clone(),
+        "roomClosed",
+        json!({ "message": message }),
+    );
+    broadcast_lobby_rooms_updated(&rs.io);
     Json(json!({
         "message": "房间已关闭",
         "roomId": room_id,

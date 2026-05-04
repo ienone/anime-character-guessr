@@ -3,6 +3,11 @@ import { useState, useEffect, useRef } from 'react';
 const Timer = ({ timeLimit, onTimeUp, isActive, reset }) => {
   const [timeLeft, setTimeLeft] = useState(timeLimit);
   const endTimeRef = useRef(null);
+  const onTimeUpRef = useRef(onTimeUp);
+
+  useEffect(() => {
+    onTimeUpRef.current = onTimeUp;
+  }, [onTimeUp]);
 
   // Initialize or reset end time
   useEffect(() => {
@@ -23,13 +28,15 @@ const Timer = ({ timeLimit, onTimeUp, isActive, reset }) => {
       setTimeLeft(remaining);
 
       if (remaining === 0) {
-        clearInterval(interval);
-        onTimeUp();
+        onTimeUpRef.current();
+        const nextEndTime = now + timeLimit * 1000;
+        endTimeRef.current = nextEndTime;
+        setTimeLeft(timeLimit);
       }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isActive, onTimeUp]);
+  }, [isActive, timeLimit]);
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);

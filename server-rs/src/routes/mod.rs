@@ -172,7 +172,10 @@ async fn resolve_character_image(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(1200)
         .min(5000);
-    let cached_only = q.get("cachedOnly").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let cached_only = q
+        .get("cachedOnly")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
 
     // 1) If cached already, answer immediately.
     let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -330,7 +333,10 @@ async fn resolve_subject_image(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(1200)
         .min(5000);
-    let cached_only = q.get("cachedOnly").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let cached_only = q
+        .get("cachedOnly")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
 
     let cache_key = format!("s:{}", id);
     let cached_key = cache_key.clone();

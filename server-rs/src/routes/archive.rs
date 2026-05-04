@@ -141,7 +141,8 @@ async fn get_subject(State(pools): State<Arc<DbPools>>, Path(id): Path<i64>) -> 
                     let tags_json = row.get::<_, String>(7).unwrap_or_else(|_| "[]".to_string());
                     let meta_tags_json =
                         row.get::<_, String>(8).unwrap_or_else(|_| "[]".to_string());
-                    let tags: Value = serde_json::from_str(&tags_json).unwrap_or_else(|_| json!([]));
+                    let tags: Value =
+                        serde_json::from_str(&tags_json).unwrap_or_else(|_| json!([]));
                     let meta_tags: Value =
                         serde_json::from_str(&meta_tags_json).unwrap_or_else(|_| json!([]));
                     Ok(json!({
@@ -792,20 +793,29 @@ async fn search_characters(
                 "search characters query"
             );
             let prefix = format!("{}%", keyword_for_db);
-            let rows = stmt.query_map(params![fts_query, limit as i64, offset as i64, keyword_for_db, prefix], |row| {
-                Ok(crate::db::CharacterSearchDoc {
-                    id: row.get::<_, i64>(0)?,
-                    name: row.get::<_, String>(1).unwrap_or_default(),
-                    name_cn: row.get::<_, String>(2).unwrap_or_default(),
-                    name_en: row.get::<_, String>(3).unwrap_or_default(),
-                    romaji: row.get::<_, String>(4).unwrap_or_default(),
-                    gender: row.get::<_, String>(5).unwrap_or_else(|_| "?".to_string()),
-                    popularity: row.get::<_, i64>(6).unwrap_or(0),
-                    default_subject_id: row.get::<_, Option<i64>>(7).unwrap_or(None),
-                    default_subject_name: row.get::<_, String>(8).unwrap_or_default(),
-                    default_subject_name_cn: row.get::<_, String>(9).unwrap_or_default(),
-                })
-            })?;
+            let rows = stmt.query_map(
+                params![
+                    fts_query,
+                    limit as i64,
+                    offset as i64,
+                    keyword_for_db,
+                    prefix
+                ],
+                |row| {
+                    Ok(crate::db::CharacterSearchDoc {
+                        id: row.get::<_, i64>(0)?,
+                        name: row.get::<_, String>(1).unwrap_or_default(),
+                        name_cn: row.get::<_, String>(2).unwrap_or_default(),
+                        name_en: row.get::<_, String>(3).unwrap_or_default(),
+                        romaji: row.get::<_, String>(4).unwrap_or_default(),
+                        gender: row.get::<_, String>(5).unwrap_or_else(|_| "?".to_string()),
+                        popularity: row.get::<_, i64>(6).unwrap_or(0),
+                        default_subject_id: row.get::<_, Option<i64>>(7).unwrap_or(None),
+                        default_subject_name: row.get::<_, String>(8).unwrap_or_default(),
+                        default_subject_name_cn: row.get::<_, String>(9).unwrap_or_default(),
+                    })
+                },
+            )?;
 
             let mut out = Vec::new();
             for row in rows {

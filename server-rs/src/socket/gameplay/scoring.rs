@@ -19,12 +19,12 @@ pub struct ScoreBonuses {
     pub quick_guess: i32,
 }
 
-pub fn calculate_winner_score(guesses: &str, base_score: i32, total_rounds: i32) -> ScoreResult {
-    // Winner score scales with guess count and supports crown-marked big wins.
-    let is_big_win = guesses.contains('👑');
-    let cleaned = super::marks::strip_end_marks(guesses);
-    let guess_count = cleaned.chars().count() as i32;
-
+pub fn calculate_winner_score(
+    guess_count: i32,
+    is_big_win: bool,
+    base_score: i32,
+    total_rounds: i32,
+) -> ScoreResult {
     let mut total_score = base_score;
     let mut bonuses = ScoreBonuses::default();
 
@@ -54,14 +54,13 @@ pub fn calculate_winner_score(guesses: &str, base_score: i32, total_rounds: i32)
 }
 
 pub fn calculate_setter_score(
-    winner_guesses: &str,
     winner_guess_count: i32,
+    has_big_winner: bool,
     big_winner_score: i32,
     total_rounds: i32,
 ) -> i32 {
     // Setter score depends on winners, skips, and per-round base score.
     let has_winner = winner_guess_count > 0;
-    let has_big_winner = winner_guesses.contains('👑');
 
     if has_big_winner {
         let penalty = std::cmp::max(1, big_winner_score / 2);

@@ -34,19 +34,22 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
     let is_team_mode = player.team.is_some() && player.team.as_deref() != Some("0");
     let team = player.team.clone();
 
-    let source_marks = if is_team_mode {
+    let attempt_count = if is_team_mode {
         let t = team.as_ref().unwrap();
-        game.team_guesses.get(t).cloned().unwrap_or_default()
+        super::marks::team_attempt_count(game, t)
     } else {
-        player.guesses.clone()
+        super::marks::player_attempt_count(player)
     };
 
-    let attempt_count = super::marks::count_attempt_marks(&source_marks);
     if attempt_count < max_attempts {
         return EnforceResult { exhausted: false };
     }
 
-    if super::marks::has_end_mark(&source_marks) {
+    if is_team_mode
+        .then(|| team.as_ref().unwrap())
+        .is_some_and(|t| super::marks::team_has_result(game, t))
+        || (!is_team_mode && super::marks::player_has_result(player))
+    {
         return EnforceResult { exhausted: true };
     }
 
@@ -54,7 +57,7 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
         return EnforceResult { exhausted: true };
     }
 
-    // Exhausted: apply skull mark (💀)
+    // Exhausted: apply structured death result.
     let sync_mode = game
         .settings
         .as_ref()
@@ -64,13 +67,11 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
 
     if is_team_mode {
         let t = team.as_ref().unwrap();
-        let current = game.team_guesses.get(t).cloned().unwrap_or_default();
-        let updated = super::marks::append_end_mark_once(&current, "💀");
-        game.team_guesses.insert(t.clone(), updated.clone());
+        super::marks::set_team_result(game, t, super::marks::RESULT_DEAD);
 
         for p in &mut room.players {
             if p.team.as_deref() == Some(t) && !p.is_answer_setter && !p.disconnected {
-                p.guesses = updated.clone();
+                p.round_result = Some(super::marks::RESULT_DEAD.to_string());
                 if sync_mode {
                     game.sync_players_completed.insert(p.id.clone());
                 }
@@ -78,7 +79,7 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
         }
     } else {
         if let Some(p) = room.players.iter_mut().find(|p| p.id == player_id) {
-            p.guesses = super::marks::append_end_mark_once(&p.guesses, "💀");
+            super::marks::set_player_result(p, super::marks::RESULT_DEAD);
             if sync_mode {
                 game.sync_players_completed.insert(p.id.clone());
             }
@@ -111,19 +112,16 @@ pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult 
         };
     }
 
-    let timeout_mark = "⏱️";
     let is_team_mode = player.team.is_some() && player.team.as_deref() != Some("0");
     let mut affected_player_ids = Vec::new();
 
-    // 已结束则忽略（避免重复 timeout 污染次数）
-    let current_marks = if is_team_mode {
+    let has_ended = if is_team_mode {
         let t = player.team.as_ref().unwrap();
-        game.team_guesses.get(t).cloned().unwrap_or_default()
+        super::marks::team_has_result(game, t)
     } else {
-        player.guesses.clone()
+        super::marks::player_has_result(&player)
     };
-
-    if super::marks::has_end_mark(&current_marks) {
+    if has_ended {
         return TimeoutResult {
             needs_sync_update: false,
             affected_player_ids: vec![],
@@ -146,28 +144,26 @@ pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult 
     // Apply timeout mark to guesses (scope mutable borrows tightly)
     if is_team_mode {
         let t = player.team.as_ref().unwrap().clone();
-        let updated = {
+        let team_attempts = {
             let Some(ref mut game) = room.current_game else {
                 return TimeoutResult {
                     needs_sync_update: false,
                     affected_player_ids: vec![],
                 };
             };
-            let existing = game.team_guesses.get(&t).cloned().unwrap_or_default();
-            let updated = format!("{}{}", existing, timeout_mark);
-            game.team_guesses.insert(t.clone(), updated.clone());
-            updated
+            super::marks::push_team_attempt(game, &t, super::marks::ATTEMPT_TIMEOUT);
+            game.team_attempt_marks.get(&t).cloned().unwrap_or_default()
         };
 
         for p in &mut room.players {
             if p.team.as_deref() == Some(&t) && !p.is_answer_setter && !p.disconnected {
-                p.guesses = updated.clone();
+                p.attempt_marks = team_attempts.clone();
                 affected_player_ids.push(p.id.clone());
             }
         }
     } else {
         if let Some(p) = room.players.iter_mut().find(|p| p.id == player_id) {
-            p.guesses = format!("{}{}", p.guesses, timeout_mark);
+            super::marks::push_player_attempt(p, super::marks::ATTEMPT_TIMEOUT);
             affected_player_ids.push(p.id.clone());
         }
     }

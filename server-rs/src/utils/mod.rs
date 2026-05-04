@@ -1,6 +1,7 @@
 use crate::db;
 use crate::db::DbPools;
 use crate::socket::state::ServerState;
+use crate::socket::{broadcast_lobby_rooms_updated, emit_to_room};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use serde_json::json;
@@ -56,14 +57,17 @@ pub fn start_room_cleanup(state: Arc<ServerState>, io: SocketIo) {
             let cleaned = to_remove.len();
             for room_id in to_remove {
                 state.rooms.remove(&room_id);
-                let _ = io.to(room_id.clone()).emit(
+                emit_to_room(
+                    &io,
+                    room_id.clone(),
                     "roomClosed",
-                    &json!({ "message": "房间因长时间无活动已关闭" }),
+                    json!({ "message": "房间因长时间无活动已关闭" }),
                 );
                 warn!("Auto-cleaned inactive room: {}", room_id);
             }
 
             if cleaned > 0 {
+                broadcast_lobby_rooms_updated(&io);
                 info!("Auto-cleanup: removed {} stale rooms", cleaned);
             }
         }

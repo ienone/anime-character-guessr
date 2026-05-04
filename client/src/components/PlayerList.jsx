@@ -1,6 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import Image from './Image';
 
+const attemptDisplay = {
+  timeout: '⏱️',
+  partial: '💡',
+  correct: '✔',
+  wrong: '❌'
+};
+
+const resultDisplay = {
+  win: '✌',
+  bigWin: '👑',
+  dead: '💀',
+  surrender: '🏳️',
+  teamWin: '🏆'
+};
+
+function renderProgress(player) {
+  const attempts = Array.isArray(player.attemptMarks) ? player.attemptMarks : [];
+  return `${attempts.map(mark => attemptDisplay[mark] || '').join('')}${resultDisplay[player.roundResult] || ''}`;
+}
+
 const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnonymousModeChange, isManualMode, isHost, answerSetterId, onSetAnswerSetter, onKickPlayer, onTransferHost, onMessageChange, onTeamChange }) => {
   const [showNames, setShowNames] = useState(true);
   const [waitingForAnswer, setWaitingForAnswer] = useState(false);
@@ -223,7 +243,7 @@ const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnony
                 )}
               </td>
               <td>{player.score}</td>
-              <td>{isGameStarted && player.isAnswerSetter ? '出题者' : player.guesses || ''}</td>
+              <td>{isGameStarted && player.isAnswerSetter ? '出题者' : renderProgress(player)}</td>
               {isHost && player.id !== socket?.id && (
                 <td>
                   <div className="player-actions" style={{ position: 'relative' }}>

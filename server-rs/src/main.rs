@@ -46,12 +46,14 @@ async fn main() -> anyhow::Result<()> {
         let io_shutdown = io.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
-            let _ = io_shutdown.emit(
-                "serverShutdown",
-                &serde_json::json!({
-                    "message": "服务器已关闭，这可能是更新导致的重启或出现了Bug"
-                }),
-            );
+            let _ = io_shutdown
+                .emit(
+                    "serverShutdown",
+                    &serde_json::json!({
+                        "message": "服务器已关闭，这可能是更新导致的重启或出现了Bug"
+                    }),
+                )
+                .await;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         });
     }
