@@ -1,9 +1,10 @@
-﻿use crate::config::Config;
+use crate::config::Config;
 use anyhow::Context;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ─── Archive rows ─────────────────────────────────────────────────────────────
 
@@ -13,22 +14,26 @@ pub struct SubjectRow {
     pub stype: i64, // subject type (2=anime, 4=game, …)
     pub year: i32,
     pub score: f64,
-    pub collects: i64,
+    pub popularity: i64,
     pub name: String,
     pub name_cn: String,
-    /// Serialised tags array from subjects.tags_json
+    /// Serialised tags array from subject_details.tags_json
     pub tags_json: String,
-    /// Serialised meta_tags array from subjects.meta_tags_json
+    /// Serialised meta_tags array from subject_details.meta_tags_json
     pub meta_tags_json: String,
 }
 
-pub struct CharacterDoc {
+pub struct CharacterSearchDoc {
     pub id: i64,
     pub name: String,
-    pub infobox: String,
-    pub summary: String,
-    pub collects: i64,
-    pub comments: i64,
+    pub name_cn: String,
+    pub name_en: String,
+    pub romaji: String,
+    pub gender: String,
+    pub popularity: i64,
+    pub default_subject_id: Option<i64>,
+    pub default_subject_name: String,
+    pub default_subject_name_cn: String,
 }
 
 // ─── DbPools ──────────────────────────────────────────────────────────────────
@@ -53,12 +58,12 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
         .with_flags(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_init(|c| {
             c.pragma_update(None, "busy_timeout", "10000")?;
-            c.pragma_update(None, "cache_size", "-8192")?; // 8 MB page cache per connection
+            c.pragma_update(None, "cache_size", "-4096")?; // 4 MB page cache per connection
             c.pragma_update(None, "mmap_size", "0")?;
-            c.pragma_update(None, "temp_store", "MEMORY")
+            Ok(())
         });
     let archive_db = Pool::builder()
-        .max_size(8)
+        .max_size(4)
         .connection_timeout(std::time::Duration::from_secs(30))
         .build(archive_manager)?;
 
@@ -73,6 +78,11 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
     {
         let app_conn = app_db.get()?;
         init_app_schema(&app_conn)?;
+    }
+
+    {
+        let archive_conn = archive_db.get()?;
+        validate_archive_schema(&archive_conn)?;
     }
 
     tracing::info!("Archive DB ready in low-memory on-demand mode");
@@ -95,6 +105,46 @@ where
             .get()
             .map_err(|e| anyhow::anyhow!("archive_db pool error: {}", e))?;
         f(&mut conn)
+    })
+    .await
+    .context("archive_db spawn_blocking join failed")?
+}
+
+pub async fn with_archive_db_timed<T, F>(
+    pools: Arc<DbPools>,
+    operation: &'static str,
+    max_duration: Duration,
+    f: F,
+) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
+{
+    let archive_db = pools.archive_db.clone();
+    tokio::task::spawn_blocking(move || {
+        let started = Instant::now();
+        let deadline = started + max_duration;
+        let mut conn = archive_db
+            .get_timeout(max_duration)
+            .map_err(|e| anyhow::anyhow!("archive_db pool error: {}", e))?;
+        conn.progress_handler(20_000, Some(move || Instant::now() >= deadline))?;
+        let result = f(&mut conn);
+        conn.progress_handler(0, None::<fn() -> bool>)?;
+        let elapsed = started.elapsed();
+        if elapsed > Duration::from_millis(250) {
+            tracing::warn!(
+                operation,
+                duration_ms = elapsed.as_millis() as u64,
+                "slow archive db operation"
+            );
+        } else {
+            tracing::debug!(
+                operation,
+                duration_ms = elapsed.as_millis() as u64,
+                "archive db operation"
+            );
+        }
+        result.with_context(|| format!("archive db operation failed: {operation}"))
     })
     .await
     .context("archive_db spawn_blocking join failed")?
@@ -196,5 +246,31 @@ fn init_app_schema(conn: &Connection) -> anyhow::Result<()> {
         );
         "
     )?;
+    Ok(())
+}
+
+fn validate_archive_schema(conn: &Connection) -> anyhow::Result<()> {
+    for table in [
+        "subjects",
+        "subject_details",
+        "characters",
+        "character_profile",
+        "character_aliases",
+        "character_search_docs",
+        "subject_characters",
+        "subject_fts",
+        "character_fts",
+    ] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = ?1",
+            [table],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            anyhow::bail!(
+                "archive.sqlite schema is outdated: missing table {table}; rebuild it with db-builder"
+            );
+        }
+    }
     Ok(())
 }

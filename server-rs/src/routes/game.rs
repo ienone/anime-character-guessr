@@ -28,7 +28,7 @@ pub fn assemble_character(
             stype: r.stype,
             year: r.year,
             score: r.score,
-            collects: r.collects,
+            popularity: r.popularity,
             name: r.name,
             name_cn: r.name_cn,
             tags: serde_json::from_str(&r.tags_json).unwrap_or_default(),
@@ -125,21 +125,19 @@ fn pick_candidate(conn: &Connection, settings: &GameSettings) -> Result<i64> {
         .join(",");
     let mut sql = format!(
         "WITH top_subjects AS (
-            SELECT id, collects
+            SELECT id, popularity
             FROM subjects
-            WHERE nsfw = 0
-              AND date IS NOT NULL
-              AND date != ''
+            WHERE year > 0
               AND type IN ({type_placeholders})"
     );
     if settings.start_year.is_some() {
-        sql.push_str(" AND CAST(SUBSTR(date, 1, 4) AS INTEGER) >= ?");
+        sql.push_str(" AND year >= ?");
     }
     if settings.end_year.is_some() {
-        sql.push_str(" AND CAST(SUBSTR(date, 1, 4) AS INTEGER) <= ?");
+        sql.push_str(" AND year <= ?");
     }
     sql.push_str(
-        " ORDER BY collects DESC
+        " ORDER BY popularity DESC
           LIMIT ?
         )
         SELECT sc.character_id
@@ -150,7 +148,7 @@ fn pick_candidate(conn: &Connection, settings: &GameSettings) -> Result<i64> {
     if settings.main_character_only {
         sql.push_str(" WHERE sc.type = 1");
     }
-    sql.push_str(" ORDER BY ts.collects DESC LIMIT ?");
+    sql.push_str(" ORDER BY ts.popularity DESC LIMIT ?");
 
     let mut values: Vec<i64> = types;
     if let Some(start_year) = settings.start_year {
@@ -194,7 +192,7 @@ pub struct GameSettings {
     pub end_year: Option<i32>,
     /// e.g. ["动画", "游戏"], maps to subject type filter
     pub meta_tags: Vec<String>,
-    /// top-N subjects by collects
+    /// top-N subjects by popularity
     pub top_n_subjects: Option<i64>,
     /// Whether to output rawTags (commonTags mode)
     pub common_tags: bool,
@@ -259,7 +257,7 @@ struct SubjectInfo {
     stype: i64,
     year: i32,
     score: f64,
-    collects: i64,
+    popularity: i64,
     name: String,
     name_cn: String,
     tags: Value,
@@ -268,16 +266,20 @@ struct SubjectInfo {
 
 fn load_character_value(conn: &Connection, char_id: i64) -> Result<Value> {
     conn.query_row(
-        "SELECT id, name, infobox, summary, collects, comments FROM characters WHERE id = ?1",
+        "SELECT c.id, c.name, p.name_cn, p.name_en, p.gender, p.summary, c.popularity
+         FROM characters c
+         LEFT JOIN character_profile p ON p.character_id = c.id
+         WHERE c.id = ?1",
         [char_id],
         |row| {
             Ok(json!({
                 "id": row.get::<_, i64>(0)?,
                 "name": row.get::<_, String>(1).unwrap_or_default(),
-                "infobox": row.get::<_, String>(2).unwrap_or_default(),
-                "summary": row.get::<_, String>(3).unwrap_or_default(),
-                "collects": row.get::<_, i64>(4).unwrap_or(0),
-                "comments": row.get::<_, i64>(5).unwrap_or(0),
+                "nameCn": row.get::<_, String>(2).unwrap_or_default(),
+                "nameEn": row.get::<_, String>(3).unwrap_or_default(),
+                "gender": row.get::<_, String>(4).unwrap_or_else(|_| "?".to_string()),
+                "summary": row.get::<_, String>(5).unwrap_or_default(),
+                "popularity": row.get::<_, i64>(6).unwrap_or(0),
             }))
         },
     )
@@ -286,27 +288,23 @@ fn load_character_value(conn: &Connection, char_id: i64) -> Result<Value> {
 
 fn load_subject_rows(conn: &Connection, char_id: i64) -> Result<Vec<SubjectRow>> {
     let mut stmt = conn.prepare(
-        "SELECT sc.type, s.id, s.type, s.date, s.score,
-                s.collects, s.name, s.name_cn, s.tags_json, s.meta_tags_json
+        "SELECT sc.type, s.id, s.type, s.year, s.score,
+                s.popularity, s.name, s.name_cn, d.tags_json, d.meta_tags_json
          FROM subject_characters sc
          JOIN subjects s ON sc.subject_id = s.id
+         LEFT JOIN subject_details d ON d.subject_id = s.id
          WHERE sc.character_id = ?1
-         ORDER BY s.collects DESC",
+         ORDER BY s.popularity DESC",
     )?;
     let rows = stmt.query_map([char_id], |row| {
-        let date = row.get::<_, String>(3).unwrap_or_default();
-        let year = date
-            .split('-')
-            .next()
-            .and_then(|y| y.parse::<i32>().ok())
-            .unwrap_or(-1);
+        let year = row.get::<_, i32>(3).unwrap_or(-1);
         Ok(SubjectRow {
             id: row.get::<_, i64>(1)?,
             role: row.get::<_, i64>(0).unwrap_or(0),
             stype: row.get::<_, i64>(2).unwrap_or(0),
             year,
             score: row.get::<_, f64>(4).unwrap_or(-1.0),
-            collects: row.get::<_, i64>(5).unwrap_or(0),
+            popularity: row.get::<_, i64>(5).unwrap_or(0),
             name: row.get::<_, String>(6).unwrap_or_default(),
             name_cn: row.get::<_, String>(7).unwrap_or_default(),
             tags_json: row.get::<_, String>(8).unwrap_or_else(|_| "[]".to_string()),
@@ -335,31 +333,25 @@ fn assemble_payload(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let collects = char_val
-        .get("collects")
+    let popularity = char_val
+        .get("popularity")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let comments = char_val
-        .get("comments")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let popularity = collects + comments;
-
-    // Parse infobox for nameCn, nameEn, gender
-    let infobox_str = char_val
-        .get("infobox")
+    let name_cn = char_val
+        .get("nameCn")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let name_cn = extract_infobox_field(infobox_str, "简体中文名").map(|s| s.to_string());
-    let gender_raw = extract_infobox_field(infobox_str, "性别").map(|s| s.to_string());
-    let gender = match gender_raw.as_deref() {
-        Some("男") => "male",
-        Some("女") => "female",
-        _ => "?",
-    };
-    let name_en = extract_alias(infobox_str, "英文名")
-        .or_else(|| extract_alias(infobox_str, "罗马字"))
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    let name_en = char_val
+        .get("nameEn")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let gender = char_val
+        .get("gender")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
 
     // Always serve images via our proxy endpoint; backend will fetch+cache as WebP.
     // This avoids leaking external URLs to the client and works even if archive.sqlite
@@ -456,9 +448,9 @@ fn assemble_payload(
     let mut raw_tags_map: HashMap<String, i64> = HashMap::new();
     let _all_meta_tags: Vec<String>;
 
-    // Sort by collects descending (already sorted in cache, but filtered set may differ)
+    // Sort by popularity descending (already sorted in cache, but filtered set may differ)
     let mut sorted_subjects: Vec<&SubjectInfo> = appearance_subjects.clone();
-    sorted_subjects.sort_by(|a, b| b.collects.cmp(&a.collects));
+    sorted_subjects.sort_by(|a, b| b.popularity.cmp(&a.popularity));
 
     for s in &sorted_subjects {
         let stuff_factor: i64 = if s.role == 1 { 3 } else { 1 }; // 主角 weight
@@ -840,79 +832,4 @@ fn push_unique(target: &mut Vec<String>, values: Vec<String>) {
 fn id_tags_map() -> HashMap<i64, Vec<String>> {
     let raw = include_str!("../id_tags.json");
     serde_json::from_str(raw).unwrap_or_default()
-}
-
-// ─── Infobox parsers ──────────────────────────────────────────────────────────
-
-fn extract_infobox_field<'a>(infobox: &'a str, key: &str) -> Option<&'a str> {
-    let pattern = format!("|{}=", key);
-    let start = infobox.find(&pattern)? + pattern.len();
-    let rest = &infobox[start..];
-    let end = rest
-        .find('\n')
-        .or_else(|| rest.find('\r'))
-        .unwrap_or(rest.len());
-    let value = rest[..end].trim();
-    if value.is_empty() { None } else { Some(value) }
-}
-
-fn extract_alias<'a>(infobox: &'a str, alias_key: &str) -> Option<&'a str> {
-    let search = format!("[{}|", alias_key);
-    let start = infobox.find(&search)? + search.len();
-    let rest = &infobox[start..];
-    let end = rest.find(']').unwrap_or(rest.len());
-    let value = rest[..end].trim();
-    if value.is_empty() { None } else { Some(value) }
-}
-
-pub fn parse_character_basic_fields(
-    char_id: i64,
-    char_val: &Value,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    String,
-    String,
-    i64,
-) {
-    let infobox_str = char_val
-        .get("infobox")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let name_cn = extract_infobox_field(infobox_str, "简体中文名").map(|s| s.to_string());
-    let gender_raw = extract_infobox_field(infobox_str, "性别").map(|s| s.to_string());
-    let gender = match gender_raw.as_deref() {
-        Some("男") => "male",
-        Some("女") => "female",
-        _ => "?",
-    }
-    .to_string();
-    let name_en = extract_alias(infobox_str, "英文名")
-        .or_else(|| extract_alias(infobox_str, "罗马字"))
-        .map(|s| s.to_string());
-
-    let summary = char_val
-        .get("summary")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let collects = char_val
-        .get("collects")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let comments = char_val
-        .get("comments")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let popularity = collects + comments;
-
-    // always use proxy urls
-    let image = Some(format!("/img/{}.webp", char_id));
-    let image_grid = Some(format!("/img/{}.webp", char_id));
-
-    (
-        name_cn, name_en, image, image_grid, gender, summary, popularity,
-    )
 }

@@ -172,6 +172,7 @@ async fn resolve_character_image(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(1200)
         .min(5000);
+    let cached_only = q.get("cachedOnly").map(|v| v == "1" || v == "true").unwrap_or(false);
 
     // 1) If cached already, answer immediately.
     let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -196,6 +197,17 @@ async fn resolve_character_image(
             "imgUrl": img_url,
         }))
         .into_response();
+    }
+    if cached_only {
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "cached": false,
+                "code": "CACHE_MISS",
+                "imgUrl": img_url,
+            })),
+        )
+            .into_response();
     }
 
     // 2) Resolve a usable source URL (app.sqlite mirror first; then BGM fallback).
@@ -318,6 +330,7 @@ async fn resolve_subject_image(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(1200)
         .min(5000);
+    let cached_only = q.get("cachedOnly").map(|v| v == "1" || v == "true").unwrap_or(false);
 
     let cache_key = format!("s:{}", id);
     let cached_key = cache_key.clone();
@@ -343,6 +356,18 @@ async fn resolve_subject_image(
             "imgUrl": img_url,
         }))
         .into_response();
+    }
+    if cached_only {
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "cached": false,
+                "code": "CACHE_MISS",
+                "imgUrl": img_url,
+                "sourceUrl": "",
+            })),
+        )
+            .into_response();
     }
 
     let Some((image_medium, image_grid)) = ensure_subject_image_source_cached(&pools, id).await
