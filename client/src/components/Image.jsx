@@ -17,6 +17,7 @@ function Image({
   retryDelay = 5000, 
   fallbackSrc = '/assets/icon.jpg',
   preferSource = false,
+  cachedOnly = false,
   onLoadSuccess,
   onLoadError,
   className = '',
@@ -67,7 +68,10 @@ function Image({
         const url = preferSource
           ? (isSubject ? `${base}/api/img/source/subject/${id}` : `${base}/api/img/source/${id}`)
           : (isSubject ? `${base}/api/img/resolve/subject/${id}` : `${base}/api/img/resolve/${id}`)
-        const res = await axios.get(url, { timeout: 1500 })
+        const res = await axios.get(url, {
+          timeout: cachedOnly ? 500 : 1500,
+          params: cachedOnly ? { cachedOnly: 1, waitMs: 0 } : undefined,
+        })
         if (cancelled || !mountedRef.current) return
 
         // Server returns JSON; prefer proxy url when cached, otherwise try sourceUrl.
@@ -93,7 +97,7 @@ function Image({
 
     resolve()
     return () => { cancelled = true }
-  }, [src, fallbackSrc, preferSource]);
+  }, [src, fallbackSrc, preferSource, cachedOnly]);
 
   const handleError = useCallback(() => {
     if (!mountedRef.current) return;

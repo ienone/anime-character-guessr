@@ -20,12 +20,18 @@ async function requestWithRetry(requestFn, retries = RETRY_CONFIG.maxRetries) {
       return await requestFn();
     } catch (error) {
       lastError = error;
+      if (axios.isCancel?.(error) || error.code === 'ERR_CANCELED') {
+        throw error;
+      }
       
       // 判断是否应该重试
       const shouldRetry = 
         attempt < retries && (
           !error.response || // 网络错误
-          RETRY_CONFIG.retryableStatusCodes.includes(error.response?.status) // 可重试的状态码
+          (
+            RETRY_CONFIG.retryableStatusCodes.includes(error.response?.status) &&
+            !(error.response?.status === 408 && error.config?.url?.includes('/api/archive/search/'))
+          ) // 可重试的状态码
         );
       
       if (shouldRetry) {

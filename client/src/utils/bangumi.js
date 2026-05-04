@@ -2,6 +2,29 @@ import perfAxios from './perf.js'
 import { idToTags } from '../data/id_tags.js'
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
+const SUBJECT_SEARCH_CACHE_TTL_MS = 60 * 1000
+const SUBJECT_SEARCH_CACHE_MAX = 100
+const subjectSearchCache = new Map()
+
+function getCachedSubjectSearch(key) {
+  const entry = subjectSearchCache.get(key)
+  if (!entry || entry.expiresAt <= Date.now()) {
+    subjectSearchCache.delete(key)
+    return null
+  }
+  return entry.value
+}
+
+function setCachedSubjectSearch(key, value) {
+  if (!subjectSearchCache.has(key) && subjectSearchCache.size >= SUBJECT_SEARCH_CACHE_MAX) {
+    const oldestKey = subjectSearchCache.keys().next().value
+    subjectSearchCache.delete(oldestKey)
+  }
+  subjectSearchCache.set(key, {
+    expiresAt: Date.now() + SUBJECT_SEARCH_CACHE_TTL_MS,
+    value,
+  })
+}
 
 // ─── Backend-backed implementations ──────────────────────────────────────────
 
@@ -370,18 +393,23 @@ async function getIndexInfo(indexId) {
   }
 }
 
-async function searchSubjects(keyword) {
+async function searchSubjects(keyword, config = {}) {
   try {
     const trimmed = keyword.trim()
+    const cacheKey = `2,4|10|${trimmed}`
+    const cached = getCachedSubjectSearch(cacheKey)
+    if (cached) return cached
+
     const response = await perfAxios.get(`${SERVER_URL}/api/archive/search/subjects`, {
-      params: { keyword: trimmed, type: '2,4', limit: 10 }
+      ...config,
+      params: { keyword: trimmed, type: '2,4', limit: 10, ...(config.params || {}) }
     })
 
     if (!response.data || !response.data.data) {
       return [];
     }
 
-    return response.data.data.map(subject => ({
+    const results = response.data.data.map(subject => ({
       id: subject.id,
       name: subject.name,
       name_cn: subject.name_cn,
@@ -389,7 +417,12 @@ async function searchSubjects(keyword) {
       date: subject.date,
       type: subject.type==2 ? '动漫' : '游戏'
     }));
+    setCachedSubjectSearch(cacheKey, results)
+    return results
   } catch (error) {
+    if (error.code === 'ERR_CANCELED') {
+      throw error
+    }
     console.error('Error searching subjects:', error);
     return [];
   }

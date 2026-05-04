@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
-import axios from '../utils/cached-axios';
+import axios from 'axios';
 import { searchSubjects, getCharactersBySubjectId, getCharacterDetails } from '../utils/bangumi';
 import Image from './Image';
 import '../styles/search.css';
@@ -25,23 +25,33 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const searchInputRef = useRef(null);
   const searchDropdownRef = useRef(null);
   const selectedItemRef = useRef(null);
+  const characterSearchAbortRef = useRef(null);
+  const subjectSearchAbortRef = useRef(null);
+  const searchRequestSeqRef = useRef(0);
   
   const INITIAL_LIMIT = 10;
   const MORE_LIMIT = 5;
 
-  const handleSearch = useCallback(async (reset = false) => {
-    if (!searchQuery.trim() || !finishInit) return;
-    
-    // Always use initial search parameters when reset is true
+  const performCharacterSearch = useCallback(async (query, reset = false, requestedOffset = 0) => {
+    if (!query || !finishInit) return;
+
     const currentLimit = reset ? INITIAL_LIMIT : MORE_LIMIT;
-    const currentOffset = reset ? 0 : offset;
+    const currentOffset = reset ? 0 : requestedOffset;
     const loadingState = reset ? setIsSearching : setIsLoadingMore;
+    const requestSeq = ++searchRequestSeqRef.current;
+
+    if (reset) {
+      characterSearchAbortRef.current?.abort();
+    }
+    const controller = new AbortController();
+    characterSearchAbortRef.current = controller;
     
     loadingState(true);
     try {
       const response = await axios.get(`${SERVER_URL}/api/archive/search/characters`, {
+        signal: controller.signal,
         params: {
-          keyword: searchQuery.trim(),
+          keyword: query,
           limit: currentLimit,
           offset: currentOffset
         }
@@ -51,25 +61,14 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         id: character.id,
         image: character.images?.grid || null,
         name: character.name,
-        nameCn: character.infobox.find(item => item.key === "简体中文名")?.value || character.name,
-        nameEn: (() => {
-          const aliases = character.infobox.find(item => item.key === '别名')?.value;
-          if (aliases && Array.isArray(aliases)) {
-            const englishName = aliases.find(alias => alias.k === '英文名');
-            if (englishName) {
-              return englishName.v;
-            } else {
-              const romaji = aliases.find(alias => alias.k === '罗马字');
-              if (romaji) {
-                return romaji.v;
-              }
-            }
-          }
-          return character.name;
-        })(),
+        nameCn: character.nameCn || character.name,
+        nameEn: character.nameEn || character.romaji || character.name,
         gender: character.gender || '?',
-        popularity: character.stat.collects+character.stat.comments
+        popularity: character.popularity ?? 0,
+        defaultSubject: character.defaultSubject || null
       }));
+
+      if (requestSeq !== searchRequestSeqRef.current) return;
 
       if (reset) {
         setSearchResults(newResults);
@@ -79,49 +78,83 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         setOffset(currentOffset + MORE_LIMIT);
       }
       
-      setHasMore(newResults.length === currentLimit);
+      setHasMore(newResults.length === currentLimit && currentOffset + currentLimit <= 100);
     } catch (error) {
+      if (error.code === 'ERR_CANCELED') return;
       console.error('Search failed:', error);
       if (reset) {
         setSearchResults([]);
       }
     } finally {
-      loadingState(false);
+      if (requestSeq === searchRequestSeqRef.current) {
+        loadingState(false);
+      }
     }
-  }, [searchQuery, finishInit, offset]);
+  }, [finishInit]);
 
-  const handleSubjectSearch = useCallback(async () => {
-    if (!searchQuery.trim() || !finishInit) return;
+  const handleSearch = useCallback(async (reset = false) => {
+    const query = searchQuery.trim();
+    if (!query || !finishInit) return;
+    await performCharacterSearch(query, reset, offset);
+  }, [searchQuery, finishInit, offset, performCharacterSearch]);
+
+  const performSubjectSearch = useCallback(async (query) => {
+    if (!query || !finishInit) return;
+    const requestSeq = ++searchRequestSeqRef.current;
+    subjectSearchAbortRef.current?.abort();
+    const controller = new AbortController();
+    subjectSearchAbortRef.current = controller;
     setIsSearching(true);
     try {
-      const results = await searchSubjects(searchQuery);
+      const results = await searchSubjects(query, { signal: controller.signal });
+      if (requestSeq !== searchRequestSeqRef.current) return;
       setSearchResults(results);
       setFailedImages(new Set());
       setHasMore(false);
     } catch (error) {
+      if (error.code === 'ERR_CANCELED') return;
       console.error('Subject search failed:', error);
       setSearchResults([]);
     } finally {
-      setIsSearching(false);
+      if (requestSeq === searchRequestSeqRef.current) {
+        setIsSearching(false);
+      }
     }
-  }, [searchQuery, finishInit]);
+  }, [finishInit]);
+
+  const handleSubjectSearch = useCallback(async () => {
+    const query = searchQuery.trim();
+    if (!query || !finishInit) return;
+    await performSubjectSearch(query);
+  }, [searchQuery, finishInit, performSubjectSearch]);
 
   const handleSubjectSelect = useCallback(async (subject) => {
     setIsSearching(true);
     setSelectedSubject(subject);
     try {
       const characters = await getCharactersBySubjectId(subject.id);
-      const formattedCharacters = await Promise.all(characters.map(async character => {
-        const details = await getCharacterDetails(character.id);
+      const detailResults = await Promise.allSettled(characters.map(character =>
+        getCharacterDetails(character.id)
+      ));
+      const formattedCharacters = characters.map((character, index) => {
+        const detailResult = detailResults[index];
+        const details = detailResult.status === 'fulfilled' ? detailResult.value : {};
         return {
           id: character.id,
           image: character.images?.grid || details.imageGrid || details.image || null,
           name: character.name,
-          nameCn: details.nameCn,
-          gender: details.gender,
-          popularity: details.popularity
+          nameCn: details.nameCn || null,
+          gender: details.gender || '?',
+          popularity: details.popularity ?? 0,
+          defaultSubject: subject
+            ? {
+              id: subject.id,
+              name: subject.name,
+              nameCn: subject.name_cn || subject.nameCn || ''
+            }
+            : null
         };
-      }));
+      });
       setSearchResults(formattedCharacters);
       setFailedImages(new Set());
     } catch (error) {
@@ -266,6 +299,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
 
   // Reset pagination when search query changes
   useEffect(() => {
+    searchRequestSeqRef.current++;
+    characterSearchAbortRef.current?.abort();
+    subjectSearchAbortRef.current?.abort();
+    setIsSearching(false);
+    setIsLoadingMore(false);
     setOffset(0);
     setHasMore(true);
     setSearchResults([]);
@@ -282,6 +320,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       setOffset(0);
       setHasMore(true);
       setSelectedSubject(null);
+      setIsSearching(false);
+      setIsLoadingMore(false);
+      searchRequestSeqRef.current++;
+      characterSearchAbortRef.current?.abort();
+      subjectSearchAbortRef.current?.abort();
     }
   }, [subjectSearch, searchMode]);
 
@@ -290,10 +333,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     if (searchMode !== 'character') return;
     
     const timeoutId = setTimeout(() => {
-      if (searchQuery.trim()) {
+      const query = searchQuery.trim();
+      if (query) {
         setOffset(0);
         setHasMore(true);
-        handleSearch(true);
+        performCharacterSearch(query, true, 0);
       } else {
         setSearchResults([]);
         setFailedImages(new Set());
@@ -303,7 +347,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     }, 500);
 
     return () => clearTimeout(timeoutId);
-  }, [searchQuery, searchMode, handleSearch]);
+  }, [searchQuery, searchMode, performCharacterSearch]);
 
   const markImageFailed = useCallback((key) => {
     setFailedImages(prev => {
@@ -328,6 +372,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         alt={alt}
         className="result-character-icon"
         fallbackSrc=""
+        cachedOnly
         onLoadError={() => markImageFailed(key)}
       />
     );
@@ -393,6 +438,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
                 <div className="result-character-info">
                   <div className="result-character-name">{character.name}</div>
                   <div className="result-character-name-cn">{character.nameCn}</div>
+                  {character.defaultSubject && (
+                    <div className="result-character-subject">
+                      {character.defaultSubject.nameCn || character.defaultSubject.name}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -440,8 +490,9 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
           <button 
             className={`search-button ${searchMode === 'subject' ? 'active' : ''}`}
             onClick={() => {
+              const query = searchQuery.trim();
               setSearchMode('subject');
-              if (searchQuery.trim()) handleSubjectSearch();
+              if (query) performSubjectSearch(query);
             }}
             disabled={!searchQuery.trim() || isSearching || isGuessing || gameEnd || !finishInit}
           >

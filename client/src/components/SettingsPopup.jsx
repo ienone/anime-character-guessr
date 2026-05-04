@@ -29,6 +29,8 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const searchContainerRef = useRef(null);
+  const searchAbortRef = useRef(null);
+  const searchRequestSeqRef = useRef(0);
   const [hintInputs, setHintInputs] = useState(['8','5','3']);
   const [localSettings, setLocalSettings] = useState(() => JSON.parse(JSON.stringify(gameSettings)));
   const [isGuessSettingsOpen, setIsGuessSettingsOpen] = useState(false);
@@ -139,11 +141,17 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
   const handleSearch = useCallback(async () => {
     if (!searchQuery.trim()) return;
+    const requestSeq = ++searchRequestSeqRef.current;
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
     
     try {
-      const results = await searchSubjects(searchQuery);
+      const results = await searchSubjects(searchQuery, { signal: controller.signal });
+      if (requestSeq !== searchRequestSeqRef.current) return;
       setSearchResults(results);
     } catch (error) {
+      if (error.code === 'ERR_CANCELED') return;
       console.error('Search failed:', error);
       setSearchResults([]);
     }
@@ -151,6 +159,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
   // Debounced search function
   useEffect(() => {
+    searchRequestSeqRef.current++;
+    searchAbortRef.current?.abort();
+
     const timeoutId = setTimeout(() => {
       if (searchQuery.trim()) {
         handleSearch();
