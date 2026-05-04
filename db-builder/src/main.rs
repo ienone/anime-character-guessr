@@ -20,7 +20,7 @@ struct Args {
     out_db: PathBuf,
     app_db: PathBuf,
     images_path: PathBuf,
-    mode: String, // build-archive | migrate-app
+    mode: String, // build-archive | rebuild-fts | migrate-app
 }
 
 fn parse_args() -> Result<Args> {
@@ -35,7 +35,7 @@ fn parse_args() -> Result<Args> {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "db-builder\n\nUSAGE:\n  db-builder [--mode <build-archive|migrate-app>] [--dump-dir <path>] [--out <path>] [--app-db <path>] [--images-path <path>]\n\nMODES:\n  build-archive  Build trimmed archive.sqlite from dump (default)\n  migrate-app    Populate app.sqlite caches (image sources + VAs) from dump files\n\nOPTIONS:\n  -m, --mode <mode>         build-archive | migrate-app (default: build-archive)\n  -d, --dump-dir <path>     Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>          Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  --app-db <path>           app.sqlite path (default: {DEFAULT_APP_DB_PATH})\n  --images-path <path>      character image source JSON/JSONL path (default: {DEFAULT_IMAGES_JSON_PATH})\n  -h, --help                Print help\n"
+                    "db-builder\n\nUSAGE:\n  db-builder [--mode <build-archive|rebuild-fts|migrate-app>] [--dump-dir <path>] [--out <path>] [--app-db <path>] [--images-path <path>]\n\nMODES:\n  build-archive  Build trimmed archive.sqlite from dump (default)\n  rebuild-fts    Rebuild FTS search indexes on an existing archive.sqlite\n  migrate-app    Populate app.sqlite caches (image sources + VAs) from dump files\n\nOPTIONS:\n  -m, --mode <mode>         build-archive | rebuild-fts | migrate-app (default: build-archive)\n  -d, --dump-dir <path>     Dump folder containing *.jsonlines (default: {DEFAULT_DUMP_DIR})\n  -o, --out <path>          Output archive sqlite path (default: {DEFAULT_DB_PATH})\n  --app-db <path>           app.sqlite path (default: {DEFAULT_APP_DB_PATH})\n  --images-path <path>      character image source JSON/JSONL path (default: {DEFAULT_IMAGES_JSON_PATH})\n  -h, --help                Print help\n"
                 );
                 std::process::exit(0);
             }
@@ -125,8 +125,11 @@ fn main() -> Result<()> {
             println!("\nStep 3: 扫描并过滤 character.jsonlines...");
             process_characters(&mut db, &args.dump_dir, &valid_chars)?;
 
-            println!("\nStep 4: 构建 SQLite FTS5 搜索索引...");
-            build_search_indexes(&mut db)?;
+            println!("\nStep 4: 裁剪没有可用角色关联的作品...");
+            prune_subjects_without_characters(&db)?;
+
+            println!("\nStep 5: 构建 SQLite FTS5 搜索索引...");
+            build_search_indexes(&mut db, &args.dump_dir)?;
 
             // ==========================================
             // 清理与优化
@@ -135,6 +138,18 @@ fn main() -> Result<()> {
             db.execute_batch("VACUUM; PRAGMA optimize;")?;
 
             println!("构建完成！耗时: {:.2?}", start_time.elapsed());
+        }
+        "rebuild-fts" => {
+            println!("开始重建 archive.sqlite FTS 搜索索引...");
+            println!("dump_dir: {}", args.dump_dir.display());
+            println!("archive_db: {}", args.out_db.display());
+            let mut db = Connection::open(&args.out_db)?;
+            ensure_archive_search_schema(&db)?;
+            prune_subjects_without_characters(&db)?;
+            rebuild_search_tables(&mut db)?;
+            build_search_indexes(&mut db, &args.dump_dir)?;
+            db.execute_batch("VACUUM; PRAGMA optimize;")?;
+            println!("FTS 重建完成！耗时: {:.2?}", start_time.elapsed());
         }
         "migrate-app" => {
             println!("开始迁移 app.sqlite 缓存数据（图片源 + 声优）...");
@@ -175,6 +190,30 @@ fn ensure_app_schema(app: &Connection) -> Result<()> {
         );
         ",
     )?;
+    Ok(())
+}
+
+fn ensure_archive_search_schema(db: &Connection) -> Result<()> {
+    for table in [
+        "subjects",
+        "subject_details",
+        "characters",
+        "character_profile",
+        "character_aliases",
+        "character_search_docs",
+        "subject_characters",
+    ] {
+        let exists: i64 = db.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = ?1",
+            [table],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            anyhow::bail!(
+                "archive schema is outdated: missing table {table}; run --mode build-archive instead of rebuild-fts"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -426,48 +465,86 @@ fn import_character_image_sources(
 fn init_db(db: &mut Connection) -> Result<()> {
     db.execute_batch(
         "
+        DROP TABLE IF EXISTS subject_details;
+        DROP TABLE IF EXISTS character_profile;
+        DROP TABLE IF EXISTS character_aliases;
+        DROP TABLE IF EXISTS character_search_docs;
         DROP TABLE IF EXISTS subjects;
         CREATE TABLE subjects (
             id INTEGER PRIMARY KEY,
-            type INTEGER,
-            name TEXT,
-            name_cn TEXT,
-            date TEXT,
-            nsfw INTEGER,
-            rank INTEGER,
-            collects INTEGER,
-            score REAL,
+            type INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            name_cn TEXT NOT NULL DEFAULT '',
+            date TEXT NOT NULL DEFAULT '',
+            year INTEGER NOT NULL DEFAULT -1,
+            popularity INTEGER NOT NULL DEFAULT 0,
+            score REAL NOT NULL DEFAULT -1
+        );
+
+        CREATE TABLE subject_details (
+            subject_id INTEGER PRIMARY KEY,
             tags_json TEXT NOT NULL DEFAULT '[]',
-            meta_tags_json TEXT NOT NULL DEFAULT '[]'
+            meta_tags_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY(subject_id) REFERENCES subjects(id)
         );
 
         DROP TABLE IF EXISTS characters;
         CREATE TABLE characters (
             id INTEGER PRIMARY KEY,
-            name TEXT,
-            role INTEGER,
-            collects INTEGER,
-            comments INTEGER,
-            infobox TEXT,
-            summary TEXT
+            name TEXT NOT NULL,
+            role INTEGER NOT NULL DEFAULT 0,
+            popularity INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE character_profile (
+            character_id INTEGER PRIMARY KEY,
+            name_cn TEXT NOT NULL DEFAULT '',
+            name_en TEXT NOT NULL DEFAULT '',
+            romaji TEXT NOT NULL DEFAULT '',
+            gender TEXT NOT NULL DEFAULT '?',
+            summary TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(character_id) REFERENCES characters(id)
+        );
+
+        CREATE TABLE character_aliases (
+            character_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            alias_type TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 100,
+            PRIMARY KEY (character_id, alias, alias_type),
+            FOREIGN KEY(character_id) REFERENCES characters(id)
+        );
+
+        CREATE TABLE character_search_docs (
+            character_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            name_cn TEXT NOT NULL DEFAULT '',
+            name_en TEXT NOT NULL DEFAULT '',
+            romaji TEXT NOT NULL DEFAULT '',
+            aliases TEXT NOT NULL DEFAULT '',
+            gender TEXT NOT NULL DEFAULT '?',
+            popularity INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(character_id) REFERENCES characters(id)
         );
 
         DROP TABLE IF EXISTS subject_characters;
         CREATE TABLE subject_characters (
-            subject_id INTEGER,
-            character_id INTEGER,
-            type INTEGER,
-            order_num INTEGER
+            subject_id INTEGER NOT NULL,
+            character_id INTEGER NOT NULL,
+            type INTEGER NOT NULL,
+            order_num INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX idx_sub_char ON subject_characters(subject_id, character_id);
         CREATE INDEX idx_char_sub ON subject_characters(character_id, subject_id);
-        CREATE INDEX idx_subjects_picker ON subjects(type, nsfw, collects DESC, date);
-        CREATE INDEX idx_characters_role_pop ON characters(role, collects DESC, comments DESC);
+        CREATE INDEX idx_subjects_picker ON subjects(type, year, popularity DESC);
+        CREATE INDEX idx_subjects_popularity ON subjects(popularity DESC);
+        CREATE INDEX idx_characters_role_pop ON characters(role, popularity DESC);
 
         DROP TABLE IF EXISTS subject_fts;
         CREATE VIRTUAL TABLE subject_fts USING fts5(
             name,
             name_cn,
+            aliases,
             content='',
             contentless_delete=1,
             tokenize='unicode61'
@@ -476,6 +553,38 @@ fn init_db(db: &mut Connection) -> Result<()> {
         DROP TABLE IF EXISTS character_fts;
         CREATE VIRTUAL TABLE character_fts USING fts5(
             name,
+            name_cn,
+            name_en,
+            romaji,
+            aliases,
+            content='',
+            contentless_delete=1,
+            tokenize='unicode61'
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+fn rebuild_search_tables(db: &mut Connection) -> Result<()> {
+    db.execute_batch(
+        "
+        DROP TABLE IF EXISTS subject_fts;
+        CREATE VIRTUAL TABLE subject_fts USING fts5(
+            name,
+            name_cn,
+            aliases,
+            content='',
+            contentless_delete=1,
+            tokenize='unicode61'
+        );
+
+        DROP TABLE IF EXISTS character_fts;
+        CREATE VIRTUAL TABLE character_fts USING fts5(
+            name,
+            name_cn,
+            name_en,
+            romaji,
             aliases,
             content='',
             contentless_delete=1,
@@ -498,9 +607,13 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
 
     let tx = db.transaction()?;
     {
-        let mut stmt = tx.prepare(
-            "INSERT INTO subjects (id, type, name, name_cn, date, nsfw, rank, collects, score, tags_json, meta_tags_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+        let mut subject_stmt = tx.prepare(
+            "INSERT INTO subjects (id, type, name, name_cn, date, year, popularity, score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        )?;
+        let mut detail_stmt = tx.prepare(
+            "INSERT INTO subject_details (subject_id, tags_json, meta_tags_json)
+             VALUES (?1, ?2, ?3)"
         )?;
 
         for line in reader.lines() {
@@ -538,6 +651,8 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
 
             if is_anime_valid || is_game_valid {
                 valid_ids.insert(id);
+                let date = v["date"].as_str().unwrap_or("");
+                let year = parse_year(date);
                 let tags_json = v
                     .get("tags")
                     .map(|x| x.to_string())
@@ -546,16 +661,18 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
                     .get("meta_tags")
                     .map(|x| x.to_string())
                     .unwrap_or_else(|| "[]".to_string());
-                stmt.execute((
+                subject_stmt.execute((
                     id,
                     type_id,
                     v["name"].as_str().unwrap_or(""),
                     v["name_cn"].as_str().unwrap_or(""),
-                    v["date"].as_str().unwrap_or(""),
-                    nsfw as i32,
-                    rank,
+                    date,
+                    year,
                     collects,
                     v["score"].as_f64().unwrap_or(-1.0),
+                ))?;
+                detail_stmt.execute((
+                    id,
                     tags_json,
                     meta_tags_json,
                 ))?;
@@ -626,9 +743,21 @@ fn process_characters(
 
     let tx = db.transaction()?;
     {
-        let mut stmt = tx.prepare(
-            "INSERT INTO characters (id, name, role, collects, comments, infobox, summary)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        let mut char_stmt = tx.prepare(
+            "INSERT INTO characters (id, name, role, popularity)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        let mut profile_stmt = tx.prepare(
+            "INSERT INTO character_profile (character_id, name_cn, name_en, romaji, gender, summary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let mut alias_stmt = tx.prepare(
+            "INSERT OR IGNORE INTO character_aliases (character_id, alias, alias_type, priority)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        let mut search_stmt = tx.prepare(
+            "INSERT INTO character_search_docs (character_id, name, name_cn, name_en, romaji, aliases, gender, popularity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
 
         for line in reader.lines() {
@@ -640,36 +769,105 @@ fn process_characters(
 
             let id = v["id"].as_i64().unwrap_or(0);
             let collects = v["collects"].as_i64().unwrap_or(0);
+            let comments = v["comments"].as_i64().unwrap_or(0);
+            let popularity = collects + comments;
 
             // 必须是前置步骤保留下的角色，并且过滤掉 0 收藏量的僵尸角色
             if valid_chars.contains(&id) && collects > 0 {
                 total_kept += 1;
-                stmt.execute((
+                let name = v["name"].as_str().unwrap_or("");
+                let infobox = v["infobox"].as_str().unwrap_or("");
+                let summary = v["summary"].as_str().unwrap_or("");
+                let parsed = parse_character_infobox(infobox);
+                let aliases_text = parsed
+                    .aliases
+                    .iter()
+                    .map(|a| a.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                char_stmt.execute((
                     id,
-                    v["name"].as_str().unwrap_or(""),
+                    name,
                     v["role"].as_i64().unwrap_or(0),
-                    collects,
-                    v["comments"].as_i64().unwrap_or(0),
-                    v["infobox"].as_str().unwrap_or(""),
-                    v["summary"].as_str().unwrap_or(""),
+                    popularity,
+                ))?;
+                profile_stmt.execute((
+                    id,
+                    parsed.name_cn.as_deref().unwrap_or(""),
+                    parsed.name_en.as_deref().unwrap_or(""),
+                    parsed.romaji.as_deref().unwrap_or(""),
+                    parsed.gender.as_str(),
+                    summary,
+                ))?;
+                for alias in &parsed.aliases {
+                    alias_stmt.execute((id, alias.value.as_str(), alias.alias_type.as_str(), alias.priority))?;
+                }
+                search_stmt.execute((
+                    id,
+                    name,
+                    parsed.name_cn.as_deref().unwrap_or(""),
+                    parsed.name_en.as_deref().unwrap_or(""),
+                    parsed.romaji.as_deref().unwrap_or(""),
+                    aliases_text,
+                    parsed.gender.as_str(),
+                    popularity,
                 ))?;
             }
         }
     }
     tx.commit()?;
+    db.execute(
+        "DELETE FROM subject_characters WHERE character_id NOT IN (SELECT id FROM characters)",
+        [],
+    )?;
     println!("实际最终写入库的优质角色数量: {}", total_kept);
     Ok(())
 }
 
-fn build_search_indexes(db: &mut Connection) -> Result<()> {
-    db.execute(
-        "INSERT INTO subject_fts(rowid, name, name_cn)
-         SELECT id, name, name_cn FROM subjects",
+fn prune_subjects_without_characters(db: &Connection) -> Result<()> {
+    let before: i64 = db.query_row("SELECT COUNT(*) FROM subjects", [], |row| row.get(0))?;
+    let orphan_subjects: i64 = db.query_row(
+        "SELECT COUNT(*)
+         FROM subjects s
+         WHERE NOT EXISTS (
+             SELECT 1 FROM subject_characters sc WHERE sc.subject_id = s.id
+         )",
         [],
+        |row| row.get(0),
     )?;
-    let character_rows = {
-        let mut stmt =
-            db.prepare("SELECT id, name, infobox FROM characters WHERE role = 1 ORDER BY id")?;
+
+    db.execute_batch(
+        "
+        DELETE FROM subject_details
+        WHERE subject_id IN (
+            SELECT s.id
+            FROM subjects s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM subject_characters sc WHERE sc.subject_id = s.id
+            )
+        );
+        DELETE FROM subjects
+        WHERE NOT EXISTS (
+            SELECT 1 FROM subject_characters sc WHERE sc.subject_id = subjects.id
+        );
+        DELETE FROM subject_characters
+        WHERE subject_id NOT IN (SELECT id FROM subjects);
+        ",
+    )?;
+
+    let after: i64 = db.query_row("SELECT COUNT(*) FROM subjects", [], |row| row.get(0))?;
+    println!(
+        "已删除无可用角色关联作品: {}，作品数 {} -> {}",
+        orphan_subjects, before, after
+    );
+    Ok(())
+}
+
+fn build_search_indexes(db: &mut Connection, dump_dir: &Path) -> Result<()> {
+    let subject_aliases = load_subject_aliases(dump_dir)?;
+    let subject_rows = {
+        let mut stmt = db.prepare("SELECT id, name, name_cn FROM subjects ORDER BY id")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -679,32 +877,227 @@ fn build_search_indexes(db: &mut Connection) -> Result<()> {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
+    let tx = db.transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO subject_fts(rowid, name, name_cn, aliases) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (id, name, name_cn) in subject_rows {
+            let aliases = subject_aliases.get(&id).map(String::as_str).unwrap_or("");
+            stmt.execute((id, name, name_cn, aliases))?;
+        }
+    }
+    tx.commit()?;
+
+    let character_rows = {
+        let mut stmt = db.prepare(
+            "SELECT character_id, name, name_cn, name_en, romaji, aliases
+             FROM character_search_docs
+             ORDER BY character_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1).unwrap_or_default(),
+                row.get::<_, String>(2).unwrap_or_default(),
+                row.get::<_, String>(3).unwrap_or_default(),
+                row.get::<_, String>(4).unwrap_or_default(),
+                row.get::<_, String>(5).unwrap_or_default(),
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
 
     let tx = db.transaction()?;
     {
-        let mut stmt =
-            tx.prepare("INSERT INTO character_fts(rowid, name, aliases) VALUES (?1, ?2, ?3)")?;
-        for (id, name, infobox) in character_rows {
-            stmt.execute((id, name, character_search_aliases(&infobox)))?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO character_fts(rowid, name, name_cn, name_en, romaji, aliases)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (id, name, name_cn, name_en, romaji, aliases) in character_rows {
+            stmt.execute((id, name, name_cn, name_en, romaji, aliases))?;
         }
     }
     tx.commit()?;
     Ok(())
 }
 
-fn character_search_aliases(infobox: &str) -> String {
-    [
-        extract_infobox_field(infobox, "简体中文名"),
-        extract_alias(infobox, "英文名"),
-        extract_alias(infobox, "罗马字"),
-        extract_alias(infobox, "日文名"),
-        extract_alias(infobox, "昵称"),
-        extract_alias(infobox, "重要绰号"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" ")
+fn load_subject_aliases(dump_dir: &Path) -> Result<std::collections::HashMap<i64, String>> {
+    let file = File::open(dump_dir.join("subject.jsonlines")).with_context(|| {
+        format!(
+            "failed to open {}",
+            dump_dir.join("subject.jsonlines").display()
+        )
+    })?;
+    let reader = BufReader::new(file);
+    let mut aliases = std::collections::HashMap::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Value = serde_json::from_str(&line)?;
+        let id = v["id"].as_i64().unwrap_or(0);
+        let value = infobox_aliases(v["infobox"].as_str().unwrap_or(""));
+        if id > 0 && !value.is_empty() {
+            aliases.insert(id, value);
+        }
+    }
+    Ok(aliases)
+}
+
+#[derive(Debug, Clone)]
+struct AliasEntry {
+    value: String,
+    alias_type: String,
+    priority: i64,
+}
+
+#[derive(Debug, Default)]
+struct ParsedCharacterInfobox {
+    name_cn: Option<String>,
+    name_en: Option<String>,
+    romaji: Option<String>,
+    gender: String,
+    aliases: Vec<AliasEntry>,
+}
+
+fn parse_year(date: &str) -> i64 {
+    date.split('-')
+        .next()
+        .and_then(|y| y.parse::<i64>().ok())
+        .unwrap_or(-1)
+}
+
+fn parse_character_infobox(infobox: &str) -> ParsedCharacterInfobox {
+    let name_cn = extract_infobox_field(infobox, "简体中文名");
+    let gender = match extract_infobox_field(infobox, "性别").as_deref() {
+        Some("男") => "male",
+        Some("女") => "female",
+        _ => "?",
+    }
+    .to_string();
+
+    let mut aliases = Vec::new();
+    collect_alias_block(infobox, &mut aliases);
+
+    let name_en = first_alias_value(&aliases, &["en"]);
+    let romaji = first_alias_value(&aliases, &["romaji"]);
+
+    if let Some(value) = &name_cn {
+        push_alias(&mut aliases, value, "cn", 10);
+    }
+    if let Some(value) = &name_en {
+        push_alias(&mut aliases, value, "en", 30);
+    }
+    if let Some(value) = &romaji {
+        push_alias(&mut aliases, value, "romaji", 35);
+    }
+
+    ParsedCharacterInfobox {
+        name_cn,
+        name_en,
+        romaji,
+        gender,
+        aliases,
+    }
+}
+
+fn collect_alias_block(infobox: &str, aliases: &mut Vec<AliasEntry>) {
+    let Some(start) = infobox.find("|别名={") else {
+        return;
+    };
+    let rest = &infobox[start + "|别名={".len()..];
+    let end = rest
+        .find("\n}")
+        .or_else(|| rest.find("\r\n}"))
+        .unwrap_or(rest.len());
+
+    for part in rest[..end].split('[') {
+        let Some(end) = part.find(']') else {
+            continue;
+        };
+        let raw = part[..end].trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let (key, value) = raw
+            .split_once('|')
+            .map(|(k, v)| (k.trim(), v.trim()))
+            .unwrap_or(("", raw));
+        if value.is_empty() {
+            continue;
+        }
+        let (alias_type, priority) = normalize_alias_type(key);
+        push_alias(aliases, value, alias_type, priority);
+    }
+}
+
+fn normalize_alias_type(key: &str) -> (&'static str, i64) {
+    match key {
+        "简体中文名" | "中文名" | "第二中文名" | "第三中文名" | "繁体中文名" => {
+            ("cn_secondary", 20)
+        }
+        "英文名" | "英文名二" | "第二英文名" => ("en", 30),
+        "罗马字" => ("romaji", 35),
+        "日文名" | "第二日文名" | "原名" => ("jp", 40),
+        "纯假名" => ("kana", 45),
+        "昵称" | "昵称2" | "外号" | "称号" | "重要绰号" => ("nickname", 50),
+        "代号" => ("code_name", 55),
+        "本名" | "真名" | "全名" => ("real_name", 55),
+        "" => ("unkeyed", 60),
+        _ => ("other", 90),
+    }
+}
+
+fn push_alias(aliases: &mut Vec<AliasEntry>, value: &str, alias_type: &str, priority: i64) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    if aliases
+        .iter()
+        .any(|existing| existing.value == value && existing.alias_type == alias_type)
+    {
+        return;
+    }
+    aliases.push(AliasEntry {
+        value: value.to_string(),
+        alias_type: alias_type.to_string(),
+        priority,
+    });
+}
+
+fn first_alias_value(aliases: &[AliasEntry], alias_types: &[&str]) -> Option<String> {
+    aliases
+        .iter()
+        .filter(|a| alias_types.contains(&a.alias_type.as_str()))
+        .min_by_key(|a| a.priority)
+        .map(|a| a.value.clone())
+}
+
+fn infobox_aliases(infobox: &str) -> String {
+    let Some(start) = infobox.find("|别名={") else {
+        return String::new();
+    };
+    let rest = &infobox[start + "|别名={".len()..];
+    let end = rest
+        .find("\n}")
+        .or_else(|| rest.find("\r\n}"))
+        .unwrap_or(rest.len());
+    rest[..end]
+        .split('[')
+        .filter_map(|part| {
+            let end = part.find(']')?;
+            let value = part[..end].split('|').next_back()?.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn extract_infobox_field(infobox: &str, key: &str) -> Option<String> {
@@ -715,19 +1108,6 @@ fn extract_infobox_field(infobox: &str, key: &str) -> Option<String> {
         .find('\n')
         .or_else(|| rest.find('\r'))
         .unwrap_or(rest.len());
-    let value = rest[..end].trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
-fn extract_alias(infobox: &str, alias_key: &str) -> Option<String> {
-    let search = format!("[{}|", alias_key);
-    let start = infobox.find(&search)? + search.len();
-    let rest = &infobox[start..];
-    let end = rest.find(']').unwrap_or(rest.len());
     let value = rest[..end].trim();
     if value.is_empty() {
         None
