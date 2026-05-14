@@ -1847,31 +1847,40 @@ fn register_room_handlers(
                             }
                         }
 
-                        broadcast_players_force(&io_clone, &room_id, room);
-                        Ok((current_host_name, new_host_id.clone(), new_host_name))
+                        let players_payload = prepare_players_broadcast(
+                            room,
+                            Some(json!({ "forceImmediate": true })),
+                        );
+                        Ok((
+                            current_host_name,
+                            new_host_id.clone(),
+                            new_host_name,
+                            players_payload,
+                        ))
                     })
                     .await;
 
-                let (current_host_name, new_host_id, new_host_name) = match transfer {
-                    Some(Ok(transfer)) => transfer,
-                    Some(Err(message)) => {
-                        emit_error(&socket, "transferHost", message);
-                        return;
-                    }
-                    None => return,
-                };
+                let (current_host_name, new_host_id, new_host_name, players_payload) =
+                    match transfer {
+                        Some(Ok(transfer)) => transfer,
+                        Some(Err(message)) => {
+                            emit_error(&socket, "transferHost", message);
+                            return;
+                        }
+                        None => return,
+                    };
 
-                let _ = io_clone
-                    .to(room_id.clone())
-                    .emit(
-                        "hostTransferred",
-                        &json!({
+                emit_to_room(&io_clone, room_id.clone(), "updatePlayers", players_payload);
+                emit_to_room(
+                    &io_clone,
+                    room_id.clone(),
+                    "hostTransferred",
+                    json!({
                             "oldHostName": current_host_name,
                             "newHostId": new_host_id,
                             "newHostName": new_host_name
-                        }),
-                    )
-                    .await;
+                    }),
+                );
             }
         },
     );
