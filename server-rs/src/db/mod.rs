@@ -71,10 +71,14 @@ pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
 
     // Connect to app DB (read/write)
     let app_manager = SqliteConnectionManager::file(&config.app_db_path).with_init(|c| {
+        c.pragma_update(None, "journal_mode", "WAL")?;
         c.pragma_update(None, "busy_timeout", "5000")?;
         c.pragma_update(None, "synchronous", "NORMAL")
     });
-    let app_db = Pool::builder().max_size(8).build(app_manager)?;
+    let app_db = Pool::builder()
+        .max_size(8)
+        .connection_timeout(Duration::from_secs(5))
+        .build(app_manager)?;
 
     // Create app DB tables if they don't exist
     {
@@ -175,10 +179,19 @@ where
 {
     let app_db = pools.app_db.clone();
     tokio::task::spawn_blocking(move || {
+        let started = Instant::now();
         let mut conn = app_db
-            .get()
+            .get_timeout(Duration::from_secs(5))
             .map_err(|e| anyhow::anyhow!("app_db pool error: {}", e))?;
-        f(&mut conn)
+        let result = f(&mut conn);
+        let elapsed = started.elapsed();
+        if elapsed > Duration::from_millis(250) {
+            tracing::warn!(
+                duration_ms = elapsed.as_millis() as u64,
+                "slow app db operation"
+            );
+        }
+        result
     })
     .await
     .context("app_db spawn_blocking join failed")?

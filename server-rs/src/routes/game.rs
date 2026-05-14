@@ -8,9 +8,67 @@ use anyhow::Result;
 use rand::prelude::IndexedRandom;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, params_from_iter};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Map;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
+
+const CANDIDATE_CACHE_MAX_ENTRIES: usize = 128;
+const CANDIDATE_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+static CANDIDATE_CACHE: LazyLock<DashMap<CandidateCacheKey, CandidateCacheEntry>> =
+    LazyLock::new(DashMap::new);
+static CANDIDATE_BUILD_LOCKS: LazyLock<DashMap<CandidateCacheKey, Arc<Mutex<()>>>> =
+    LazyLock::new(DashMap::new);
+
+#[derive(Debug, Clone)]
+struct CandidateCacheEntry {
+    candidates: Arc<Vec<i64>>,
+    built_at: Instant,
+}
+
+#[derive(Debug, Clone, Eq)]
+struct CandidateCacheKey {
+    start_year: Option<i32>,
+    end_year: Option<i32>,
+    meta_tags: Vec<String>,
+    top_n_subjects: Option<i64>,
+    main_character_only: bool,
+    character_num: usize,
+    use_subject_per_year: bool,
+    added_subject_ids: Vec<i64>,
+}
+
+impl PartialEq for CandidateCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.start_year == other.start_year
+            && self.end_year == other.end_year
+            && self.meta_tags == other.meta_tags
+            && self.top_n_subjects == other.top_n_subjects
+            && self.main_character_only == other.main_character_only
+            && self.character_num == other.character_num
+            && self.use_subject_per_year == other.use_subject_per_year
+            && self.added_subject_ids == other.added_subject_ids
+    }
+}
+
+impl Hash for CandidateCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.start_year.hash(state);
+        self.end_year.hash(state);
+        self.meta_tags.hash(state);
+        self.top_n_subjects.hash(state);
+        self.main_character_only.hash(state);
+        self.character_num.hash(state);
+        self.use_subject_per_year.hash(state);
+        self.added_subject_ids.hash(state);
+    }
+}
 
 // ─── Public entry points ──────────────────────────────────────────────────────
 
@@ -40,21 +98,30 @@ pub fn assemble_character(
 }
 
 /// Pick a random character consistent with `settings` via indexed SQLite queries.
-pub fn random_character(pools: &Arc<DbPools>, settings: &GameSettings) -> Result<(i64, Value)> {
-    let conn = pools.archive_db.get()?;
-    let char_id = pick_candidate(&conn, settings)?;
-    let payload = assemble_character(&conn, char_id, settings)?;
+pub fn random_character_with_conn(
+    conn: &Connection,
+    settings: &GameSettings,
+) -> Result<(i64, Value)> {
+    let char_id = pick_candidate(conn, settings)?;
+    let payload = assemble_character(conn, char_id, settings)?;
     Ok((char_id, payload))
 }
 
+pub fn random_character(pools: &Arc<DbPools>, settings: &GameSettings) -> Result<(i64, Value)> {
+    let conn = pools
+        .archive_db
+        .get()
+        .map_err(|e| anyhow::anyhow!("archive_db pool error: {}", e))?;
+    random_character_with_conn(&conn, settings)
+}
+
 /// Build payload for a specific character by ID.
-pub fn character_by_id(
-    pools: &Arc<DbPools>,
+pub fn character_by_id_with_conn(
+    conn: &Connection,
     char_id: i64,
     settings: &GameSettings,
 ) -> Result<Value> {
-    let conn = pools.archive_db.get()?;
-    assemble_character(&conn, char_id, settings)
+    assemble_character(conn, char_id, settings)
 }
 
 pub fn build_feedback(guess: &Value, answer: &Value, settings: &GameSettings) -> Value {
@@ -119,6 +186,72 @@ pub fn build_feedback(guess: &Value, answer: &Value, settings: &GameSettings) ->
 }
 
 fn pick_candidate(conn: &Connection, settings: &GameSettings) -> Result<i64> {
+    let key = CandidateCacheKey::from_settings(settings);
+    let candidates = get_or_build_candidate_pool(conn, settings, &key)?;
+    candidates
+        .choose(&mut rand::rng())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("No eligible characters found"))
+}
+
+fn get_or_build_candidate_pool(
+    conn: &Connection,
+    settings: &GameSettings,
+    key: &CandidateCacheKey,
+) -> Result<Arc<Vec<i64>>> {
+    if let Some(entry) = CANDIDATE_CACHE.get(key) {
+        if entry.built_at.elapsed() < CANDIDATE_CACHE_TTL && !entry.candidates.is_empty() {
+            return Ok(Arc::clone(&entry.candidates));
+        }
+    }
+
+    let build_lock = CANDIDATE_BUILD_LOCKS
+        .entry(key.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _guard = build_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Candidate cache build lock poisoned"))?;
+
+    if let Some(entry) = CANDIDATE_CACHE.get(key) {
+        if entry.built_at.elapsed() < CANDIDATE_CACHE_TTL && !entry.candidates.is_empty() {
+            return Ok(Arc::clone(&entry.candidates));
+        }
+    }
+
+    let candidates = Arc::new(query_candidate_pool(conn, settings)?);
+    prune_candidate_cache();
+    CANDIDATE_CACHE.insert(
+        key.clone(),
+        CandidateCacheEntry {
+            candidates: Arc::clone(&candidates),
+            built_at: Instant::now(),
+        },
+    );
+    Ok(candidates)
+}
+
+fn prune_candidate_cache() {
+    if CANDIDATE_CACHE.len() < CANDIDATE_CACHE_MAX_ENTRIES {
+        return;
+    }
+
+    let mut entries = CANDIDATE_CACHE
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.built_at))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, built_at)| *built_at);
+
+    let remove_count = entries
+        .len()
+        .saturating_sub(CANDIDATE_CACHE_MAX_ENTRIES - 1);
+    for (key, _) in entries.into_iter().take(remove_count) {
+        CANDIDATE_CACHE.remove(&key);
+        CANDIDATE_BUILD_LOCKS.remove(&key);
+    }
+}
+
+fn query_candidate_pool(conn: &Connection, settings: &GameSettings) -> Result<Vec<i64>> {
     let types = settings.subject_types();
     let top_n = settings
         .top_n_subjects
@@ -258,31 +391,137 @@ fn pick_candidate(conn: &Connection, settings: &GameSettings) -> Result<i64> {
             .collect();
     }
 
-    candidates
-        .choose(&mut rand::rng())
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("No eligible characters found"))
+    Ok(candidates)
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default)]
+fn default_true() -> bool {
+    true
+}
+
+fn default_common_tags() -> bool {
+    true
+}
+
+fn default_subject_tag_num() -> usize {
+    6
+}
+
+fn default_character_tag_num() -> usize {
+    6
+}
+
+fn default_character_num() -> usize {
+    6
+}
+
+fn default_max_attempts() -> usize {
+    10
+}
+
+fn deserialize_added_subject_ids<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<Value>::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|subject| {
+            subject
+                .as_i64()
+                .or_else(|| subject.get("id").and_then(|id| id.as_i64()))
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[allow(dead_code)] // Some fields parsed from JSON are reserved for future filtering logic
 pub struct GameSettings {
+    #[serde(default)]
     pub start_year: Option<i32>,
+    #[serde(default)]
     pub end_year: Option<i32>,
     /// e.g. ["动画", "游戏"], maps to subject type filter
+    #[serde(default)]
     pub meta_tags: Vec<String>,
     /// top-N subjects by popularity
+    #[serde(default)]
     pub top_n_subjects: Option<i64>,
     /// Whether to output rawTags (commonTags mode)
+    #[serde(default = "default_common_tags")]
     pub common_tags: bool,
+    #[serde(default = "default_subject_tag_num")]
     pub subject_tag_num: usize,
+    #[serde(default = "default_character_tag_num")]
     pub character_tag_num: usize,
+    #[serde(default = "default_true")]
     pub main_character_only: bool,
+    #[serde(default = "default_character_num")]
     pub character_num: usize,
+    #[serde(default)]
     pub use_subject_per_year: bool,
+    #[serde(
+        default,
+        rename = "addedSubjects",
+        deserialize_with = "deserialize_added_subject_ids"
+    )]
     pub added_subject_ids: Vec<i64>,
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: usize,
+    #[serde(default)]
+    pub sync_mode: bool,
+    #[serde(default)]
+    pub nonstop_mode: bool,
+    #[serde(default)]
+    pub global_pick: bool,
+    #[serde(default)]
+    pub tag_ban: bool,
+    #[serde(default)]
+    pub use_hints: Vec<String>,
+    #[serde(default)]
+    pub use_image_hint: Option<String>,
+    #[serde(default)]
+    pub time_limit: Option<i64>,
+    #[serde(default)]
+    pub subject_search: bool,
+    #[serde(default)]
+    pub use_index: bool,
+    #[serde(default)]
+    pub index_id: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            start_year: None,
+            end_year: None,
+            meta_tags: Vec::new(),
+            top_n_subjects: None,
+            common_tags: true,
+            subject_tag_num: default_subject_tag_num(),
+            character_tag_num: default_character_tag_num(),
+            main_character_only: true,
+            character_num: default_character_num(),
+            use_subject_per_year: false,
+            added_subject_ids: Vec::new(),
+            max_attempts: default_max_attempts(),
+            sync_mode: false,
+            nonstop_mode: false,
+            global_pick: false,
+            tag_ban: false,
+            use_hints: Vec::new(),
+            use_image_hint: None,
+            time_limit: None,
+            subject_search: false,
+            use_index: false,
+            index_id: None,
+            extra: Map::new(),
+        }
+    }
 }
 
 impl GameSettings {
@@ -399,41 +638,9 @@ impl GameSettings {
     }
 
     pub fn from_json(v: &Value) -> Self {
-        Self {
-            start_year: v
-                .get("startYear")
-                .and_then(|x| x.as_i64())
-                .map(|x| x as i32),
-            end_year: v.get("endYear").and_then(|x| x.as_i64()).map(|x| x as i32),
-            meta_tags: v
-                .get("metaTags")
-                .and_then(|x| x.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            top_n_subjects: v.get("topNSubjects").and_then(|x| x.as_i64()),
-            common_tags: v
-                .get("commonTags")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(true),
-            subject_tag_num: v.get("subjectTagNum").and_then(|x| x.as_u64()).unwrap_or(6) as usize,
-            character_tag_num: v
-                .get("characterTagNum")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(6) as usize,
-            main_character_only: v
-                .get("mainCharacterOnly")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(true),
-            character_num: v.get("characterNum").and_then(|x| x.as_u64()).unwrap_or(6) as usize,
-            use_subject_per_year: v
-                .get("useSubjectPerYear")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false),
-            added_subject_ids: v
+        let mut settings = serde_json::from_value::<Self>(v.clone()).unwrap_or_default();
+        if settings.added_subject_ids.is_empty() {
+            settings.added_subject_ids = v
                 .get("addedSubjects")
                 .and_then(|x| x.as_array())
                 .map(|subjects| {
@@ -446,7 +653,30 @@ impl GameSettings {
                         })
                         .collect()
                 })
-                .unwrap_or_default(),
+                .unwrap_or_default();
+        }
+        settings
+    }
+}
+
+impl CandidateCacheKey {
+    fn from_settings(settings: &GameSettings) -> Self {
+        let mut added_subject_ids = settings.added_subject_ids.clone();
+        added_subject_ids.sort_unstable();
+        added_subject_ids.dedup();
+
+        Self {
+            start_year: settings.start_year,
+            end_year: settings.end_year,
+            meta_tags: settings.meta_tags.clone(),
+            top_n_subjects: settings
+                .top_n_subjects
+                .filter(|n| *n > 0)
+                .map(|n| n.min(3000)),
+            main_character_only: settings.main_character_only,
+            character_num: settings.character_num.max(1).min(50),
+            use_subject_per_year: settings.use_subject_per_year,
+            added_subject_ids,
         }
     }
 }

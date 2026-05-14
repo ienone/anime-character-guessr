@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 use tracing::warn;
 
 pub mod archive;
@@ -76,7 +76,12 @@ lazy_static::lazy_static! {
     static ref PENDING_IMAGE_SOURCE: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
     // Same idea, but for subject images (independent namespace).
     static ref PENDING_SUBJECT_IMAGE_SOURCE: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
+    // Shared cap for external image-source resolution across characters and subjects.
+    static ref IMAGE_SOURCE_RESOLVE_SEMAPHORE: Semaphore = Semaphore::new(4);
 }
+
+const IMAGE_SOURCE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(4);
+const IMAGE_SOURCE_PERMIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// /api/* — game logic, leaderboard, stats
 pub fn api_routes(pools: Arc<DbPools>) -> Router {
@@ -147,13 +152,12 @@ pub fn image_routes(pools: Arc<DbPools>) -> Router {
         .with_state(pools)
 }
 
-/// GET /api/img/resolve/:id?waitMs=1200
+/// GET /api/img/resolve/:id
 ///
 /// JSON helper used by the client Image component:
 /// - If cached: returns `{ cached: true, imgUrl: "/img/{id}.webp" }`
-/// - If not cached and cannot fetch within wait window: returns HTTP 202 with
-///   `{ cached: false, imgUrl, sourceUrl }` so the client can show a placeholder
-///   and try loading `sourceUrl` directly.
+/// - If not cached: starts source resolution in the background and returns HTTP
+///   202 immediately. External image providers must not hold this request open.
 async fn resolve_character_image(
     State(pools): State<Arc<DbPools>>,
     Path(id): Path<i64>,
@@ -167,11 +171,6 @@ async fn resolve_character_image(
             .into_response();
     }
 
-    let wait_ms = q
-        .get("waitMs")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(1200)
-        .min(5000);
     let cached_only = q
         .get("cachedOnly")
         .map(|v| v == "1" || v == "true")
@@ -213,68 +212,28 @@ async fn resolve_character_image(
             .into_response();
     }
 
-    // 2) Resolve a usable source URL (app.sqlite mirror first; then BGM fallback).
-    let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools, id).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "cached": false,
-                "code": "NO_SOURCE",
-                "imgUrl": img_url,
-                "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
-            })),
-        )
-            .into_response();
-    };
-
-    let source_url = if !image_grid.trim().is_empty() {
-        image_grid
-    } else if !image_medium.trim().is_empty() {
-        image_medium
-    } else {
-        "https://lain.bgm.tv/pic/user/l/icon.jpg".to_string()
-    };
-
-    // 3) Kick off caching; wait briefly for UX, otherwise tell client to try direct.
     let pools_clone = Arc::clone(&pools);
-    let source_clone = source_url.clone();
-    let cache_key = id.to_string();
     tokio::spawn(async move {
-        utils::download_and_cache_image(cache_key, source_clone, pools_clone).await;
+        if let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools_clone, id).await
+        {
+            let source_url = if !image_grid.trim().is_empty() {
+                image_grid
+            } else {
+                image_medium
+            };
+            if !source_url.trim().is_empty() {
+                utils::download_and_cache_image(id.to_string(), source_url, pools_clone).await;
+            }
+        }
     });
-    tokio::time::sleep(Duration::from_millis(wait_ms.min(250))).await;
-
-    // Check again after the wait.
-    let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT local_path FROM image_cache WHERE id = ?1",
-                [id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .ok())
-    })
-    .await
-    {
-        Ok(Some(path)) => tokio::fs::metadata(path).await.is_ok(),
-        _ => false,
-    };
-
-    if cached {
-        return Json(json!({
-            "cached": true,
-            "imgUrl": img_url,
-        }))
-        .into_response();
-    }
 
     (
         StatusCode::ACCEPTED,
         Json(json!({
             "cached": false,
-            "code": "TIMEOUT",
+            "code": "SOURCE_PENDING",
             "imgUrl": img_url,
-            "sourceUrl": source_url,
+            "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
         })),
     )
         .into_response()
@@ -292,15 +251,28 @@ async fn resolve_character_image_source(
             .into_response();
     }
 
-    let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools, id).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "code": "NO_SOURCE",
-                "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
-            })),
-        )
-            .into_response();
+    let (image_medium, image_grid) = match ensure_image_source_cached_bounded(&pools, id).await {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "code": "NO_SOURCE",
+                    "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
+                })),
+            )
+                .into_response();
+        }
+        Err(()) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({
+                    "code": "SOURCE_TIMEOUT",
+                    "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
+                })),
+            )
+                .into_response();
+        }
     };
 
     let source_url = if !image_medium.trim().is_empty() {
@@ -312,7 +284,7 @@ async fn resolve_character_image_source(
     Json(json!({ "sourceUrl": source_url })).into_response()
 }
 
-/// GET /api/img/resolve/subject/:id?waitMs=1200
+/// GET /api/img/resolve/subject/:id
 /// Same helper as character image resolution, but backed by the subject image
 /// redirect API and stored under the `s:{id}` image-cache namespace.
 async fn resolve_subject_image(
@@ -328,11 +300,6 @@ async fn resolve_subject_image(
             .into_response();
     }
 
-    let wait_ms = q
-        .get("waitMs")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(1200)
-        .min(5000);
     let cached_only = q
         .get("cachedOnly")
         .map(|v| v == "1" || v == "true")
@@ -376,65 +343,29 @@ async fn resolve_subject_image(
             .into_response();
     }
 
-    let Some((image_medium, image_grid)) = ensure_subject_image_source_cached(&pools, id).await
-    else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "cached": false,
-                "code": "NO_SOURCE",
-                "imgUrl": img_url,
-                "sourceUrl": "",
-            })),
-        )
-            .into_response();
-    };
-
-    let source_url = if !image_grid.trim().is_empty() {
-        image_grid
-    } else {
-        image_medium
-    };
-
     let pools_clone = Arc::clone(&pools);
-    let source_clone = source_url.clone();
-    let cache_key_for_dl = cache_key.clone();
     tokio::spawn(async move {
-        utils::download_and_cache_image(cache_key_for_dl, source_clone, pools_clone).await;
+        if let Some((image_medium, image_grid)) =
+            ensure_subject_image_source_cached(&pools_clone, id).await
+        {
+            let source_url = if !image_grid.trim().is_empty() {
+                image_grid
+            } else {
+                image_medium
+            };
+            if !source_url.trim().is_empty() {
+                utils::download_and_cache_image(cache_key, source_url, pools_clone).await;
+            }
+        }
     });
-    tokio::time::sleep(Duration::from_millis(wait_ms.min(250))).await;
-
-    let cached_key = cache_key.clone();
-    let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT local_path FROM image_cache WHERE id = ?1",
-                [cached_key],
-                |row| row.get::<_, String>(0),
-            )
-            .ok())
-    })
-    .await
-    {
-        Ok(Some(path)) => tokio::fs::metadata(path).await.is_ok(),
-        _ => false,
-    };
-
-    if cached {
-        return Json(json!({
-            "cached": true,
-            "imgUrl": img_url,
-        }))
-        .into_response();
-    }
 
     (
         StatusCode::ACCEPTED,
         Json(json!({
             "cached": false,
-            "code": "TIMEOUT",
+            "code": "SOURCE_PENDING",
             "imgUrl": img_url,
-            "sourceUrl": source_url,
+            "sourceUrl": "",
         })),
     )
         .into_response()
@@ -452,17 +383,30 @@ async fn resolve_subject_image_source(
             .into_response();
     }
 
-    let Some((image_medium, image_grid)) = ensure_subject_image_source_cached(&pools, id).await
-    else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "code": "NO_SOURCE",
-                "sourceUrl": "",
-            })),
-        )
-            .into_response();
-    };
+    let (image_medium, image_grid) =
+        match ensure_subject_image_source_cached_bounded(&pools, id).await {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "code": "NO_SOURCE",
+                        "sourceUrl": "",
+                    })),
+                )
+                    .into_response();
+            }
+            Err(()) => {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(json!({
+                        "code": "SOURCE_TIMEOUT",
+                        "sourceUrl": "",
+                    })),
+                )
+                    .into_response();
+            }
+        };
 
     let source_url = if !image_medium.trim().is_empty() {
         image_medium
@@ -474,20 +418,23 @@ async fn resolve_subject_image_source(
 }
 
 /// POST /api/game/random
-/// Pick a random character based on game settings — fully in-memory, zero DB queries.
+/// Pick a random character based on game settings from archive.sqlite.
 async fn get_random_character(
     State(pools): State<Arc<DbPools>>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let settings = game::GameSettings::from_json(&body);
-    let pools_clone = Arc::clone(&pools);
-
-    // spawn_blocking to avoid blocking the async executor during tag aggregation
-    let result =
-        tokio::task::spawn_blocking(move || game::random_character(&pools_clone, &settings)).await;
+    let pools_for_query = Arc::clone(&pools);
+    let result = db::with_archive_db_timed(
+        pools_for_query,
+        "game_random_character",
+        Duration::from_secs(2),
+        move |conn| game::random_character_with_conn(conn, &settings),
+    )
+    .await;
 
     match result {
-        Ok(Ok((char_id, mut payload))) => {
+        Ok((char_id, mut payload)) => {
             // Fill animeVAs via persisted mirror cache; BGM is used only as fallback and then stored in app.sqlite.
             if let Some(vas) = ensure_vas_cached(&pools, char_id).await {
                 if let Value::Object(ref mut obj) = payload {
@@ -499,11 +446,6 @@ async fn get_random_character(
             }
             Json(payload).into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -513,7 +455,7 @@ async fn get_random_character(
 }
 
 /// POST /api/game/character  { id: number, settings: {...} }
-/// Return full gameplay payload for a specific character — fully in-memory.
+/// Return full gameplay payload for a specific character from archive.sqlite.
 async fn get_character_by_id(
     State(pools): State<Arc<DbPools>>,
     Json(body): Json<Value>,
@@ -529,15 +471,17 @@ async fn get_character_by_id(
         }
     };
     let settings = game::GameSettings::from_json(body.get("settings").unwrap_or(&json!({})));
-    let pools_clone = Arc::clone(&pools);
-
-    let result = tokio::task::spawn_blocking(move || {
-        game::character_by_id(&pools_clone, char_id, &settings)
-    })
+    let pools_for_query = Arc::clone(&pools);
+    let result = db::with_archive_db_timed(
+        pools_for_query,
+        "game_character_by_id",
+        Duration::from_secs(2),
+        move |conn| game::character_by_id_with_conn(conn, char_id, &settings),
+    )
     .await;
 
     match result {
-        Ok(Ok(mut payload)) => {
+        Ok(mut payload) => {
             if let Some(vas) = ensure_vas_cached(&pools, char_id).await {
                 if let Value::Object(ref mut obj) = payload {
                     obj.insert(
@@ -548,11 +492,6 @@ async fn get_character_by_id(
             }
             Json(payload).into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -911,6 +850,23 @@ async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(St
     }
     let _cleanup = CleanupPendingImageSource(id);
 
+    let _permit = match tokio::time::timeout(
+        IMAGE_SOURCE_PERMIT_TIMEOUT,
+        IMAGE_SOURCE_RESOLVE_SEMAPHORE.acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            warn!(
+                id,
+                "character image source resolution skipped: concurrency limit reached"
+            );
+            let _ = tx.send(true);
+            return load_cached_image_source(pools, id).await;
+        }
+    };
+
     // 3) BGM image endpoint fallback (preferred): capture Location without downloading the image.
     let (medium, grid) = tokio::join!(
         bgm_get_character_image_location(id, "medium"),
@@ -936,6 +892,24 @@ async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(St
 
     let _ = tx.send(true);
     None
+}
+
+async fn ensure_image_source_cached_bounded(
+    pools: &Arc<DbPools>,
+    id: i64,
+) -> Result<Option<(String, String)>, ()> {
+    match tokio::time::timeout(
+        IMAGE_SOURCE_RESOLVE_TIMEOUT,
+        ensure_image_source_cached(pools, id),
+    )
+    .await
+    {
+        Ok(source) => Ok(source),
+        Err(_) => {
+            warn!(id, "character image source resolution timed out");
+            Err(())
+        }
+    }
 }
 
 async fn ensure_vas_cached(pools: &Arc<DbPools>, id: i64) -> Option<Vec<String>> {
@@ -984,27 +958,22 @@ async fn get_character_image(
         }
     }
 
-    // 2. Cache miss — resolve source URL (app.sqlite mirror -> legacy json -> BGM API fallback).
-    let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools, id).await else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-    let target_url = if !image_grid.trim().is_empty() {
-        image_grid
-    } else {
-        image_medium
-    };
-
-    // 3. Download+transcode in background; never let an origin download hold /img.
     let pools_clone = Arc::clone(&pools);
-    let url_clone = target_url.clone();
-    let cache_key = id.to_string();
     tokio::spawn(async move {
-        utils::download_and_cache_image(cache_key, url_clone, pools_clone).await;
+        if let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools_clone, id).await
+        {
+            let source_url = if !image_grid.trim().is_empty() {
+                image_grid
+            } else {
+                image_medium
+            };
+            if !source_url.trim().is_empty() {
+                utils::download_and_cache_image(id.to_string(), source_url, pools_clone).await;
+            }
+        }
     });
 
-    // Cache not ready: redirect to origin URL (client can still use /api/img/resolve for UX).
-    Redirect::temporary(&target_url).into_response()
+    Redirect::temporary("https://lain.bgm.tv/pic/user/l/icon.jpg").into_response()
 }
 
 // ─── Subject image proxy ─────────────────────────────────────────────────────
@@ -1192,6 +1161,23 @@ async fn ensure_subject_image_source_cached(
     }
     let _cleanup = CleanupPendingSubjectImageSource(id);
 
+    let _permit = match tokio::time::timeout(
+        IMAGE_SOURCE_PERMIT_TIMEOUT,
+        IMAGE_SOURCE_RESOLVE_SEMAPHORE.acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            warn!(
+                id,
+                "subject image source resolution skipped: concurrency limit reached"
+            );
+            let _ = tx.send(true);
+            return load_cached_subject_image_source(pools, id).await;
+        }
+    };
+
     let (medium, grid) = tokio::join!(
         bgm_get_subject_image_location(id, "common"),
         bgm_get_subject_image_location(id, "grid"),
@@ -1216,6 +1202,24 @@ async fn ensure_subject_image_source_cached(
 
     let _ = tx.send(true);
     None
+}
+
+async fn ensure_subject_image_source_cached_bounded(
+    pools: &Arc<DbPools>,
+    id: i64,
+) -> Result<Option<(String, String)>, ()> {
+    match tokio::time::timeout(
+        IMAGE_SOURCE_RESOLVE_TIMEOUT,
+        ensure_subject_image_source_cached(pools, id),
+    )
+    .await
+    {
+        Ok(source) => Ok(source),
+        Err(_) => {
+            warn!(id, "subject image source resolution timed out");
+            Err(())
+        }
+    }
 }
 
 async fn get_subject_image(
@@ -1259,25 +1263,22 @@ async fn get_subject_image(
         }
     }
 
-    // 2. Cache miss — resolve source URL via BGM image redirect endpoint.
-    let Some((image_medium, image_grid)) = ensure_subject_image_source_cached(&pools, id).await
-    else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-    let target_url = if !image_grid.trim().is_empty() {
-        image_grid
-    } else {
-        image_medium
-    };
-
-    // 3. Download+transcode in background; never let an origin download hold /img.
     let pools_clone = Arc::clone(&pools);
-    let url_clone = target_url.clone();
     let cache_key_for_dl = cache_key.clone();
     tokio::spawn(async move {
-        utils::download_and_cache_image(cache_key_for_dl, url_clone, pools_clone).await;
+        if let Some((image_medium, image_grid)) =
+            ensure_subject_image_source_cached(&pools_clone, id).await
+        {
+            let source_url = if !image_grid.trim().is_empty() {
+                image_grid
+            } else {
+                image_medium
+            };
+            if !source_url.trim().is_empty() {
+                utils::download_and_cache_image(cache_key_for_dl, source_url, pools_clone).await;
+            }
+        }
     });
 
-    Redirect::temporary(&target_url).into_response()
+    StatusCode::NOT_FOUND.into_response()
 }
