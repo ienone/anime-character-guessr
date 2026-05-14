@@ -12,7 +12,7 @@ use state::{
     AvatarId, CharacterPayload, NonstopWinner, NonstopWinnerBonuses, Player, Room, RoomCommand,
     ServerState, TagBanEntry, WinnerMarker,
 };
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
@@ -372,7 +372,7 @@ fn avatar_to_string(value: &Option<AvatarId>) -> String {
         .unwrap_or_default()
 }
 
-fn broadcast_players(io: &SocketIo, room_id: &str, room: &mut Room, extra: Option<Value>) {
+fn prepare_players_broadcast(room: &mut Room, extra: Option<Value>) -> Value {
     // Coalesce short bursts of updatePlayers broadcasts for smoother UI.
     const COOLDOWN_MS: i64 = 120;
     let now = Utc::now().timestamp_millis();
@@ -423,26 +423,32 @@ fn broadcast_players(io: &SocketIo, room_id: &str, room: &mut Room, extra: Optio
         }
     }
 
-    emit_to_room(
-        io,
-        room_id.to_string(),
-        "updatePlayers",
-        Value::Object(payload),
-    );
+    Value::Object(payload)
 }
 
-fn flush_players_if_due(io: &SocketIo, room_id: &str, room: &mut Room) {
+fn broadcast_players(io: &SocketIo, room_id: &str, room: &mut Room, extra: Option<Value>) {
+    let payload = prepare_players_broadcast(room, extra);
+    emit_to_room(io, room_id.to_string(), "updatePlayers", payload);
+}
+
+fn prepare_players_flush_if_due(room: &mut Room) -> Option<Value> {
     let Some(due_at) = room._player_broadcast_due_at else {
-        return;
+        return None;
     };
     let now = Utc::now().timestamp_millis();
     if now < due_at {
-        return;
+        return None;
     }
     // Clear due flag first to avoid recursion loops.
     room._player_broadcast_due_at = None;
     // Flush pending extras even if no new extra was requested.
-    broadcast_players(io, room_id, room, None);
+    Some(prepare_players_broadcast(room, None))
+}
+
+fn flush_players_if_due(io: &SocketIo, room_id: &str, room: &mut Room) {
+    if let Some(payload) = prepare_players_flush_if_due(room) {
+        emit_to_room(io, room_id.to_string(), "updatePlayers", payload);
+    }
 }
 
 fn broadcast_players_force(io: &SocketIo, room_id: &str, room: &mut Room) {
@@ -574,22 +580,70 @@ fn emit_game_start_to_room_sockets(io: &SocketIo, room_id: &str, room: &Room) {
     }
 }
 
-fn emit_answer_reveal(socket: &SocketRef, room: &Room, player_id: &str) {
-    let Some(game) = room.current_game.as_ref() else {
-        return;
-    };
-    let Some(player) = room.players.iter().find(|p| p.id == player_id) else {
-        return;
-    };
-    if visible_answer_for(game, Some(player)).is_null() {
-        return;
+fn emit_join_room_success(
+    socket: &SocketRef,
+    io: &SocketIo,
+    state: &ServerState,
+    room_id: &str,
+    room: &Room,
+    player_idx: usize,
+    previous_socket_id: Option<String>,
+    notify_lobby: bool,
+) {
+    let _ = socket.join(room_id.to_string());
+    if let Some(previous_socket_id) = previous_socket_id {
+        let _ = unbind_socket_from_room(state, &previous_socket_id);
     }
-    let _ = socket.emit(
-        "answerReveal",
-        &json!({
-            "character": game.character,
+    if let Some(player) = room.players.get(player_idx) {
+        bind_socket_to_player(state, room_id, player);
+    }
+    emit_to_room(
+        io,
+        room_id.to_string(),
+        "updatePlayers",
+        json!({
+            "players": room.players.clone(),
+            "isPublic": room.is_public,
+            "answerSetterId": room.answer_setter_id.clone(),
         }),
     );
+    let _ = socket.emit(
+        "roomNameUpdated",
+        &json!({ "roomName": room.room_name.clone() }),
+    );
+
+    if notify_lobby {
+        broadcast_lobby_rooms_updated(io);
+    }
+
+    if let Some(ref game) = room.current_game {
+        emit_game_start_snapshot(socket, room, Some(player_idx));
+        let _ = socket.emit(
+            "guessHistoryUpdate",
+            &json!({
+                "guesses": game.guesses,
+            }),
+        );
+        let _ = socket.emit(
+            "tagBanStateUpdate",
+            &json!({
+                "tagBanState": game.tag_ban_state,
+            }),
+        );
+    }
+}
+
+fn answer_reveal_for(room: &Room, player_id: &str) -> Option<CharacterPayload> {
+    let Some(game) = room.current_game.as_ref() else {
+        return None;
+    };
+    let Some(player) = room.players.iter().find(|p| p.id == player_id) else {
+        return None;
+    };
+    if visible_answer_for(game, Some(player)).is_null() {
+        return None;
+    }
+    Some(game.character.clone())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -634,6 +688,28 @@ enum PlayerGuessCommandResult {
         is_partial_correct: bool,
         answer_reveal: Option<CharacterPayload>,
     },
+}
+
+#[derive(Debug)]
+enum JoinRoomCommandResult {
+    Error {
+        message: &'static str,
+        pre_flush: Option<Value>,
+    },
+    Joined {
+        room: Room,
+        player_idx: usize,
+        previous_socket_id: Option<String>,
+        notify_lobby: bool,
+        pre_flush: Option<Value>,
+    },
+}
+
+#[derive(Debug)]
+struct DisconnectCommandResult {
+    host_transferred: Option<Value>,
+    wait_for_answer_canceled: Option<Value>,
+    players_payload: Value,
 }
 
 fn build_public_guess(guess_data: &CharacterPayload, feedback: &Value) -> PublicGuess {
@@ -893,236 +969,241 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                 }
 
                 // Room exists, mutate through the room command boundary.
-                let _ = state
-                    .run_room_command(&room_id, RoomCommand::SocketEvent("joinRoom"), |room| {
-                flush_players_if_due(&io_clone, &room_id, room);
-                room.last_active = Utc::now().timestamp_millis();
-
-                if room.current_game.is_some() {
-                    info!("[join observer] room {} in progress", room_id);
-                }
-
-                let username_lower = username.to_lowercase();
-                let existing_idx = room
-                    .players
+                let socket_id = socket.id.to_string();
+                let active_socket_ids: HashSet<String> = io_clone
+                    .within(room_id.clone())
+                    .sockets()
                     .iter()
-                    .position(|p| p.stable_player_id == incoming_stable_player_id)
-                    .or_else(|| {
-                        room.players
+                    .map(|s| s.id.to_string())
+                    .collect();
+                let result = state
+                    .run_room_command(&room_id, RoomCommand::SocketEvent("joinRoom"), |room| {
+                        let pre_flush = prepare_players_flush_if_due(room);
+                        room.last_active = Utc::now().timestamp_millis();
+
+                        if room.current_game.is_some() {
+                            info!("[join observer] room {} in progress", room_id);
+                        }
+
+                        let username_lower = username.to_lowercase();
+                        let existing_idx = room
+                            .players
                             .iter()
-                            .position(|p| p.username.to_lowercase() == username_lower)
-                    });
+                            .position(|p| p.stable_player_id == incoming_stable_player_id)
+                            .or_else(|| {
+                                room.players
+                                    .iter()
+                                    .position(|p| p.username.to_lowercase() == username_lower)
+                            });
 
-                if let Some(idx) = existing_idx {
-                    if room.players[idx].id == socket.id.to_string() {
-                        let _ = socket.join(room_id.clone());
-                        bind_socket_to_player(&state, &room_id, &room.players[idx]);
-                        broadcast_players_force(&io_clone, &room_id, room);
-                        let _ = socket.emit("roomNameUpdated", &json!({ "roomName": room.room_name }));
-
-                        if let Some(ref game) = room.current_game {
-                            emit_game_start_snapshot(&socket, room, Some(idx));
-                            let _ = socket.emit("guessHistoryUpdate", &json!({
-                                "guesses": game.guesses,
-                            }));
-                            let _ = socket.emit("tagBanStateUpdate", &json!({
-                                "tagBanState": game.tag_ban_state,
-                            }));
-                        }
-
-                        info!("{} rejoined room {} idempotently", username, room_id);
-                        return;
-                    }
-
-                    // 2. Reconnection Logic
-                    if room.players[idx].disconnected {
-                        let prev_avatar_id = room.players[idx].avatar_id.clone();
-
-                        let is_incoming_empty = is_empty_avatar(&incoming_avatar_id);
-                        let is_prev_empty = is_empty_avatar(&prev_avatar_id);
-
-                        // Reject ONLY IF both are explicitly provided and they mismatch.
-                        // If prev was empty, we ACCEPT the new incoming avatar (user drew it after reconnecting).
-                        if !is_incoming_empty && !is_prev_empty {
-                            let prev_str = avatar_to_string(&prev_avatar_id);
-                            let incoming_str = avatar_to_string(&incoming_avatar_id);
-                            if prev_str != incoming_str {
-                                warn!("avatar mismatch for {} during reconnect: expected {} got {}", username, prev_str, incoming_str);
-                                emit_error(&socket, "joinRoom", "头像信息和原玩家不一致，无法作为同一玩家重连；请换一个名字加入");
-                                return;
+                        if let Some(idx) = existing_idx {
+                            if room.players[idx].id == socket_id {
+                                info!("{} rejoined room {} idempotently", username, room_id);
+                                return JoinRoomCommandResult::Joined {
+                                    room: room.clone(),
+                                    player_idx: idx,
+                                    previous_socket_id: None,
+                                    notify_lobby: false,
+                                    pre_flush,
+                                };
                             }
-                        }
 
-                        let previous_socket_id = room.players[idx].id.clone();
-                        room.players[idx].id = socket.id.to_string();
-                        room.players[idx].disconnected = false;
-                        let _ = unbind_socket_from_room(&state, &previous_socket_id);
-                        state::ensure_player_stable_id(&room_id, &mut room.players[idx]);
+                            if room.players[idx].disconnected {
+                                let prev_avatar_id = room.players[idx].avatar_id.clone();
 
-                        // If incoming has a new avatar, update it (useful if prev was empty and they just drew one)
-                        if !is_incoming_empty {
-                            room.players[idx].avatar_id = incoming_avatar_id.clone();
-                            if incoming_avatar_image.is_some() {
-                                room.players[idx].avatar_image = incoming_avatar_image.clone();
-                            }
-                        }
+                                let is_incoming_empty = is_empty_avatar(&incoming_avatar_id);
+                                let is_prev_empty = is_empty_avatar(&prev_avatar_id);
 
-                        // Update revealer IDs in tagBanState if game is active
-                        if let Some(ref mut game) = room.current_game {
-                            let new_id = socket.id.to_string();
-
-                            let replace_revealers = |states: &mut Vec<TagBanEntry>| {
-                                for entry in states.iter_mut() {
-                                    for rev in entry.revealer.iter_mut() {
-                                        if rev == &previous_socket_id {
-                                            *rev = new_id.clone();
-                                        }
+                                if !is_incoming_empty && !is_prev_empty {
+                                    let prev_str = avatar_to_string(&prev_avatar_id);
+                                    let incoming_str = avatar_to_string(&incoming_avatar_id);
+                                    if prev_str != incoming_str {
+                                        warn!(
+                                            "avatar mismatch for {} during reconnect: expected {} got {}",
+                                            username, prev_str, incoming_str
+                                        );
+                                        return JoinRoomCommandResult::Error {
+                                            message: "头像信息和原玩家不一致，无法作为同一玩家重连；请换一个名字加入",
+                                            pre_flush,
+                                        };
                                     }
                                 }
-                            };
 
-                            replace_revealers(&mut game.tag_ban_state);
-                            replace_revealers(&mut game.tag_ban_state_pending);
-                        }
+                                let previous_socket_id = room.players[idx].id.clone();
+                                room.players[idx].id = socket_id.clone();
+                                room.players[idx].disconnected = false;
+                                state::ensure_player_stable_id(&room_id, &mut room.players[idx]);
 
-                        let _ = socket.join(room_id.clone());
-                        bind_socket_to_player(&state, &room_id, &room.players[idx]);
-                        broadcast_players_force(&io_clone, &room_id, room);
-                        let _ = socket.emit("roomNameUpdated", &json!({ "roomName": room.room_name }));
-                        broadcast_lobby_rooms_updated(&io_clone);
-
-                        // Emit snapshot
-                        if let Some(ref game) = room.current_game {
-                            emit_game_start_snapshot(&socket, room, Some(idx));
-                            let _ = socket.emit("guessHistoryUpdate", &json!({
-                                "guesses": game.guesses,
-                            }));
-                            let _ = socket.emit("tagBanStateUpdate", &json!({
-                                "tagBanState": game.tag_ban_state,
-                            }));
-                            // Skipping broadcastState for brevity, will implement full state sync later
-                        }
-
-                        info!("{} reconnected to room {}", username, room_id);
-                        return;
-                    } else {
-                        // Check if socket is stale
-                        let sockets = io_clone.within(room_id.clone()).sockets();
-                        let is_stale = !sockets.iter().any(|s| s.id.to_string() == room.players[idx].id);
-
-                        if is_stale {
-                            warn!("stale socket detected for {}; forcing reconnect bind", username);
-
-                            let previous_socket_id = room.players[idx].id.clone();
-                            room.players[idx].id = socket.id.to_string();
-                            room.players[idx].disconnected = false;
-                            let _ = unbind_socket_from_room(&state, &previous_socket_id);
-                            state::ensure_player_stable_id(&room_id, &mut room.players[idx]);
-
-                            let is_incoming_empty = is_empty_avatar(&incoming_avatar_id);
-                            if !is_incoming_empty {
-                                room.players[idx].avatar_id = incoming_avatar_id.clone();
-                                if incoming_avatar_image.is_some() {
-                                    room.players[idx].avatar_image = incoming_avatar_image.clone();
+                                if !is_incoming_empty {
+                                    room.players[idx].avatar_id = incoming_avatar_id.clone();
+                                    if incoming_avatar_image.is_some() {
+                                        room.players[idx].avatar_image =
+                                            incoming_avatar_image.clone();
+                                    }
                                 }
-                            }
 
-                            if let Some(ref mut game) = room.current_game {
-                                let new_id = socket.id.to_string();
+                                if let Some(ref mut game) = room.current_game {
+                                    let new_id = socket_id.clone();
 
-                                let replace_revealers = |states: &mut Vec<TagBanEntry>| {
-                                    for entry in states.iter_mut() {
-                                        for rev in entry.revealer.iter_mut() {
-                                            if rev == &previous_socket_id {
-                                                *rev = new_id.clone();
+                                    let replace_revealers = |states: &mut Vec<TagBanEntry>| {
+                                        for entry in states.iter_mut() {
+                                            for rev in entry.revealer.iter_mut() {
+                                                if rev == &previous_socket_id {
+                                                    *rev = new_id.clone();
+                                                }
                                             }
                                         }
-                                    }
+                                    };
+
+                                    replace_revealers(&mut game.tag_ban_state);
+                                    replace_revealers(&mut game.tag_ban_state_pending);
+                                }
+
+                                info!("{} reconnected to room {}", username, room_id);
+                                return JoinRoomCommandResult::Joined {
+                                    room: room.clone(),
+                                    player_idx: idx,
+                                    previous_socket_id: Some(previous_socket_id),
+                                    notify_lobby: true,
+                                    pre_flush,
                                 };
-                                replace_revealers(&mut game.tag_ban_state);
-                                replace_revealers(&mut game.tag_ban_state_pending);
                             }
 
-                            let _ = socket.join(room_id.clone());
-                            bind_socket_to_player(&state, &room_id, &room.players[idx]);
-                            broadcast_players_force(&io_clone, &room_id, room);
-                            let _ = socket.emit("roomNameUpdated", &json!({ "roomName": room.room_name }));
-                            broadcast_lobby_rooms_updated(&io_clone);
+                            let is_stale = !active_socket_ids.contains(&room.players[idx].id);
 
-                            if let Some(ref game) = room.current_game {
-                                emit_game_start_snapshot(&socket, room, Some(idx));
-                                let _ = socket.emit("guessHistoryUpdate", &json!({
-                                    "guesses": game.guesses,
-                                }));
-                                let _ = socket.emit("tagBanStateUpdate", &json!({
-                                    "tagBanState": game.tag_ban_state,
-                                }));
+                            if is_stale {
+                                warn!("stale socket detected for {}; forcing reconnect bind", username);
+
+                                let previous_socket_id = room.players[idx].id.clone();
+                                room.players[idx].id = socket_id.clone();
+                                room.players[idx].disconnected = false;
+                                state::ensure_player_stable_id(&room_id, &mut room.players[idx]);
+
+                                let is_incoming_empty = is_empty_avatar(&incoming_avatar_id);
+                                if !is_incoming_empty {
+                                    room.players[idx].avatar_id = incoming_avatar_id.clone();
+                                    if incoming_avatar_image.is_some() {
+                                        room.players[idx].avatar_image =
+                                            incoming_avatar_image.clone();
+                                    }
+                                }
+
+                                if let Some(ref mut game) = room.current_game {
+                                    let new_id = socket_id.clone();
+
+                                    let replace_revealers = |states: &mut Vec<TagBanEntry>| {
+                                        for entry in states.iter_mut() {
+                                            for rev in entry.revealer.iter_mut() {
+                                                if rev == &previous_socket_id {
+                                                    *rev = new_id.clone();
+                                                }
+                                            }
+                                        }
+                                    };
+                                    replace_revealers(&mut game.tag_ban_state);
+                                    replace_revealers(&mut game.tag_ban_state_pending);
+                                }
+
+                                info!("{} rebound to room {} from stale socket", username, room_id);
+                                return JoinRoomCommandResult::Joined {
+                                    room: room.clone(),
+                                    player_idx: idx,
+                                    previous_socket_id: Some(previous_socket_id),
+                                    notify_lobby: true,
+                                    pre_flush,
+                                };
                             }
-                            info!("{} rebound to room {} from stale socket", username, room_id);
-                            return;
+
+                            return JoinRoomCommandResult::Error {
+                                message: "这个名字已经在房间里，请换一个名字；如果这是你自己的旧标签页，请关闭旧标签页或刷新当前页",
+                                pre_flush,
+                            };
                         }
 
-                        emit_error(&socket, "joinRoom", "这个名字已经在房间里，请换一个名字；如果这是你自己的旧标签页，请关闭旧标签页或刷新当前页");
-                        return;
-                    }
-                }
+                        if let Some(ref inc_id) = incoming_avatar_id {
+                            let inc_str = inc_id.as_key_string();
+                            let is_taken = room.players.iter().any(|p| {
+                                !p.disconnected
+                                    && p.avatar_id.is_some()
+                                    && p.avatar_id.as_ref().is_some_and(|avatar| {
+                                        !avatar.is_empty() && avatar.as_key_string() == inc_str
+                                    })
+                            });
+                            if is_taken {
+                                return JoinRoomCommandResult::Error {
+                                    message: "头像已被房间内其他玩家使用，请重新抽取头像或换一个名字",
+                                    pre_flush,
+                                };
+                            }
+                        }
 
-                // 3. New Player joining existing room
-                if let Some(ref inc_id) = incoming_avatar_id {
-                    let inc_str = inc_id.as_key_string();
-                    let is_taken = room.players.iter().any(|p| {
-                        !p.disconnected &&
-                        p.avatar_id.is_some() &&
-                        p.avatar_id.as_ref().is_some_and(|avatar| !avatar.is_empty() && avatar.as_key_string() == inc_str)
-                    });
-                    if is_taken {
-                        emit_error(&socket, "joinRoom", "头像已被房间内其他玩家使用，请重新抽取头像或换一个名字");
-                        return;
-                    }
-                }
+                        let new_player = Player {
+                            id: socket_id,
+                            stable_player_id: incoming_stable_player_id,
+                            username: username.clone(),
+                            is_host: false,
+                            score: 0,
+                            ready: false,
+                            attempt_marks: Vec::new(),
+                            round_result: None,
+                            message: String::new(),
+                            team: if room.current_game.is_some() {
+                                Some("0".to_string())
+                            } else {
+                                None
+                            },
+                            joined_during_game: Some(room.current_game.is_some()),
+                            disconnected: false,
+                            avatar_id: incoming_avatar_id,
+                            avatar_image: incoming_avatar_image,
+                            temp_observer: false,
+                            sync_completed_round: None,
+                            is_answer_setter: false,
+                        };
 
-                let new_player = Player {
-                    id: socket.id.to_string(),
-                    stable_player_id: incoming_stable_player_id,
-                    username: username.clone(),
-                    is_host: false,
-                    score: 0,
-                    ready: false,
-                    attempt_marks: Vec::new(),
-                    round_result: None,
-                    message: String::new(),
-                    team: if room.current_game.is_some() { Some("0".to_string()) } else { None },
-                    joined_during_game: Some(room.current_game.is_some()),
-                    disconnected: false,
-                    avatar_id: incoming_avatar_id,
-                    avatar_image: incoming_avatar_image,
-                    temp_observer: false,
-                    sync_completed_round: None,
-                    is_answer_setter: false,
-                };
-
-                room.players.push(new_player);
-                let _ = socket.join(room_id.clone());
-                let new_idx = room.players.len().saturating_sub(1);
-                bind_socket_to_player(&state, &room_id, &room.players[new_idx]);
-
-                broadcast_players_force(&io_clone, &room_id, room);
-                let _ = socket.emit("roomNameUpdated", &json!({ "roomName": room.room_name }));
-                broadcast_lobby_rooms_updated(&io_clone);
-
-                if let Some(ref game) = room.current_game {
-                    emit_game_start_snapshot(&socket, room, Some(new_idx));
-                    let _ = socket.emit("guessHistoryUpdate", &json!({
-                        "guesses": game.guesses,
-                    }));
-                    let _ = socket.emit("tagBanStateUpdate", &json!({
-                        "tagBanState": game.tag_ban_state,
-                    }));
-                }
-
-                info!("{} joined room {}", username, room_id);
+                        room.players.push(new_player);
+                        let new_idx = room.players.len().saturating_sub(1);
+                        info!("{} joined room {}", username, room_id);
+                        JoinRoomCommandResult::Joined {
+                            room: room.clone(),
+                            player_idx: new_idx,
+                            previous_socket_id: None,
+                            notify_lobby: true,
+                            pre_flush,
+                        }
                     })
                     .await;
+
+                match result {
+                    Some(JoinRoomCommandResult::Joined {
+                        room,
+                        player_idx,
+                        previous_socket_id,
+                        notify_lobby,
+                        pre_flush,
+                    }) => {
+                        if let Some(payload) = pre_flush {
+                            emit_to_room(&io_clone, room_id.clone(), "updatePlayers", payload);
+                        }
+                        emit_join_room_success(
+                            &socket,
+                            &io_clone,
+                            &state,
+                            &room_id,
+                            &room,
+                            player_idx,
+                            previous_socket_id,
+                            notify_lobby,
+                        );
+                    }
+                    Some(JoinRoomCommandResult::Error { message, pre_flush }) => {
+                        if let Some(payload) = pre_flush {
+                            emit_to_room(&io_clone, room_id.clone(), "updatePlayers", payload);
+                        }
+                        emit_error(&socket, "joinRoom", message);
+                    }
+                    None => {}
+                }
             }
         });
 
@@ -1139,11 +1220,14 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
             let Some(room_id) = unbind_socket_from_room(&state, &socket_id) else {
                 return;
             };
-            let _ = state
+            let result = state
                 .run_room_command(&room_id, RoomCommand::SocketEvent("disconnect"), |room| {
                     let Some(idx) = room.players.iter().position(|p| p.id == socket_id) else {
-                        return;
+                        return None;
                     };
+
+                    let mut host_transferred = None;
+                    let mut wait_for_answer_canceled = None;
 
                     if room.host == socket_id {
                         if let Some((new_host_id, new_host_name)) = room
@@ -1164,16 +1248,11 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                             room.players[idx].is_host = false;
                             room.players[idx].disconnected = true;
 
-                            emit_to_room(
-                                &io_clone,
-                                room_id.clone(),
-                                "hostTransferred",
-                                json!({
+                            host_transferred = Some(json!({
                                     "oldHostName": old_host_name,
                                     "newHostId": new_host_id,
                                     "newHostName": new_host_name
-                                }),
-                            );
+                            }));
                         } else {
                             // No one else left, wait for cleanup or remove.
                             room.players[idx].disconnected = true;
@@ -1183,17 +1262,12 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                         if room.answer_setter_id.as_deref() == Some(socket_id.as_str()) {
                             room.answer_setter_id = None;
                             room.waiting_for_answer = false;
-                            emit_to_room(
-                                &io_clone,
-                                room_id.clone(),
-                                "waitForAnswerCanceled",
-                                json!({
+                            wait_for_answer_canceled = Some(json!({
                                     "message": format!(
                                         "指定的出题人 {} 已离开，等待被取消",
                                         room.players[idx].username
                                     )
-                                }),
-                            );
+                            }));
                         }
                     }
 
@@ -1201,10 +1275,30 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                         game.sync_players_completed.remove(&socket_id);
                     }
 
-                    broadcast_players_force(&io_clone, &room_id, room);
-                    broadcast_lobby_rooms_updated(&io_clone);
+                    let players_payload =
+                        prepare_players_broadcast(room, Some(json!({ "forceImmediate": true })));
+                    Some(DisconnectCommandResult {
+                        host_transferred,
+                        wait_for_answer_canceled,
+                        players_payload,
+                    })
                 })
                 .await;
+            if let Some(Some(result)) = result {
+                if let Some(payload) = result.host_transferred {
+                    emit_to_room(&io_clone, room_id.clone(), "hostTransferred", payload);
+                }
+                if let Some(payload) = result.wait_for_answer_canceled {
+                    emit_to_room(&io_clone, room_id.clone(), "waitForAnswerCanceled", payload);
+                }
+                emit_to_room(
+                    &io_clone,
+                    room_id.clone(),
+                    "updatePlayers",
+                    result.players_payload,
+                );
+                broadcast_lobby_rooms_updated(&io_clone);
+            }
         });
     });
 }
@@ -2402,22 +2496,19 @@ fn register_room_handlers(
                     .unwrap_or("")
                     .to_string();
                 let actor_id = socket.id.to_string();
-                let _ = state
+                let result = state
                     .run_room_command(&room_id, RoomCommand::SocketEvent("nonstopWin"), |room| {
                         let mut is_big_win = false;
                         room.last_active = Utc::now().timestamp_millis();
                         if room.current_game.is_none() {
-                            emit_error(&socket, "nonstopWin", "房间不存在或游戏未开始");
-                            return;
+                            return Err("房间不存在或游戏未开始");
                         }
                         let Some(player_idx) = room.players.iter().position(|p| p.id == actor_id)
                         else {
-                            emit_error(&socket, "nonstopWin", "连接中断了");
-                            return;
+                            return Err("连接中断了");
                         };
                         if room.players[player_idx].temp_observer {
-                            emit_error(&socket, "nonstopWin", "旁观者无法猜测");
-                            return;
+                            return Err("旁观者无法猜测");
                         }
 
                         let team = room.players[player_idx].team.clone();
@@ -2433,12 +2524,7 @@ fn register_room_handlers(
                                     })
                                     .unwrap_or(false);
                                 if teammate_won {
-                                    emit_error(
-                                        &socket,
-                                        "nonstopWin",
-                                        "你的队友已经猜对了，你无法继续猜测",
-                                    );
-                                    return;
+                                    return Err("你的队友已经猜对了，你无法继续猜测");
                                 }
                             }
                         }
@@ -2449,7 +2535,7 @@ fn register_room_handlers(
                             .map(|g| g.nonstop_winners.iter().any(|w| w.id == actor_id))
                             .unwrap_or(false);
                         if already_won {
-                            return;
+                            return Ok(None);
                         }
 
                         let raw_guess_count =
@@ -2560,9 +2646,21 @@ fn register_room_handlers(
                         if !finalized {
                             broadcast_players(&io_clone, &room_id, room, None);
                         }
-                        emit_answer_reveal(&socket, room, &actor_id);
+                        Ok(answer_reveal_for(room, &actor_id))
                     })
                     .await;
+                match result {
+                    Some(Ok(Some(character))) => {
+                        let _ = socket.emit(
+                            "answerReveal",
+                            &json!({
+                                "character": character,
+                            }),
+                        );
+                    }
+                    Some(Ok(None)) | None => {}
+                    Some(Err(message)) => emit_error(&socket, "nonstopWin", message),
+                }
             }
         },
     );
@@ -2580,17 +2678,15 @@ fn register_room_handlers(
                 .to_string();
             let requested_result = data.get("result").and_then(|v| v.as_str()).unwrap_or("");
             let actor_id = socket.id.to_string();
-            let _ = state
+            let result = state
                 .run_room_command(&room_id, RoomCommand::SocketEvent("gameEnd"), |room| {
                     room.last_active = Utc::now().timestamp_millis();
                     let Some(player_idx) = room.players.iter().position(|p| p.id == actor_id)
                     else {
-                        emit_error(&socket, "gameEnd", "连接中断了");
-                        return;
+                        return Err("连接中断了");
                     };
                     if room.current_game.is_none() {
-                        emit_error(&socket, "gameEnd", "游戏未开始或已结束");
-                        return;
+                        return Err("游戏未开始或已结束");
                     }
                     let result = if requested_result == "surrender" {
                         "surrender"
@@ -2807,9 +2903,21 @@ fn register_room_handlers(
                     if !finalized {
                         broadcast_players(&io_clone, &room_id, room, None);
                     }
-                    emit_answer_reveal(&socket, room, &actor_id);
+                    Ok(answer_reveal_for(room, &actor_id))
                 })
                 .await;
+            match result {
+                Some(Ok(Some(character))) => {
+                    let _ = socket.emit(
+                        "answerReveal",
+                        &json!({
+                            "character": character,
+                        }),
+                    );
+                }
+                Some(Ok(None)) | None => {}
+                Some(Err(message)) => emit_error(&socket, "gameEnd", message),
+            }
         }
     });
 
@@ -2897,19 +3005,7 @@ fn register_room_handlers(
                                 broadcast_players(&io_clone, &room_id, room, None);
                             }
 
-                            let answer_reveal = room.current_game.as_ref().and_then(|game| {
-                                room.players
-                                    .iter()
-                                    .find(|p| p.id == actor_id)
-                                    .and_then(|player| {
-                                        if visible_answer_for(game, Some(player)).is_null() {
-                                            None
-                                        } else {
-                                            Some(game.character.clone())
-                                        }
-                                    })
-                            });
-                            Ok(answer_reveal)
+                            Ok(answer_reveal_for(room, &actor_id))
                         },
                     )
                     .await;
@@ -2956,11 +3052,11 @@ fn register_room_handlers(
 
                     let res = gameplay::handle_player_timeout(room, &actor_id);
 
-                    if is_team_mode {
-                        for pid in &res.affected_player_ids {
-                            emit_to_room(&io_clone, pid.clone(), "resetTimer", json!({}));
-                        }
-                    }
+                    let reset_timer_targets = if is_team_mode {
+                        res.affected_player_ids.clone()
+                    } else {
+                        Vec::new()
+                    };
 
                     if res.needs_sync_update {
                         gameplay::update_sync_progress(room, &room_id, &io_clone);
@@ -2971,11 +3067,17 @@ fn register_room_handlers(
                     if !finalized {
                         broadcast_players(&io_clone, &room_id, room, None);
                     }
-                    Ok(())
+                    Ok(reset_timer_targets)
                 })
                 .await;
-            if let Some(Err(message)) = result {
-                emit_error(&socket, "timeOut", message);
+            match result {
+                Some(Ok(reset_timer_targets)) => {
+                    for pid in reset_timer_targets {
+                        emit_to_room(&io_clone, pid, "resetTimer", json!({}));
+                    }
+                }
+                Some(Err(message)) => emit_error(&socket, "timeOut", message),
+                None => {}
             }
         }
     });
