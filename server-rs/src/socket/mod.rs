@@ -633,6 +633,19 @@ fn emit_join_room_success(
     }
 }
 
+fn emit_player_broadcast_result(
+    io: &SocketIo,
+    room_id: &str,
+    result: PlayerBroadcastCommandResult,
+) {
+    if let Some(payload) = result.pre_flush {
+        emit_to_room(io, room_id.to_string(), "updatePlayers", payload);
+    }
+    if let Some(payload) = result.players_update {
+        emit_to_room(io, room_id.to_string(), "updatePlayers", payload);
+    }
+}
+
 fn answer_reveal_for(room: &Room, player_id: &str) -> Option<CharacterPayload> {
     let Some(game) = room.current_game.as_ref() else {
         return None;
@@ -710,6 +723,12 @@ struct DisconnectCommandResult {
     host_transferred: Option<Value>,
     wait_for_answer_canceled: Option<Value>,
     players_payload: Value,
+}
+
+#[derive(Debug)]
+struct PlayerBroadcastCommandResult {
+    pre_flush: Option<Value>,
+    players_update: Option<Value>,
 }
 
 fn build_public_guess(guess_data: &CharacterPayload, feedback: &Value) -> PublicGuess {
@@ -1584,19 +1603,30 @@ fn register_room_handlers(
                     .unwrap_or("")
                     .to_string();
                 let actor_id = socket.id.to_string();
-                let _ = state
+                let result = state
                     .run_room_command(
                         &room_id,
                         RoomCommand::SocketEvent("updatePlayerMessage"),
                         |room| {
-                            flush_players_if_due(&io_clone, &room_id, room);
+                            let pre_flush = prepare_players_flush_if_due(room);
+                            let mut players_update = None;
                             if let Some(p) = room.players.iter_mut().find(|p| p.id == actor_id) {
                                 p.message = message;
-                                broadcast_players_force(&io_clone, &room_id, room);
+                                players_update = Some(prepare_players_broadcast(
+                                    room,
+                                    Some(json!({ "forceImmediate": true })),
+                                ));
+                            }
+                            PlayerBroadcastCommandResult {
+                                pre_flush,
+                                players_update,
                             }
                         },
                     )
                     .await;
+                if let Some(result) = result {
+                    emit_player_broadcast_result(&io_clone, &room_id, result);
+                }
             }
         },
     );
@@ -1636,19 +1666,30 @@ fn register_room_handlers(
                 };
 
                 let actor_id = socket.id.to_string();
-                let _ = state
+                let result = state
                     .run_room_command(
                         &room_id,
                         RoomCommand::SocketEvent("updatePlayerTeam"),
                         |room| {
-                            flush_players_if_due(&io_clone, &room_id, room);
+                            let pre_flush = prepare_players_flush_if_due(room);
+                            let mut players_update = None;
                             if let Some(p) = room.players.iter_mut().find(|p| p.id == actor_id) {
                                 p.team = team_parsed;
-                                broadcast_players_force(&io_clone, &room_id, room);
+                                players_update = Some(prepare_players_broadcast(
+                                    room,
+                                    Some(json!({ "forceImmediate": true })),
+                                ));
+                            }
+                            PlayerBroadcastCommandResult {
+                                pre_flush,
+                                players_update,
                             }
                         },
                     )
                     .await;
+                if let Some(result) = result {
+                    emit_player_broadcast_result(&io_clone, &room_id, result);
+                }
             }
         },
     );
