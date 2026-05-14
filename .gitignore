@@ -79,6 +79,7 @@ dump-2026-04-28.210420Z/
 
 # Rust
 server-rs/target/
+server-rs/t/
 db-builder/target/
 **/*.rs.bk
 

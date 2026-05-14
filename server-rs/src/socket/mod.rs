@@ -451,17 +451,6 @@ fn flush_players_if_due(io: &SocketIo, room_id: &str, room: &mut Room) {
     }
 }
 
-fn broadcast_players_force(io: &SocketIo, room_id: &str, room: &mut Room) {
-    broadcast_players(
-        io,
-        room_id,
-        room,
-        Some(json!({
-            "forceImmediate": true
-        })),
-    );
-}
-
 pub(crate) fn broadcast_lobby_rooms_updated(io: &SocketIo) {
     let sender = {
         let mut slot = LOBBY_OUTBOX.lock().expect("lobby outbox mutex poisoned");
@@ -1356,13 +1345,18 @@ fn register_room_handlers(
                             return Err("游戏进行中不能更改准备状态");
                         }
                         room.players[player_idx].ready = !room.players[player_idx].ready;
-                        broadcast_players_force(&io_clone, &room_id, room);
-                        Ok(true)
+                        Ok(PlayerBroadcastCommandResult {
+                            pre_flush: None,
+                            players_update: Some(prepare_players_broadcast(
+                                room,
+                                Some(json!({ "forceImmediate": true })),
+                            )),
+                        })
                     })
                     .await;
 
-                let toggled = match toggled {
-                    Some(Ok(toggled)) => toggled,
+                let broadcast = match toggled {
+                    Some(Ok(broadcast)) => broadcast,
                     Some(Err(message)) => {
                         emit_error(&socket, "toggleReady", message);
                         return;
@@ -1377,9 +1371,8 @@ fn register_room_handlers(
                     }
                 };
 
-                if toggled {
-                    broadcast_lobby_rooms_updated(&io_clone);
-                }
+                emit_player_broadcast_result(&io_clone, &room_id, broadcast);
+                broadcast_lobby_rooms_updated(&io_clone);
             }
         },
     );
@@ -1404,29 +1397,36 @@ fn register_room_handlers(
                         &room_id,
                         RoomCommand::SocketEvent("updateGameSettings"),
                         |room| {
-                            flush_players_if_due(&io_clone, &room_id, room);
+                            let pre_flush = prepare_players_flush_if_due(room);
                             if !room.players.iter().any(|p| p.id == actor_id && p.is_host) {
                                 return Err("只有房主可以更改设置");
                             }
                             let Some(settings) = settings else {
-                                return Ok(None);
+                                return Ok((pre_flush, None));
                             };
                             room.settings = Some(settings.clone());
                             room.last_active = Utc::now().timestamp_millis();
-                            Ok(Some(settings))
+                            Ok((pre_flush, Some(settings)))
                         },
                     )
                     .await;
 
                 match updated_settings {
-                    Some(Ok(Some(settings))) => {
-                        let _ = io_clone
-                            .to(room_id.clone())
-                            .emit("updateGameSettings", &json!({ "settings": settings }))
-                            .await;
+                    Some(Ok((pre_flush, settings))) => {
+                        if let Some(payload) = pre_flush {
+                            emit_to_room(&io_clone, room_id.clone(), "updatePlayers", payload);
+                        }
+                        if let Some(settings) = settings {
+                            emit_to_room(
+                                &io_clone,
+                                room_id.clone(),
+                                "updateGameSettings",
+                                json!({ "settings": settings }),
+                            );
+                        }
                     }
-                    Some(Ok(None)) | None => {}
                     Some(Err(message)) => emit_error(&socket, "updateGameSettings", message),
+                    None => {}
                 }
             }
         },
@@ -1467,27 +1467,31 @@ fn register_room_handlers(
                         &room_id,
                         RoomCommand::SocketEvent("toggleRoomVisibility"),
                         |room| {
-                            flush_players_if_due(&io_clone, &room_id, room);
+                            let pre_flush = prepare_players_flush_if_due(room);
                             if !room.players.iter().any(|p| p.id == actor_id && p.is_host) {
                                 return Err("只有房主可以更改房间状态");
                             }
                             room.is_public = !room.is_public;
-                            broadcast_players_force(&io_clone, &room_id, room);
-                            Ok(true)
+                            Ok(PlayerBroadcastCommandResult {
+                                pre_flush,
+                                players_update: Some(prepare_players_broadcast(
+                                    room,
+                                    Some(json!({ "forceImmediate": true })),
+                                )),
+                            })
                         },
                     )
                     .await;
-                let changed = match changed {
-                    Some(Ok(changed)) => changed,
+                let broadcast = match changed {
+                    Some(Ok(broadcast)) => broadcast,
                     Some(Err(message)) => {
                         emit_error(&socket, "toggleRoomVisibility", message);
                         return;
                     }
-                    None => false,
+                    None => return,
                 };
-                if changed {
-                    broadcast_lobby_rooms_updated(&io_clone);
-                }
+                emit_player_broadcast_result(&io_clone, &room_id, broadcast);
+                broadcast_lobby_rooms_updated(&io_clone);
             }
         },
     );
@@ -1519,22 +1523,27 @@ fn register_room_handlers(
                         &room_id,
                         RoomCommand::SocketEvent("updateRoomName"),
                         |room| {
-                            flush_players_if_due(&io_clone, &room_id, room);
+                            let pre_flush = prepare_players_flush_if_due(room);
                             if !room.players.iter().any(|p| p.id == actor_id && p.is_host) {
                                 return Err("只有房主可以修改房名");
                             }
                             room.room_name = room_name.clone();
-                            Ok(room_name)
+                            Ok((pre_flush, room_name))
                         },
                     )
                     .await;
 
                 match updated_name {
-                    Some(Ok(room_name)) => {
-                        let _ = io_clone
-                            .to(room_id.clone())
-                            .emit("roomNameUpdated", &json!({ "roomName": room_name }))
-                            .await;
+                    Some(Ok((pre_flush, room_name))) => {
+                        if let Some(payload) = pre_flush {
+                            emit_to_room(&io_clone, room_id.clone(), "updatePlayers", payload);
+                        }
+                        emit_to_room(
+                            &io_clone,
+                            room_id.clone(),
+                            "roomNameUpdated",
+                            json!({ "roomName": room_name }),
+                        );
                         broadcast_lobby_rooms_updated(&io_clone);
                     }
                     Some(Err(message)) => emit_error(&socket, "updateRoomName", message),
@@ -1563,7 +1572,7 @@ fn register_room_handlers(
                         &room_id,
                         RoomCommand::SocketEvent("enterManualMode"),
                         |room| {
-                            flush_players_if_due(&io_clone, &room_id, room);
+                            let pre_flush = prepare_players_flush_if_due(room);
                             if !room.players.iter().any(|p| p.id == actor_id && p.is_host) {
                                 return Err("只有房主可以进入出题模式");
                             }
@@ -1572,13 +1581,22 @@ fn register_room_handlers(
                                     p.ready = true;
                                 }
                             }
-                            broadcast_players_force(&io_clone, &room_id, room);
-                            Ok(())
+                            Ok(PlayerBroadcastCommandResult {
+                                pre_flush,
+                                players_update: Some(prepare_players_broadcast(
+                                    room,
+                                    Some(json!({ "forceImmediate": true })),
+                                )),
+                            })
                         },
                     )
                     .await;
-                if let Some(Err(message)) = result {
-                    emit_error(&socket, "enterManualMode", message);
+                match result {
+                    Some(Ok(broadcast)) => {
+                        emit_player_broadcast_result(&io_clone, &room_id, broadcast);
+                    }
+                    Some(Err(message)) => emit_error(&socket, "enterManualMode", message),
+                    None => {}
                 }
             }
         },
@@ -1921,26 +1939,46 @@ fn register_room_handlers(
                                 }
                             };
 
-                            gameplay::revert_setter_observers(room, &room_id, &io_clone);
+                            for p in &mut room.players {
+                                if p.temp_observer {
+                                    p.temp_observer = false;
+                                }
+                            }
                             room.answer_setter_id = Some(setter_id.clone());
                             room.waiting_for_answer = true;
 
-                            gameplay::apply_setter_observers(room, &room_id, &setter_id, &io_clone);
-                            broadcast_players(
-                                &io_clone,
-                                &room_id,
+                            if let Some(team_id) = room
+                                .players
+                                .iter()
+                                .find(|p| p.id == setter_id)
+                                .and_then(|p| p.team.clone())
+                            {
+                                if team_id != "0" {
+                                    for p in &mut room.players {
+                                        if p.team.as_deref() == Some(team_id.as_str())
+                                            && p.id != setter_id
+                                            && !p.is_answer_setter
+                                            && !p.disconnected
+                                        {
+                                            p.temp_observer = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let players_payload = prepare_players_broadcast(
                                 room,
                                 Some(json!({
-                                    "answerSetterId": setter_id
+                                    "answerSetterId": setter_id.clone()
                                 })),
                             );
 
-                            Ok((setter_id, setter_name))
+                            Ok((setter_id, setter_name, players_payload))
                         },
                     )
                     .await;
 
-                let (setter_id, setter_name) = match setter {
+                let (setter_id, setter_name, players_payload) = match setter {
                     Some(Ok(setter)) => setter,
                     Some(Err(message)) => {
                         emit_error(&socket, "setAnswerSetter", message);
@@ -1949,16 +1987,16 @@ fn register_room_handlers(
                     None => return,
                 };
 
-                let _ = io_clone
-                    .to(room_id.clone())
-                    .emit(
-                        "waitForAnswer",
-                        &json!({
+                emit_to_room(&io_clone, room_id.clone(), "updatePlayers", players_payload);
+                emit_to_room(
+                    &io_clone,
+                    room_id.clone(),
+                    "waitForAnswer",
+                    json!({
                             "answerSetterId": setter_id,
                             "setterUsername": setter_name
-                        }),
-                    )
-                    .await;
+                    }),
+                );
             }
         },
     );
