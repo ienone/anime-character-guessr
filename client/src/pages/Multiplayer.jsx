@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { io } from 'socket.io-client';
@@ -7,6 +7,7 @@ import SearchBar from '../components/SearchBar';
 import GuessesTable from '../components/GuessesTable';
 import Timer from '../components/Timer';
 import PlayerList from '../components/PlayerList';
+import RoomList from '../components/RoomList';
 import GameEndPopup from '../components/GameEndPopup';
 import SetAnswerPopup from '../components/SetAnswerPopup';
 import FeedbackPopup from '../components/FeedbackPopup';
@@ -14,6 +15,8 @@ import GameSettingsDisplay from '../components/GameSettingsDisplay';
 import Leaderboard from '../components/Leaderboard';
 import Roulette from '../components/Roulette';
 import Image from '../components/Image';
+import usePendingGuess from '../hooks/usePendingGuess';
+import useRoomLobby from '../hooks/useRoomLobby';
 import logCollector from '../utils/logCollector';
 import '../styles/Multiplayer.css';
 import '../styles/game.css';
@@ -148,13 +151,17 @@ const Multiplayer = () => {
   const [isManualMode, setIsManualMode] = useState(false);
   const [answerSetterId, setAnswerSetterId] = useState(null);
   const [waitingForAnswer, setWaitingForAnswer] = useState(false);
-  const [roomList, setRoomList] = useState([]);
-  const [loadingRooms, setLoadingRooms] = useState(false);
-  const [roomListExpanded, setRoomListExpanded] = useState(false);
-  const [roomListPage, setRoomListPage] = useState(0);
   const ROOMS_PER_PAGE = 10;
-  const roomListExpandedRef = useRef(false);
-  const isFirstLoadRoomsRef = useRef(true);
+  const {
+    roomList,
+    loadingRooms,
+    roomListExpanded,
+    setRoomListExpanded,
+    roomListPage,
+    setRoomListPage,
+    fetchRoomList,
+    refreshRoomListIfVisible
+  } = useRoomLobby({ socketUrl: SOCKET_URL, isJoined, roomsPerPage: ROOMS_PER_PAGE });
   const [gameSettings, setGameSettings] = useState({
     // 默认设置
     startYear: new Date().getFullYear()-5, // 起始年份
@@ -230,9 +237,13 @@ const Multiplayer = () => {
   const reconnectTimerRef = useRef(null);
   const isManualDisconnectRef = useRef(false);
   const isAutoReconnectingRef = useRef(false);
-  const fetchRoomListRef = useRef(null);
-  const pendingGuessResolverRef = useRef(null);
-  const pendingGuessRejectRef = useRef(null);
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const {
+    submitGuess,
+    resolveGuess,
+    rejectGuess,
+    hasPendingGuess
+  } = usePendingGuess();
 
   useEffect(() => {
     roomIdRef.current = roomId;
@@ -371,9 +382,7 @@ const Multiplayer = () => {
     });
 
     newSocket.on('roomsUpdated', () => {
-      if (roomListExpandedRef.current && !isJoinedRef.current) {
-        fetchRoomListRef.current?.();
-      }
+      refreshRoomListIfVisible();
     });
 
     newSocket.on('waitForAnswer', ({ answerSetterId }) => {
@@ -486,6 +495,7 @@ const Multiplayer = () => {
 
       // 断线期间不展示答案卡片，避免状态残留导致的短暂泄露
       setCanShowSelectedAnswer(false);
+      setIsGameStarting(false);
       
       if (isManualDisconnectRef.current) {
         setConnectionStatus('disconnected');
@@ -512,7 +522,8 @@ const Multiplayer = () => {
         }, 3000);
       } else if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
         setConnectionStatus('failed');
-        alert('连接已断开，多次重试失败，请刷新页面或稍后再试');
+        setIsGameStarting(false);
+        showKickNotification('连接已断开，多次重试失败，请刷新页面或稍后再试', 'error');
         setError('连接失败，请刷新页面重试');
       }
     });
@@ -536,6 +547,7 @@ const Multiplayer = () => {
     });
 
     newSocket.on('gameStart', ({ character, settings, players, isPublic, hints = null, isAnswerSetter: isAnswerSetterFlag }) => {
+      setIsGameStarting(false);
       // 每局开始先默认不显示答案卡片，避免网络卡顿/状态乱序导致短暂泄露
       setCanShowSelectedAnswer(false);
       const visibleAnswer = character && character.id ? {
@@ -670,7 +682,7 @@ const Multiplayer = () => {
     });
 
     newSocket.on('roomClosed', ({ message }) => {
-      alert(message || '房主已断开连接，房间已关闭。');
+      showKickNotification(message || '房主已断开连接，房间已关闭。', 'warning');
       setError('房间已关闭');
       navigate('/multiplayer/');
     });
@@ -707,16 +719,18 @@ const Multiplayer = () => {
       if (
         typeof message === 'string' &&
         message.startsWith('playerGuess:') &&
-        pendingGuessRejectRef.current
+        hasPendingGuess()
       ) {
-        pendingGuessRejectRef.current(new Error(message));
-        pendingGuessResolverRef.current = null;
-        pendingGuessRejectRef.current = null;
+        rejectGuess(new Error(message));
         return;
       }
 
       const formattedMessage = formatSocketError(message, event);
-      alert(formattedMessage);
+      const eventName = event || (typeof message === 'string' ? message.match(/^([A-Za-z0-9_]+):/)?.[1] : '');
+      if (eventName === 'gameStart') {
+        setIsGameStarting(false);
+      }
+      showKickNotification(formattedMessage, 'error');
       setError(formattedMessage);
       if (
         typeof message === 'string' &&
@@ -734,7 +748,7 @@ const Multiplayer = () => {
     });
 
     newSocket.on('serverShutdown', ({ message }) => {
-      alert(message);
+      showKickNotification(message, 'error');
       setError(message);
       setIsJoined(false);
       setGameEnd(true);
@@ -782,10 +796,7 @@ const Multiplayer = () => {
     });
 
     newSocket.on('guessResult', (payload) => {
-      if (pendingGuessResolverRef.current) {
-        pendingGuessResolverRef.current(payload);
-        pendingGuessResolverRef.current = null;
-      }
+      resolveGuess(payload);
     });
 
     newSocket.on('resetReadyStatus', () => {
@@ -894,7 +905,7 @@ const Multiplayer = () => {
       latestPlayersRef.current = [];
       setBannedSharedTags([]);
     };
-  }, [navigate]);
+  }, [hasPendingGuess, navigate, refreshRoomListIfVisible, rejectGuess, resolveGuess]);
 
   useEffect(() => {
     // If user is no longer host, ensure manual mode is disabled
@@ -949,24 +960,9 @@ const Multiplayer = () => {
     gameSettingsRef.current = gameSettings;
   }, [gameSettings]);
 
-  // 房间列表自动刷新：展开时每5秒刷新一次
-  useEffect(() => {
-    if (!roomListExpanded || isJoined) {
-      return;
-    }
-    
-    const intervalId = setInterval(() => {
-      if (roomListExpandedRef.current && !isJoined) {
-        fetchRoomListRef.current?.();
-      }
-    }, 5000);
-    
-    return () => clearInterval(intervalId);
-  }, [roomListExpanded, isJoined]);
-
   const handleJoinRoom = () => {
     if (!username.trim()) {
-      alert('请输入用户名');
+      showKickNotification('请输入用户名', 'warning');
       setError('请输入用户名');
       return;
     }
@@ -1017,7 +1013,7 @@ const Multiplayer = () => {
       }
     } catch (error) {
       console.error('复制失败:', error);
-      alert('复制失败，请手动复制房间链接');
+      showKickNotification('复制失败，请手动复制房间链接', 'error');
     }
   };
 
@@ -1053,7 +1049,7 @@ const Multiplayer = () => {
 
     // 同步模式：等待其他玩家时不能猜测
     if (waitingForSync) {
-      alert('【同步模式】请等待其他玩家完成本轮猜测');
+      showKickNotification('【同步模式】请等待其他玩家完成本轮猜测', 'warning');
       return;
     }
 
@@ -1063,7 +1059,7 @@ const Multiplayer = () => {
         playerHistory.guesses.some(guessEntry => guessEntry?.guessData?.id === character.id)
       );
       if (duplicateInHistory) {
-        alert('【全局BP】已经被别人猜过了！请尝试其他角色');
+        showKickNotification('【全局BP】已经被别人猜过了！请尝试其他角色', 'warning');
         return;
       }
     }
@@ -1079,25 +1075,10 @@ const Multiplayer = () => {
       if (!socketRef.current?.connected) {
         throw new Error('提交猜测失败：WebSocket 未连接，请等待重连或刷新页面');
       }
-      const guessResult = await new Promise((resolve, reject) => {
-        const timeoutId = setTimeout(() => {
-          pendingGuessResolverRef.current = null;
-          pendingGuessRejectRef.current = null;
-          reject(new Error('猜测响应超时'));
-        }, 10000);
-        pendingGuessResolverRef.current = (payload) => {
-          clearTimeout(timeoutId);
-          pendingGuessRejectRef.current = null;
-          resolve(payload);
-        };
-        pendingGuessRejectRef.current = (error) => {
-          clearTimeout(timeoutId);
-          reject(error);
-        };
-        socketRef.current?.emit('playerGuess', {
-          roomId,
-          characterId: character.id
-        });
+      const guessResult = await submitGuess({
+        socket: socketRef.current,
+        roomId,
+        characterId: character.id
       });
 
       const { guess, isCorrect } = guessResult || {};
@@ -1116,7 +1097,7 @@ const Multiplayer = () => {
       }
     } catch (error) {
       console.error('Error processing guess:', error);
-      alert(describeGuessError(error));
+      showKickNotification(describeGuessError(error), 'error');
     } finally {
       setIsGuessing(false);
       setShouldResetTimer(false);
@@ -1171,11 +1152,15 @@ const Multiplayer = () => {
 
     // 若全员为旁观者队伍，不允许开始
     if (allSpectators) {
-      alert('至少需要一名非旁观者才能开始游戏');
+      showKickNotification('至少需要一名非旁观者才能开始游戏', 'warning');
       return;
     }
-    
+     
     if (isHost) {
+      if (!socketRef.current?.connected) {
+        showKickNotification('连接未建立，无法开始游戏', 'error');
+        return;
+      }
       // 设置正在启动游戏的标志
       setIsGameStarting(true);
       
@@ -1197,11 +1182,10 @@ const Multiplayer = () => {
           roomId,
           settings: gameSettings
         });
-      } finally {
-        // 确保标志在超时后重置，防止永久锁定（超时时间设为5秒）
-        setTimeout(() => {
-          setIsGameStarting(false);
-        }, 5000);
+      } catch (error) {
+        console.error('Failed to start game:', error);
+        setIsGameStarting(false);
+        showKickNotification('开始游戏失败，请重试', 'error');
       }
     }
   };
@@ -1266,7 +1250,7 @@ const Multiplayer = () => {
       setShowSetAnswerPopup(false);
     } catch (error) {
       console.error('Failed to set answer:', error);
-      alert('设置答案失败，请重试');
+      showKickNotification('设置答案失败，请重试', 'error');
     }
   };
 
@@ -1276,78 +1260,61 @@ const Multiplayer = () => {
     // 确认当前玩家是房主
     const currentPlayer = players.find(p => p.id === socketRef.current.id);
     if (!currentPlayer || !currentPlayer.isHost) {
-      alert('只有房主可以踢出玩家');
+      showKickNotification('只有房主可以踢出玩家', 'warning');
       return;
     }
-    
+     
     // 防止房主踢出自己
     if (playerId === socketRef.current.id) {
-      alert('房主不能踢出自己');
+      showKickNotification('房主不能踢出自己', 'warning');
       return;
     }
-    
-    // 确认后再踢出
-    if (window.confirm('确定要踢出该玩家吗？')) {
+     
+    requestConfirm('确定要踢出该玩家吗？', () => {
       try {
         socketRef.current.emit('kickPlayer', { roomId, playerId });
       } catch (error) {
         console.error('踢出玩家失败:', error);
-        alert('踢出玩家失败，请重试');
+        showKickNotification('踢出玩家失败，请重试', 'error');
       }
-    }
+    });
   };
 
   const handleTransferHost = (playerId) => {
     if (!isHost || !socketRef.current) return;
-    
-    // 确认后再转移房主
-    if (window.confirm('确定要将房主权限转移给该玩家吗？')) {
+     
+    requestConfirm('确定要将房主权限转移给该玩家吗？', () => {
       socketRef.current.emit('transferHost', { roomId, newHostId: playerId });
       setIsHost(false);
-    }
+    });
   };
 
   // Add handleQuickJoin function
   const handleQuickJoin = async () => {
     try {
       const response = await axios.get(`${SOCKET_URL}/quick-join`);
-      window.location.href = response.data.url;
+      const targetUrl = new URL(response.data.url, window.location.origin);
+      if (targetUrl.origin === window.location.origin) {
+        const route = targetUrl.hash.startsWith('#/')
+          ? targetUrl.hash.slice(1)
+          : `${targetUrl.pathname}${targetUrl.search}`;
+        navigate(route);
+      } else {
+        window.location.assign(response.data.url);
+      }
     } catch (error) {
       if (error.response && error.response.status === 404) {
-        alert(error.response.data.error || '没有可用的公开房间');
+        showKickNotification(error.response.data.error || '没有可用的公开房间', 'warning');
       } else {
-        alert('快速加入失败，请重试');
+        showKickNotification('快速加入失败，请重试', 'error');
       }
     }
   };
 
-  // 获取房间列表（静默刷新，避免页面抖动）
-  const fetchRoomList = useCallback(async () => {
-    // 只有首次加载时显示 loading 状态
-    if (isFirstLoadRoomsRef.current) {
-      setLoadingRooms(true);
-    }
-    try {
-      const response = await axios.get(`${SOCKET_URL}/list-rooms`);
-      // 只显示公开房间
-      const publicRooms = response.data.filter(room => room.isPublic);
-      setRoomList(publicRooms);
-      isFirstLoadRoomsRef.current = false;
-    } catch (error) {
-      console.error('获取房间列表失败:', error);
-    } finally {
-      setLoadingRooms(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchRoomListRef.current = fetchRoomList;
-  }, [fetchRoomList]);
-
   // 加入指定房间
   const handleJoinSpecificRoom = (targetRoomId) => {
     if (!username.trim()) {
-      alert('请输入用户名');
+      showKickNotification('请输入用户名', 'warning');
       setError('请输入用户名');
       return;
     }
@@ -1356,8 +1323,7 @@ const Multiplayer = () => {
     sessionStorage.setItem('pendingUsername', username);
     sessionStorage.setItem('pendingRoomId', targetRoomId);
     
-    // 使用完整页面刷新，确保重置所有状态和 socket 连接
-    window.location.href = `/multiplayer/${targetRoomId}`;
+    navigate(`/multiplayer/${targetRoomId}`);
   };
 
   // 创建一个函数显示踢出通知
@@ -1366,6 +1332,10 @@ const Multiplayer = () => {
     setTimeout(() => {
       setKickNotification(null);
     }, 5000); // 5秒后自动关闭通知
+  };
+
+  const requestConfirm = (message, onConfirm) => {
+    setConfirmDialog({ message, onConfirm });
   };
 
   // Handle player message change
@@ -1446,48 +1416,15 @@ const Multiplayer = () => {
               </div>
             </div>
 
-            {loadingRooms ? (
-              <div className="loading">正在加载房间列表...</div>
-            ) : roomList.length === 0 ? (
-              <div className="no-rooms">暂无公开房间</div>
-            ) : (
-              <>
-                <ul className="players">
-                  {roomList.slice(roomListPage * ROOMS_PER_PAGE, (roomListPage + 1) * ROOMS_PER_PAGE).map(room => (
-                    <li key={room.id} className="player">
-                      <div className="player-info">
-                        <div className="player-name">{room.name || '未命名房间'}</div>
-                        <div className="player-meta">
-                          <span>ID: {room.id}</span>
-                          <span>房主: {room.hostName || '未知'}</span>
-                          <span>人数: {room.playerCount}/{room.maxPlayers || 8}</span>
-                        </div>
-                      </div>
-                      <button className="primary-btn" onClick={() => handleJoinSpecificRoom(room.id)}>
-                        加入
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                {roomList.length > ROOMS_PER_PAGE && (
-                  <div className="pagination">
-                    <button
-                      disabled={roomListPage === 0}
-                      onClick={() => setRoomListPage(p => Math.max(0, p - 1))}
-                    >
-                      上一页
-                    </button>
-                    <span>{roomListPage + 1} / {Math.max(1, Math.ceil(roomList.length / ROOMS_PER_PAGE))}</span>
-                    <button
-                      disabled={(roomListPage + 1) * ROOMS_PER_PAGE >= roomList.length}
-                      onClick={() => setRoomListPage(p => Math.min(Math.ceil(roomList.length / ROOMS_PER_PAGE) - 1, p + 1))}
-                    >
-                      下一页
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
+            <RoomList
+              rooms={roomList}
+              loading={loadingRooms}
+              page={roomListPage}
+              roomsPerPage={ROOMS_PER_PAGE}
+              onPageChange={setRoomListPage}
+              onJoinRoom={handleJoinSpecificRoom}
+              variant="lobby"
+            />
           </div>
         </div>
       </div>
@@ -1524,10 +1461,32 @@ const Multiplayer = () => {
       )}
       {/* 添加踢出通知 */}
       {kickNotification && (
-        <div className={`kick-notification ${kickNotification.type === 'host' ? 'host-notification' : kickNotification.type === 'reconnect' ? 'reconnect-notification' : ''}`}>
+        <div className={`kick-notification ${kickNotification.type ? `${kickNotification.type}-notification` : ''}`}>
           <div className="kick-notification-content">
-            <i className={`fas ${kickNotification.type === 'host' ? 'fa-crown' : kickNotification.type === 'reconnect' ? 'fa-wifi' : 'fa-exclamation-circle'}`}></i>
+            <i className={`fas ${kickNotification.type === 'host' ? 'fa-crown' : kickNotification.type === 'reconnect' ? 'fa-wifi' : kickNotification.type === 'warning' ? 'fa-exclamation-triangle' : 'fa-exclamation-circle'}`}></i>
             <span>{kickNotification.message}</span>
+          </div>
+        </div>
+      )}
+      {confirmDialog && (
+        <div className="confirm-dialog-backdrop" role="presentation" onMouseDown={() => setConfirmDialog(null)}>
+          <div className="confirm-dialog" role="dialog" aria-modal="true" onMouseDown={event => event.stopPropagation()}>
+            <div className="confirm-dialog-message">{confirmDialog.message}</div>
+            <div className="confirm-dialog-actions">
+              <button className="secondary-btn" onClick={() => setConfirmDialog(null)}>
+                取消
+              </button>
+              <button
+                className="primary-btn danger-btn"
+                onClick={() => {
+                  const onConfirm = confirmDialog.onConfirm;
+                  setConfirmDialog(null);
+                  onConfirm?.();
+                }}
+              >
+                确定
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1573,67 +1532,20 @@ const Multiplayer = () => {
             <div className="leaderboard-header" onClick={() => {
               const newExpanded = !roomListExpanded;
               setRoomListExpanded(newExpanded);
-              roomListExpandedRef.current = newExpanded;
-              if (newExpanded) {
-                fetchRoomList();
-              }
             }}>
               <h3>公开房间 {roomList.length > 0 && `(${roomList.length})`}</h3>
               <span className={`expand-icon ${roomListExpanded ? 'expanded' : ''}`}>{roomListExpanded ? '▼' : '▶'}</span>
             </div>
             {roomListExpanded && (
               <div className="leaderboard-content">
-                {loadingRooms ? (
-                  <div className="leaderboard-loading">加载中...</div>
-                ) : roomList.length === 0 ? (
-                  <div className="leaderboard-empty">暂无公开房间</div>
-                ) : (
-                  <>
-                    <div className="leaderboard-list">
-                      {roomList.slice(roomListPage * ROOMS_PER_PAGE, (roomListPage + 1) * ROOMS_PER_PAGE).map(room => (
-                        <div key={room.id} className="leaderboard-list-item room-item">
-                          <div className="room-info">
-                            <span className="room-players-count">
-                              <i className="fas fa-users"></i> {room.displayRoomName || room.roomName || `${room.hostName || ''}的房间`} {room.playerCount}人
-                              {room.isGameStarted && <span className="room-status-badge">游戏中</span>}
-                            </span>
-                            <span className="room-players-names">
-                              {room.players.slice(0, 3).join(', ')}
-                              {room.players.length > 3 && '...'}
-                            </span>
-                          </div>
-                          <button 
-                            className={`join-room-btn ${room.isGameStarted ? 'spectate-btn' : ''}`}
-                            onClick={() => handleJoinSpecificRoom(room.id)}
-                          >
-                            {room.isGameStarted ? '观战' : '加入'}
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="room-list-footer">
-                      <div className="room-list-pagination">
-                        <button
-                          className="pagination-btn"
-                          disabled={roomListPage === 0}
-                          onClick={() => setRoomListPage(prev => Math.max(0, prev - 1))}
-                        >
-                          ◀
-                        </button>
-                        <span className="pagination-info">
-                          {roomListPage + 1} / {Math.max(1, Math.ceil(roomList.length / ROOMS_PER_PAGE))}
-                        </span>
-                        <button
-                          className="pagination-btn"
-                          disabled={(roomListPage + 1) * ROOMS_PER_PAGE >= roomList.length}
-                          onClick={() => setRoomListPage(prev => prev + 1)}
-                        >
-                          ▶
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                )}
+                <RoomList
+                  rooms={roomList}
+                  loading={loadingRooms}
+                  page={roomListPage}
+                  roomsPerPage={ROOMS_PER_PAGE}
+                  onPageChange={setRoomListPage}
+                  onJoinRoom={handleJoinSpecificRoom}
+                />
               </div>
             )}
           </div>
@@ -1652,6 +1564,7 @@ const Multiplayer = () => {
             isManualMode={isManualMode}
             isHost={isHost}
             answerSetterId={answerSetterId}
+            waitingForAnswer={waitingForAnswer}
             onSetAnswerSetter={handleSetAnswerSetter}
             onKickPlayer={handleKickPlayer}
             onTransferHost={handleTransferHost}

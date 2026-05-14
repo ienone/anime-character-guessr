@@ -21,9 +21,8 @@ function renderProgress(player) {
   return `${attempts.map(mark => attemptDisplay[mark] || '').join('')}${resultDisplay[player.roundResult] || ''}`;
 }
 
-const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnonymousModeChange, isManualMode, isHost, answerSetterId, onSetAnswerSetter, onKickPlayer, onTransferHost, onMessageChange, onTeamChange }) => {
+const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnonymousModeChange, isManualMode, isHost, answerSetterId, waitingForAnswer, onSetAnswerSetter, onKickPlayer, onTransferHost, onMessageChange, onTeamChange }) => {
   const [showNames, setShowNames] = useState(true);
-  const [waitingForAnswer, setWaitingForAnswer] = useState(false);
   const [activeMenu, setActiveMenu] = useState(null);
   const [editingMessagePlayerId, setEditingMessagePlayerId] = useState(null);
   const [messageDraft, setMessageDraft] = useState("");
@@ -33,20 +32,6 @@ const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnony
     { value: '0', label: '旁观' },
     ...Array.from({ length: 8 }, (_, i) => ({ value: (i + 1).toString(), label: (i + 1).toString() }))
   ];
-
-  // Add socket event listener for waitForAnswer
- useEffect(() => {
-    if (socket) {
-      socket.on('waitForAnswer', () => {
-        setWaitingForAnswer(true);
-      });
-
-      // Reset waiting state when game starts
-      socket.on('gameStart', () => {
-        setWaitingForAnswer(false);
-      });
-    }
-  }, [socket]);
 
   // Add click outside handler to close menu
   useEffect(() => {

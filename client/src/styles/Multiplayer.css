@@ -1096,6 +1096,18 @@
   background-color: rgba(39, 174, 96, 0.9);
 }
 
+.kick-notification.warning-notification {
+  background-color: rgba(243, 156, 18, 0.95);
+}
+
+.kick-notification.error-notification {
+  background-color: rgba(220, 53, 69, 0.95);
+}
+
+.kick-notification.info-notification {
+  background-color: rgba(74, 144, 226, 0.9);
+}
+
 .kick-notification-content {
   display: flex;
   align-items: center;
@@ -1166,6 +1178,47 @@
 
 .connection-status .fa-spin {
   animation: fa-spin 1s infinite linear;
+}
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.confirm-dialog {
+  width: min(420px, 100%);
+  background: #fff;
+  color: #1f2937;
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.28);
+  padding: 20px;
+  text-align: left;
+}
+
+.confirm-dialog-message {
+  font-size: 1rem;
+  line-height: 1.5;
+  margin-bottom: 18px;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.danger-btn {
+  background-color: #dc3545;
+}
+
+.danger-btn:hover {
+  background-color: #bb2d3b;
 }
 
 @keyframes fa-spin {
