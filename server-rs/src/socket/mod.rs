@@ -1743,26 +1743,38 @@ fn register_room_handlers(
                         if let Some(ref mut game) = room.current_game {
                             game.sync_players_completed.remove(&player_to_kick.id);
                         }
-                        broadcast_players_force(&io_clone, &room_id, room);
+                        let players_payload = prepare_players_broadcast(
+                            room,
+                            Some(json!({ "forceImmediate": true })),
+                        );
 
-                        Ok((player_to_kick.id, player_to_kick.username, cancel_message))
+                        Ok((
+                            player_to_kick.id,
+                            player_to_kick.username,
+                            cancel_message,
+                            players_payload,
+                        ))
                     })
                     .await;
 
-                let (kicked_id, kicked_username, cancel_message) = match kick_effect {
-                    Some(Ok(effect)) => effect,
-                    Some(Err(message)) => {
-                        emit_error(&socket, "kickPlayer", message);
-                        return;
-                    }
-                    None => return,
-                };
+                let (kicked_id, kicked_username, cancel_message, players_payload) =
+                    match kick_effect {
+                        Some(Ok(effect)) => effect,
+                        Some(Err(message)) => {
+                            emit_error(&socket, "kickPlayer", message);
+                            return;
+                        }
+                        None => return,
+                    };
+                emit_to_room(&io_clone, room_id.clone(), "updatePlayers", players_payload);
 
                 if let Some(message) = cancel_message {
-                    let _ = io_clone
-                        .to(room_id.clone())
-                        .emit("waitForAnswerCanceled", &json!({ "message": message }))
-                        .await;
+                    emit_to_room(
+                        &io_clone,
+                        room_id.clone(),
+                        "waitForAnswerCanceled",
+                        json!({ "message": message }),
+                    );
                 }
 
                 let payload = json!({ "playerId": kicked_id, "username": kicked_username });
