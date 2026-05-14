@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use serde_json::json;
 use socketioxide::SocketIo;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -46,17 +46,16 @@ pub fn start_room_cleanup(state: Arc<ServerState>, io: SocketIo) {
             let stale_threshold_ms: i64 = 5 * 60 * 1000; // 5 minutes
             let mut to_remove: Vec<String> = Vec::new();
 
-            for entry in state.rooms.iter() {
-                let room = entry.value();
+            for (room_id, room) in state.room_snapshots().await {
                 let idle = now - room.last_active;
                 if room.current_game.is_none() && idle > stale_threshold_ms {
-                    to_remove.push(entry.key().clone());
+                    to_remove.push(room_id);
                 }
             }
 
             let cleaned = to_remove.len();
             for room_id in to_remove {
-                state.rooms.remove(&room_id);
+                state.remove_room(&room_id).await;
                 emit_to_room(
                     &io,
                     room_id.clone(),
@@ -69,6 +68,46 @@ pub fn start_room_cleanup(state: Arc<ServerState>, io: SocketIo) {
             if cleaned > 0 {
                 broadcast_lobby_rooms_updated(&io);
                 info!("Auto-cleanup: removed {} stale rooms", cleaned);
+            }
+        }
+    });
+}
+
+/// Periodically proves the Tokio runtime is making progress and records room
+/// cardinality. If the async runtime is blocked, the next tick logs the lag
+/// after it resumes.
+pub fn start_runtime_watchdog(state: Arc<ServerState>) {
+    tokio::spawn(async move {
+        let mut last_tick = Instant::now();
+        let mut ticks: u64 = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let now = Instant::now();
+            let elapsed = now.duration_since(last_tick);
+            last_tick = now;
+            ticks += 1;
+
+            if elapsed > Duration::from_secs(3) {
+                warn!(
+                    lag_ms = elapsed.as_millis() as u64,
+                    rooms = state.room_count(),
+                    "runtime watchdog observed event-loop lag"
+                );
+            }
+
+            if ticks % 60 == 0 {
+                let mut players = 0usize;
+                let mut active_games = 0usize;
+                for (_, room) in state.room_snapshots().await {
+                    players += room.players.len();
+                    if room.current_game.is_some() {
+                        active_games += 1;
+                    }
+                }
+                info!(
+                    rooms = state.room_count(),
+                    players, active_games, "runtime watchdog heartbeat"
+                );
             }
         }
     });

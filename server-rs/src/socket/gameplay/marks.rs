@@ -81,6 +81,7 @@ mod tests {
     fn timeout_is_only_an_attempt_identifier() {
         let mut player = Player {
             id: "p1".to_string(),
+            stable_player_id: "stable-p1".to_string(),
             username: "p".to_string(),
             is_host: false,
             score: 0,

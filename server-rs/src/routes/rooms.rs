@@ -42,10 +42,11 @@ struct LangQuery {
 async fn quick_join(State(rs): State<RoomState>, Query(q): Query<LangQuery>) -> impl IntoResponse {
     let public_rooms: Vec<String> = rs
         .state
-        .rooms
-        .iter()
-        .filter(|e| e.value().is_public)
-        .map(|e| e.key().clone())
+        .room_snapshots()
+        .await
+        .into_iter()
+        .filter(|(_, room)| room.is_public)
+        .map(|(id, _)| id)
         .collect();
 
     if public_rooms.is_empty() {
@@ -86,18 +87,25 @@ async fn quick_join(State(rs): State<RoomState>, Query(q): Query<LangQuery>) -> 
 
 /// GET /room-count
 async fn room_count(State(rs): State<RoomState>) -> impl IntoResponse {
-    Json(json!({ "count": rs.state.rooms.len() }))
+    let command_stats = rs.state.room_command_stats_total();
+    Json(json!({
+        "count": rs.state.room_count(),
+        "queuedRoomCommands": command_stats.queued,
+        "processedRoomCommands": command_stats.processed,
+        "rejectedRoomCommands": command_stats.rejected,
+        "totalRoomCommandMicros": command_stats.total_micros,
+        "maxRoomCommandMicros": command_stats.max_micros,
+    }))
 }
 
 /// GET /list-rooms
 async fn list_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
     let rooms: Vec<Value> = rs
         .state
-        .rooms
-        .iter()
-        .map(|entry| {
-            let id = entry.key().clone();
-            let room = entry.value();
+        .room_snapshots()
+        .await
+        .into_iter()
+        .map(|(id, room)| {
             let host_player = room
                 .players
                 .iter()
@@ -126,8 +134,8 @@ async fn list_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
 
 /// GET /room-info/{id}
 async fn room_info(State(rs): State<RoomState>, Path(id): Path<String>) -> impl IntoResponse {
-    match rs.state.rooms.get(&id) {
-        Some(room) => Json(room.clone()).into_response(),
+    match rs.state.room_snapshot(&id).await {
+        Some(room) => Json(room).into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "Room not found" })),
@@ -143,15 +151,16 @@ async fn clean_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
 
     let stale_ids: Vec<String> = rs
         .state
-        .rooms
-        .iter()
-        .filter(|e| e.value().current_game.is_none() && (now - e.value().last_active) > stale_ms)
-        .map(|e| e.key().clone())
+        .room_snapshots()
+        .await
+        .into_iter()
+        .filter(|(_, room)| room.current_game.is_none() && (now - room.last_active) > stale_ms)
+        .map(|(id, _)| id)
         .collect();
 
     let count = stale_ids.len();
     for room_id in stale_ids {
-        rs.state.rooms.remove(&room_id);
+        rs.state.remove_room(&room_id).await;
         emit_to_room(
             &rs.io,
             room_id.clone(),
@@ -175,7 +184,7 @@ async fn close_room_get(
     State(rs): State<RoomState>,
     Path(room_id): Path<String>,
 ) -> impl IntoResponse {
-    let player_count = match rs.state.rooms.get(&room_id) {
+    let player_count = match rs.state.room_snapshot(&room_id).await {
         Some(r) => r.players.len(),
         None => {
             return (
@@ -186,7 +195,7 @@ async fn close_room_get(
         }
     };
     let message = "房间被管理关闭，如有疑问请添加首页QQ群".to_string();
-    rs.state.rooms.remove(&room_id);
+    rs.state.remove_room(&room_id).await;
     emit_to_room(
         &rs.io,
         room_id.clone(),
@@ -209,7 +218,7 @@ async fn close_room_post(
     Path(room_id): Path<String>,
     Json(body): Json<CloseReason>,
 ) -> impl IntoResponse {
-    let player_count = match rs.state.rooms.get(&room_id) {
+    let player_count = match rs.state.room_snapshot(&room_id).await {
         Some(r) => r.players.len(),
         None => {
             return (
@@ -225,7 +234,7 @@ async fn close_room_post(
         }
         _ => "房间被管理关闭，如有疑问请添加首页QQ群".to_string(),
     };
-    rs.state.rooms.remove(&room_id);
+    rs.state.remove_room(&room_id).await;
     emit_to_room(
         &rs.io,
         room_id.clone(),

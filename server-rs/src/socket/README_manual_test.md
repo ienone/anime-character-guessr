@@ -11,7 +11,7 @@ Run `server-rs` and open `client` in two browser windows (or incognito) to simul
 
 ### Start a normal game
 - Host presses start: all clients receive `gameStart` and then `tagBanStateUpdate`.
-- Make a wrong guess: team/observers should see `guessHistoryUpdate` and `boardcastTeamGuess` per rules.
+- Make a wrong guess: team/observers should see incremental `guessAppended` and `boardcastTeamGuess` per rules; `guessHistoryUpdate` is still used for snapshots/resync.
 - Make a correct guess: trigger `gameEnd` client->server and verify `gameEnded` is broadcast.
 
 ### Reconnect snapshot

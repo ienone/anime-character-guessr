@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { io } from 'socket.io-client';
-import { getCharacterAppearances } from '../utils/bangumi';
 import SettingsPopup from '../components/SettingsPopup';
 import SearchBar from '../components/SearchBar';
 import GuessesTable from '../components/GuessesTable';
@@ -20,6 +19,7 @@ import '../styles/Multiplayer.css';
 import '../styles/game.css';
 import axios from 'axios';
 const SOCKET_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '');
+const PLAYER_SESSION_KEY = 'animeGuessrPlayerSessionId';
 
 const SOCKET_EVENT_LABELS = {
   createRoom: '创建房间失败',
@@ -74,6 +74,40 @@ function describeGuessError(error) {
     return '获取角色登场信息失败：无法连接服务器。请确认后端仍在运行，且前端访问地址和服务器地址一致。';
   }
   return message;
+}
+
+function getPlayerSessionId() {
+  const storageCandidates = [
+    typeof window !== 'undefined' ? window.localStorage : null,
+    typeof window !== 'undefined' ? window.sessionStorage : null
+  ].filter(Boolean);
+
+  for (const storage of storageCandidates) {
+    try {
+      let sessionId = storage.getItem(PLAYER_SESSION_KEY);
+      if (!sessionId) {
+        sessionId = uuidv4();
+        storage.setItem(PLAYER_SESSION_KEY, sessionId);
+      }
+      return sessionId;
+    } catch {
+      // Ignore unavailable storage and fall through to the next candidate.
+    }
+  }
+
+  return uuidv4();
+}
+
+function getRoomJoinPayload(roomId, username) {
+  const avatarId = sessionStorage.getItem('avatarId');
+  const avatarImage = sessionStorage.getItem('avatarImage');
+  const avatarPayload = avatarId !== null ? { avatarId, avatarImage } : {};
+  return {
+    roomId,
+    username,
+    playerSessionId: getPlayerSessionId(),
+    ...avatarPayload
+  };
 }
 
 function getAttemptCount(player) {
@@ -166,6 +200,8 @@ const Multiplayer = () => {
   const [gameEnd, setGameEnd] = useState(false);
   const timeUpRef = useRef(0);
   const lastTimeoutEmitRef = useRef(0);
+  const pendingUpdatePlayersRef = useRef(null);
+  const updatePlayersFrameRef = useRef(null);
   const gameEndedRef = useRef(false);
   const [scoreDetails, setScoreDetails] = useState(null);
   const [globalGameEnd, setGlobalGameEnd] = useState(false);
@@ -274,7 +310,7 @@ const Multiplayer = () => {
     };
 
     // Socket event listeners
-    newSocket.on('updatePlayers', ({ players, isPublic, answerSetterId }) => {
+    const applyUpdatePlayers = ({ players, isPublic, answerSetterId }) => {
       setPlayers(players);
       latestPlayersRef.current = Array.isArray(players) ? players : [];
       if (isPublic !== undefined) {
@@ -297,6 +333,37 @@ const Multiplayer = () => {
         // 立即更新剩余次数并检查死亡状态
         updateGuessesLeftFromPlayer(me);
       }
+    };
+
+    newSocket.on('updatePlayers', (payload) => {
+      pendingUpdatePlayersRef.current = payload;
+      if (updatePlayersFrameRef.current !== null) return;
+      updatePlayersFrameRef.current = window.requestAnimationFrame(() => {
+        updatePlayersFrameRef.current = null;
+        const nextPayload = pendingUpdatePlayersRef.current;
+        pendingUpdatePlayersRef.current = null;
+        if (nextPayload) {
+          applyUpdatePlayers(nextPayload);
+        }
+      });
+    });
+
+    newSocket.on('playerPatched', ({ player }) => {
+      if (!player?.id) return;
+      setPlayers(prevPlayers => {
+        const current = Array.isArray(prevPlayers) ? prevPlayers : [];
+        const next = current.map(p => p.id === player.id ? { ...p, ...player } : p);
+        latestPlayersRef.current = next;
+        const me = next.find(p => p.id === newSocket.id);
+        if (me) {
+          setIsHost(me.isHost);
+          if (me.team === '0') {
+            setIsObserver(true);
+          }
+          updateGuessesLeftFromPlayer(me);
+        }
+        return next;
+      });
     });
 
     newSocket.on('roomNameUpdated', ({ roomName: updatedRoomName }) => {
@@ -409,11 +476,7 @@ const Multiplayer = () => {
       }
       
       if (isJoinedRef.current && roomIdRef.current && usernameRef.current) {
-        const avatarId = sessionStorage.getItem('avatarId');
-        const avatarImage = sessionStorage.getItem('avatarImage');
-        const avatarPayload = avatarId !== null ? { avatarId, avatarImage } : {};
-        
-        newSocket.emit('joinRoom', { roomId: roomIdRef.current, username: usernameRef.current, ...avatarPayload });
+        newSocket.emit('joinRoom', getRoomJoinPayload(roomIdRef.current, usernameRef.current));
         newSocket.emit('requestGameSettings', { roomId: roomIdRef.current });
       }
     });
@@ -585,6 +648,27 @@ const Multiplayer = () => {
       }
     });
 
+    newSocket.on('guessAppended', ({ username, entry }) => {
+      if (!username || !entry) return;
+      setGuessesHistory(prev => {
+        const next = Array.isArray(prev) ? [...prev] : [];
+        const existingIndex = next.findIndex(item => item?.username === username);
+        const sameEntry = guess => JSON.stringify(guess) === JSON.stringify(entry);
+        if (existingIndex >= 0) {
+          const guesses = Array.isArray(next[existingIndex].guesses)
+            ? next[existingIndex].guesses
+            : [];
+          if (guesses.some(sameEntry)) return prev;
+          next[existingIndex] = {
+            ...next[existingIndex],
+            guesses: [...guesses, entry]
+          };
+          return next;
+        }
+        return [...next, { username, guesses: [entry] }];
+      });
+    });
+
     newSocket.on('roomClosed', ({ message }) => {
       alert(message || '房主已断开连接，房间已关闭。');
       setError('房间已关闭');
@@ -614,11 +698,8 @@ const Multiplayer = () => {
         typeof message === 'string' &&
         message.includes('换个名字吧')
       ) {
-        const avatarId = sessionStorage.getItem('avatarId');
-        const avatarImage = sessionStorage.getItem('avatarImage');
-        const avatarPayload = avatarId !== null ? { avatarId, avatarImage } : {};
         setTimeout(() => {
-          socketRef.current?.emit('joinRoom', { roomId: roomIdRef.current, username: usernameRef.current, ...avatarPayload });
+          socketRef.current?.emit('joinRoom', getRoomJoinPayload(roomIdRef.current, usernameRef.current));
           socketRef.current?.emit('requestGameSettings', { roomId: roomIdRef.current });
         }, 500);
         return;
@@ -752,7 +833,7 @@ const Multiplayer = () => {
         const isAnswerSetterPlayer = currentPlayer?.isAnswerSetter;
         
         if (!isObserver && !isAnswerSetterPlayer) {
-          // guessesLeft is synced via guessHistoryUpdate
+          // guessesLeft is synced via playerPatched/updatePlayers
           setShouldResetTimer(true);
           setTimeout(() => setShouldResetTimer(false), 100);
         }
@@ -778,10 +859,17 @@ const Multiplayer = () => {
       newSocket.off('playerKicked');
       newSocket.off('hostTransferred');
       newSocket.off('updatePlayers');
+      newSocket.off('playerPatched');
       newSocket.off('waitForAnswer');
       newSocket.off('waitForAnswerCanceled');
       newSocket.off('gameStart');
       newSocket.off('guessHistoryUpdate');
+      newSocket.off('guessAppended');
+      if (updatePlayersFrameRef.current !== null) {
+        window.cancelAnimationFrame(updatePlayersFrameRef.current);
+        updatePlayersFrameRef.current = null;
+      }
+      pendingUpdatePlayersRef.current = null;
       newSocket.off('roomClosed');
       newSocket.off('error');
       newSocket.off('serverShutdown');
@@ -844,11 +932,7 @@ const Multiplayer = () => {
         
         // 延迟执行加入，确保 socket 已连接
         setTimeout(() => {
-          const avatarId = sessionStorage.getItem('avatarId');
-          const avatarImage = sessionStorage.getItem('avatarImage');
-          const avatarPayload = avatarId !== null ? { avatarId, avatarImage } : {};
-          
-          socketRef.current?.emit('joinRoom', { roomId, username: pendingUsername, ...avatarPayload });
+          socketRef.current?.emit('joinRoom', getRoomJoinPayload(roomId, pendingUsername));
           socketRef.current?.emit('requestGameSettings', { roomId });
         }, 100);
       }
@@ -888,15 +972,12 @@ const Multiplayer = () => {
     }
 
     setError('');
-    // Only declare these variables once
-    const avatarId = sessionStorage.getItem('avatarId');
-    const avatarImage = sessionStorage.getItem('avatarImage');
-    const avatarPayload = avatarId !== null ? { avatarId, avatarImage } : {};
+    const roomPayload = getRoomJoinPayload(roomId, username);
     if (isHost) {
-      socketRef.current?.emit('createRoom', { roomId, username, ...avatarPayload });
+      socketRef.current?.emit('createRoom', roomPayload);
       socketRef.current?.emit('updateGameSettings', { roomId, settings: gameSettings });
     } else {
-      socketRef.current?.emit('joinRoom', { roomId, username, ...avatarPayload });
+      socketRef.current?.emit('joinRoom', roomPayload);
       socketRef.current?.emit('requestGameSettings', { roomId });
     }
     // 保存用户名到 cookie，有效期 30 天
@@ -991,16 +1072,8 @@ const Multiplayer = () => {
     setShouldResetTimer(true);
 
     try {
-      const appearances = await getCharacterAppearances(character.id, gameSettings);
-
-      const rawTags = Object.fromEntries(appearances.rawTags?.entries?.() || []);
-      const guessData = {
-        ...character,
-        ...appearances,
-        rawTags
-      };
-      if (!guessData || !guessData.id || !guessData.name) {
-        console.warn('Invalid guessData, not emitting');
+      if (!character?.id) {
+        console.warn('Invalid guess character, not emitting');
         throw new Error('提交猜测失败：搜索结果缺少角色 ID 或名称，请重新选择角色');
       }
       if (!socketRef.current?.connected) {
@@ -1023,7 +1096,7 @@ const Multiplayer = () => {
         };
         socketRef.current?.emit('playerGuess', {
           roomId,
-          guessData
+          characterId: character.id
         });
       });
 

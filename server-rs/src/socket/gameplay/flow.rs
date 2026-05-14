@@ -27,9 +27,8 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
     let max_attempts = game
         .settings
         .as_ref()
-        .and_then(|s| s.get("maxAttempts"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(10) as usize;
+        .map(|settings| settings.max_attempts)
+        .unwrap_or(10);
 
     let is_team_mode = player.team.is_some() && player.team.as_deref() != Some("0");
     let team = player.team.clone();
@@ -61,9 +60,7 @@ pub fn enforce_attempt_limit(room: &mut Room, player_id: &str, is_correct: bool)
     let sync_mode = game
         .settings
         .as_ref()
-        .and_then(|s| s.get("syncMode"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .is_some_and(|settings| settings.sync_mode);
 
     if is_team_mode {
         let t = team.as_ref().unwrap();
@@ -132,9 +129,7 @@ pub fn handle_player_timeout(room: &mut Room, player_id: &str) -> TimeoutResult 
         .current_game
         .as_ref()
         .and_then(|g| g.settings.as_ref())
-        .and_then(|s| s.get("syncMode"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .is_some_and(|settings| settings.sync_mode);
     let sync_round = room
         .current_game
         .as_ref()

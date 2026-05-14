@@ -21,6 +21,9 @@ use socket::state::ServerState;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+    std::panic::set_hook(Box::new(|panic_info| {
+        tracing::error!(%panic_info, "panic");
+    }));
 
     let config = config::load_config();
     info!("Starting Anime Character Guessr Server...");
@@ -60,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn room auto-cleanup background task (replaces autoClean.js)
     utils::start_room_cleanup(Arc::clone(&server_state), io.clone());
+
+    // Runtime heartbeat and event-loop lag detector for production freezes.
+    utils::start_runtime_watchdog(Arc::clone(&server_state));
 
     // Spawn image cache cleanup background task
     utils::start_image_cache_cleanup(Arc::clone(&db_pools));
