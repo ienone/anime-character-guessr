@@ -17,6 +17,7 @@ import Image from '../components/Image';
 import useMultiplayerSocket from '../hooks/useMultiplayerSocket';
 import usePendingGuess from '../hooks/usePendingGuess';
 import useRoomLobby from '../hooks/useRoomLobby';
+import useRoundState from '../hooks/useRoundState';
 import logCollector from '../utils/logCollector';
 import '../styles/Multiplayer.css';
 import '../styles/game.css';
@@ -189,6 +190,12 @@ const Multiplayer = () => {
     globalPick: false, // 角色全局BP
     tagBan: false, // 标签全局BP
   });
+  const {
+    gameSettingsRef,
+    latestPlayersRef,
+    setLatestPlayers,
+    clearLatestPlayers
+  } = useRoundState({ gameSettings });
 
   // Game state
   const [isGameStarted, setIsGameStarted] = useState(false);
@@ -197,7 +204,6 @@ const Multiplayer = () => {
   const [isGuessing, setIsGuessing] = useState(false);
   const [isGameStarting, setIsGameStarting] = useState(false); // 防止重复点击开始按钮
   const answerCharacterRef = useRef(null);
-  const gameSettingsRef = useRef(gameSettings);
   const [answerCharacter, setAnswerCharacter] = useState(null);
   const [hints, setHints] = useState([]);
   const [useImageHint, setUseImageHint] = useState(0);
@@ -229,7 +235,6 @@ const Multiplayer = () => {
   const [nonstopProgress, setNonstopProgress] = useState(null); // 血战模式：进度信息
   const [isObserver, setIsObserver] = useState(false);
   const [bannedSharedTags, setBannedSharedTags] = useState([]);
-  const latestPlayersRef = useRef([]);
   const [connectionStatus, setConnectionStatus] = useState('connected');
   const reconnectAttemptsRef = useRef(0);
   const maxReconnectAttempts = 5;
@@ -296,7 +301,7 @@ const Multiplayer = () => {
     }
 
     const newSocket = socket;
-    latestPlayersRef.current = [];
+    clearLatestPlayers();
 
     // 用于追踪事件是否已经被处理
     const kickEventProcessed = {}; 
@@ -323,7 +328,7 @@ const Multiplayer = () => {
     // Socket event listeners
     const applyUpdatePlayers = ({ players, isPublic, answerSetterId }) => {
       setPlayers(players);
-      latestPlayersRef.current = Array.isArray(players) ? players : [];
+      setLatestPlayers(players);
       if (isPublic !== undefined) {
         setIsPublic(isPublic);
       }
@@ -364,7 +369,7 @@ const Multiplayer = () => {
       setPlayers(prevPlayers => {
         const current = Array.isArray(prevPlayers) ? prevPlayers : [];
         const next = current.map(p => p.id === player.id ? { ...p, ...player } : p);
-        latestPlayersRef.current = next;
+        setLatestPlayers(next);
         const me = next.find(p => p.id === newSocket.id);
         if (me) {
           setIsHost(me.isHost);
@@ -901,10 +906,22 @@ const Multiplayer = () => {
       newSocket.off('connect');
       newSocket.off('disconnect');
       newSocket.off('connect_error');
-      latestPlayersRef.current = [];
+      clearLatestPlayers();
       setBannedSharedTags([]);
     };
-  }, [hasPendingGuess, navigate, refreshRoomListIfVisible, rejectGuess, resolveGuess, socket, socketRef]);
+  }, [
+    clearLatestPlayers,
+    gameSettingsRef,
+    hasPendingGuess,
+    latestPlayersRef,
+    navigate,
+    refreshRoomListIfVisible,
+    rejectGuess,
+    resolveGuess,
+    setLatestPlayers,
+    socket,
+    socketRef
+  ]);
 
   useEffect(() => {
     // If user is no longer host, ensure manual mode is disabled
@@ -954,10 +971,6 @@ const Multiplayer = () => {
       socketRef.current?.emit('updateGameSettings', { roomId, settings: gameSettings });
     }
   }, [isHost, isJoined, roomId, gameSettings, socketRef]);
-
-  useEffect(() => {
-    gameSettingsRef.current = gameSettings;
-  }, [gameSettings]);
 
   const handleJoinRoom = () => {
     if (!username.trim()) {
