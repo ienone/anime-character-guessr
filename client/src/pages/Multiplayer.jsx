@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
-import { io } from 'socket.io-client';
 import SettingsPopup from '../components/SettingsPopup';
 import SearchBar from '../components/SearchBar';
 import GuessesTable from '../components/GuessesTable';
@@ -15,6 +14,7 @@ import GameSettingsDisplay from '../components/GameSettingsDisplay';
 import Leaderboard from '../components/Leaderboard';
 import Roulette from '../components/Roulette';
 import Image from '../components/Image';
+import useMultiplayerSocket from '../hooks/useMultiplayerSocket';
 import usePendingGuess from '../hooks/usePendingGuess';
 import useRoomLobby from '../hooks/useRoomLobby';
 import logCollector from '../utils/logCollector';
@@ -138,8 +138,7 @@ const Multiplayer = () => {
   };
   const [username, setUsername] = useState(getSavedUsername);
   const [isJoined, setIsJoined] = useState(false);
-  const [socket, setSocket] = useState(null);
-  const socketRef = useRef(null);
+  const { socket, socketRef } = useMultiplayerSocket(SOCKET_URL);
   const roomIdRef = useRef(roomId);
   const usernameRef = useRef(username);
   const isJoinedRef = useRef(isJoined);
@@ -292,10 +291,11 @@ const Multiplayer = () => {
   };
 
   useEffect(() => {
-    // Initialize socket connection
-    const newSocket = io(SOCKET_URL);
-    setSocket(newSocket);
-    socketRef.current = newSocket;
+    if (!socket) {
+      return undefined;
+    }
+
+    const newSocket = socket;
     latestPlayersRef.current = [];
 
     // 用于追踪事件是否已经被处理
@@ -901,11 +901,10 @@ const Multiplayer = () => {
       newSocket.off('connect');
       newSocket.off('disconnect');
       newSocket.off('connect_error');
-      newSocket.disconnect();
       latestPlayersRef.current = [];
       setBannedSharedTags([]);
     };
-  }, [hasPendingGuess, navigate, refreshRoomListIfVisible, rejectGuess, resolveGuess]);
+  }, [hasPendingGuess, navigate, refreshRoomListIfVisible, rejectGuess, resolveGuess, socket, socketRef]);
 
   useEffect(() => {
     // If user is no longer host, ensure manual mode is disabled
@@ -948,13 +947,13 @@ const Multiplayer = () => {
         }, 100);
       }
     }
-  }, [roomId, navigate]);
+  }, [roomId, navigate, socketRef]);
 
   useEffect(() => {
     if (isHost && isJoined) {
       socketRef.current?.emit('updateGameSettings', { roomId, settings: gameSettings });
     }
-  }, [isHost, isJoined, roomId, gameSettings]);
+  }, [isHost, isJoined, roomId, gameSettings, socketRef]);
 
   useEffect(() => {
     gameSettingsRef.current = gameSettings;
@@ -1366,7 +1365,7 @@ const Multiplayer = () => {
     if (!myId) return false;
     const me = players.find(p => p.id === myId);
     return me?.team === '0';
-  }, [players]);
+  }, [players, socketRef]);
 
   if (!roomId) {
     return (
