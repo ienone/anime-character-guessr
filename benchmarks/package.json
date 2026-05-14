@@ -7,7 +7,9 @@
     "bench": "node run_bench.js",
     "bench:node": "node run_bench.js --target node",
     "bench:rust": "node run_bench.js --target rust",
-    "bench:compare": "node run_bench.js --target both --concurrency 20 --requests 500"
+    "bench:compare": "node run_bench.js --target both --concurrency 20 --requests 500",
+    "stress": "node stress_server.js",
+    "stress:socket": "node stress_socket.js"
   },
   "engines": {
     "node": ">=18.0.0"

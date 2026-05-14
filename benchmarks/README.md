@@ -20,6 +20,31 @@ node run_bench.js --target both --concurrency 20 --requests 500
 node run_bench.js --spawn --target both --concurrency 20 --requests 500
 ```
 
+## 后端卡死/SQLite 压力排查
+
+`stress_server.js` 用于把本地读、app.sqlite 写入、图片缓存查询、外网图片源兜底分开压测：
+
+```bash
+cd benchmarks
+
+# 混合本地读写，不主动触发外网图片源兜底
+npm run stress -- --scenario mixed --concurrency 80 --requests 2000
+
+# 只压 archive.sqlite / Tantivy 读路径
+npm run stress -- --scenario db-read --concurrency 120 --requests 3000
+
+# 只压 app.sqlite 写入路径
+npm run stress -- --scenario app-write --concurrency 80 --requests 2000
+
+# 单独测试图片源兜底；该场景会受 BGM 外网影响
+npm run stress -- --scenario image-source --concurrency 20 --requests 200 --timeoutMs 12000
+
+# Socket.IO 多人房间压测：10 个房间，每房 4 人，每个非房主连续提交 40 次猜测
+npm run stress:socket -- --rooms 10 --players 4 --guesses 40
+```
+
+结果会写入 `benchmarks/results/stress_*.json`，摘要包含状态码、超时数、慢请求数、P95/P99 和按路径聚合的最大延迟。
+
 ## 命令行参数
 
 | 参数 | 默认值 | 说明 |
@@ -145,17 +170,16 @@ JSON 结构：`[{ scenario, requests, errors, durationMs, rps, avgMs, p50Ms, p95
 
 ## 性能优化说明
 
-### 候选角色索引（CandidateIndex）
+### 候选池缓存（CandidatePool）
 
-启动时一次性构建内存索引（~0.8s），后续每次 `GET /api/game/random` 的候选筛选为纯内存操作：
+`GET /api/game/random` 会按筛选设置缓存候选角色 ID 池，而不是缓存完整角色详情。缓存命中后只从候选 ID 中抽样，再按 ID 组装本次答案详情。
 
-```
-subject_type=2（动画）候选：~51,000 个角色
-subject_type=4（游戏）候选：~56,000 个角色
-全部类型合并：           107,243 个候选角色
-```
+- TTL：6 小时
+- 上限：128 个筛选组合
+- 内容：`Vec<i64>` 候选角色 ID
+- 构建锁：同一筛选组合只有一个线程构建，避免多人同时开局时重复扫 SQLite
 
-年份范围、topN 筛选均在内存 Vec 上完成，无 SQL 查询。
+这种方式降低多人同时开局时的候选筛选压力，同时避免把完整角色详情长期堆在内存里。
 
 ### SQLite 并发限制
 
