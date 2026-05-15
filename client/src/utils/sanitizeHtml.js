@@ -1,4 +1,6 @@
-const ALLOWED_TAGS = new Set([
+import DOMPurify from 'dompurify';
+
+const ALLOWED_TAGS = [
   'a',
   'br',
   'b',
@@ -13,7 +15,7 @@ const ALLOWED_TAGS = new Set([
   'ol',
   'li',
   'p'
-]);
+];
 
 const ALLOWED_ATTRIBUTES = {
   a: new Set(['href', 'title', 'target', 'rel']),
@@ -23,50 +25,48 @@ const ALLOWED_ATTRIBUTES = {
 };
 
 const SAFE_URL_PATTERN = /^(https?:|mailto:|#|\/)/i;
+const CLASS_ALLOWED_TAGS = new Set(['span', 'small', 'code']);
+let hooksInstalled = false;
 
-function sanitizeNode(document, node) {
-  if (node.nodeType === Node.TEXT_NODE) {
-    return document.createTextNode(node.textContent || '');
-  }
+function installHooks() {
+  if (hooksInstalled) return;
 
-  if (node.nodeType !== Node.ELEMENT_NODE) {
-    return document.createTextNode('');
-  }
-
-  const tagName = node.tagName.toLowerCase();
-  if (!ALLOWED_TAGS.has(tagName)) {
-    const fragment = document.createDocumentFragment();
-    node.childNodes.forEach(child => {
-      fragment.appendChild(sanitizeNode(document, child));
-    });
-    return fragment;
-  }
-
-  const element = document.createElement(tagName);
-  const allowedAttrs = ALLOWED_ATTRIBUTES[tagName] || new Set();
-  Array.from(node.attributes).forEach(attr => {
-    const name = attr.name.toLowerCase();
-    const value = attr.value || '';
-    if (!allowedAttrs.has(name) || name.startsWith('on')) {
+  DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+    const tagName = node.tagName?.toLowerCase();
+    const attrName = data.attrName?.toLowerCase();
+    if (!tagName || !attrName) {
+      data.keepAttr = false;
       return;
     }
-    if (name === 'href' && !SAFE_URL_PATTERN.test(value.trim())) {
+
+    const allowedAttrs = ALLOWED_ATTRIBUTES[tagName] || new Set();
+    if (!allowedAttrs.has(attrName) || attrName.startsWith('on')) {
+      data.keepAttr = false;
       return;
     }
-    element.setAttribute(name, value);
-  });
 
-  if (tagName === 'a') {
-    element.setAttribute('rel', 'noopener noreferrer');
-    if (element.getAttribute('target') === '_blank') {
-      element.setAttribute('target', '_blank');
+    if (attrName === 'href' && !SAFE_URL_PATTERN.test((data.attrValue || '').trim())) {
+      data.keepAttr = false;
+      return;
     }
-  }
 
-  node.childNodes.forEach(child => {
-    element.appendChild(sanitizeNode(document, child));
+    if (attrName === 'class' && !CLASS_ALLOWED_TAGS.has(tagName)) {
+      data.keepAttr = false;
+      return;
+    }
+
+    if (attrName === 'target' && data.attrValue !== '_blank') {
+      data.keepAttr = false;
+    }
   });
-  return element;
+
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    if (node.tagName?.toLowerCase() === 'a') {
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
+
+  hooksInstalled = true;
 }
 
 export function sanitizeHtml(html) {
@@ -74,14 +74,12 @@ export function sanitizeHtml(html) {
     return '';
   }
 
-  const parser = new DOMParser();
-  const parsed = parser.parseFromString(html, 'text/html');
-  const fragment = document.createDocumentFragment();
-  parsed.body.childNodes.forEach(child => {
-    fragment.appendChild(sanitizeNode(document, child));
+  installHooks();
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS,
+    ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class'],
+    ALLOW_DATA_ATTR: false,
+    ALLOW_UNKNOWN_PROTOCOLS: false,
+    RETURN_TRUSTED_TYPE: false
   });
-
-  const container = document.createElement('div');
-  container.appendChild(fragment);
-  return container.innerHTML;
 }
