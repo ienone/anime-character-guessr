@@ -1,8 +1,8 @@
 import '../styles/popups.css';
 import subaruIcon from '/assets/subaru.jpg';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import TagContributionPopup from './TagContributionPopup';
-import { idToTags } from '../data/id_tags';
+import { loadIdToTags } from '../utils/idTagsLoader';
 import Image from './Image';
 import Icon from './Icon';
 
@@ -103,6 +103,29 @@ function renderSummaryWithTags(summary) {
 
 function GameEndPopup({ result, answer, onClose }) {
   const [showTagPopup, setShowTagPopup] = useState(false);
+  const [answerTags, setAnswerTags] = useState([]);
+
+  useEffect(() => {
+    let active = true;
+    setAnswerTags([]);
+    if (!answer?.id) return () => {
+      active = false;
+    };
+
+    loadIdToTags()
+      .then(idToTags => {
+        if (active) {
+          setAnswerTags(idToTags?.[answer.id] || []);
+        }
+      })
+      .catch(error => {
+        console.error('Failed to load answer tags:', error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [answer?.id]);
 
   if (showTagPopup) {
     return (
@@ -178,11 +201,11 @@ function GameEndPopup({ result, answer, onClose }) {
               )}
 
               {/* 角色标签 */}
-              {idToTags[answer.id] && idToTags[answer.id].length > 0 && (
+              {answerTags.length > 0 && (
                 <div className="answer-tags">
                   <h3>角色标签：</h3>
                   <div className="tags-container">
-                    {idToTags[answer.id].map((tag, index) => (
+                    {answerTags.map((tag, index) => (
                       <span key={index} className="character-tag">{tag}</span>
                     ))}
                   </div>

@@ -1,15 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
-import SettingsPopup from '../components/SettingsPopup';
 import PlayerList from '../components/PlayerList';
 import RoomList from '../components/RoomList';
-import GameEndPopup from '../components/GameEndPopup';
-import SetAnswerPopup from '../components/SetAnswerPopup';
-import FeedbackPopup from '../components/FeedbackPopup';
 import GameSettingsDisplay from '../components/GameSettingsDisplay';
-import Leaderboard from '../components/Leaderboard';
-import Roulette from '../components/Roulette';
 import Icon from '../components/Icon';
 import ConfirmDialog from '../components/multiplayer/ConfirmDialog';
 import ConnectionStatusBanner from '../components/multiplayer/ConnectionStatusBanner';
@@ -33,6 +27,14 @@ import logCollector from '../utils/logCollector';
 import '../styles/Multiplayer.css';
 import '../styles/game.css';
 import axios from 'axios';
+
+const FeedbackPopup = lazy(() => import('../components/FeedbackPopup'));
+const GameEndPopup = lazy(() => import('../components/GameEndPopup'));
+const Leaderboard = lazy(() => import('../components/Leaderboard'));
+const Roulette = lazy(() => import('../components/Roulette'));
+const SetAnswerPopup = lazy(() => import('../components/SetAnswerPopup'));
+const SettingsPopup = lazy(() => import('../components/SettingsPopup'));
+
 const SOCKET_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '');
 const PLAYER_SESSION_KEY = 'animeGuessrPlayerSessionId';
 
@@ -845,8 +847,10 @@ const Multiplayer = () => {
             )}
           </div>
           
-          <Roulette />
-          <Leaderboard />
+          <Suspense fallback={null}>
+            <Roulette />
+            <Leaderboard />
+          </Suspense>
         </>
       ) : (
         <>
@@ -966,39 +970,43 @@ const Multiplayer = () => {
             />
           )}
 
-          {showSettings && (
-            <SettingsPopup
-              gameSettings={gameSettings}
-              onSettingsChange={handleSettingsChange}
-              onClose={() => setShowSettings(false)}
-              hideRestart={true}
-              isMultiplayer={true}
-            />
-          )}
+          <Suspense fallback={null}>
+            {showSettings && (
+              <SettingsPopup
+                gameSettings={gameSettings}
+                onSettingsChange={handleSettingsChange}
+                onClose={() => setShowSettings(false)}
+                hideRestart={true}
+                isMultiplayer={true}
+              />
+            )}
 
-          {globalGameEnd && showCharacterPopup && answerCharacter && (
-            <GameEndPopup
-              result={guesses.some(g => g.isAnswer) ? 'win' : 'lose'}
-              answer={answerCharacter}
-              onClose={() => setShowCharacterPopup(false)}
-            />
-          )}
+            {globalGameEnd && showCharacterPopup && answerCharacter && (
+              <GameEndPopup
+                result={guesses.some(g => g.isAnswer) ? 'win' : 'lose'}
+                answer={answerCharacter}
+                onClose={() => setShowCharacterPopup(false)}
+              />
+            )}
 
-          {showSetAnswerPopup && (
-            <SetAnswerPopup
-              onSetAnswer={handleSetAnswer}
-              onCancel={handleCancelWaitForAnswer}
-              gameSettings={gameSettings}
-            />
-          )}
+            {showSetAnswerPopup && (
+              <SetAnswerPopup
+                onSetAnswer={handleSetAnswer}
+                onCancel={handleCancelWaitForAnswer}
+                gameSettings={gameSettings}
+              />
+            )}
+          </Suspense>
         </>
 
       )}
       {showFeedbackPopup && (
-        <FeedbackPopup
-          onClose={() => setShowFeedbackPopup(false)}
-          onSubmit={handleFeedbackSubmit}
-        />
+        <Suspense fallback={null}>
+          <FeedbackPopup
+            onClose={() => setShowFeedbackPopup(false)}
+            onSubmit={handleFeedbackSubmit}
+          />
+        </Suspense>
       )}
     </div>
   );

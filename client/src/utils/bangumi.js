@@ -1,5 +1,5 @@
 import perfAxios from './perf.js'
-import { idToTags } from '../data/id_tags.js'
+import { loadIdToTags } from './idTagsLoader.js'
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
 const SUBJECT_SEARCH_CACHE_TTL_MS = 60 * 1000
@@ -253,7 +253,7 @@ async function designateCharacter(characterId, gameSettings) {
   }
 }
 
-function generateFeedback(guess, answerCharacter, gameSettings) {
+async function generateFeedback(guess, answerCharacter, gameSettings) {
   const result = {};
 
   result.gender = {
@@ -328,8 +328,9 @@ function generateFeedback(guess, answerCharacter, gameSettings) {
       }
     }
 
-    const guessCharacterTags = idToTags && idToTags[guess.id]? idToTags[guess.id] : [];
-    const answerCharacterTags = idToTags && idToTags[answerCharacter.id]? idToTags[answerCharacter.id] : [];
+    const idToTags = await loadIdToTags();
+    const guessCharacterTags = idToTags?.[guess.id] || [];
+    const answerCharacterTags = idToTags?.[answerCharacter.id] || [];
     const answerCharacterTagsSet = new Set(answerCharacterTags);
     const sharedCharacterTags = guessCharacterTags.filter(tag => answerCharacterTagsSet.has(tag)).slice(0, gameSettings.characterTagNum);
     const characterTags = [...sharedCharacterTags];

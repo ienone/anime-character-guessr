@@ -1,14 +1,10 @@
-import { useEffect, useState, useRef } from 'react';
+import { lazy, Suspense, useEffect, useState, useRef } from 'react';
 import { getRandomCharacter, getCharacterAppearances, generateFeedback } from '../utils/bangumi';
 import SearchBar from '../components/SearchBar';
 import GuessesTable from '../components/GuessesTable';
-import SettingsPopup from '../components/SettingsPopup';
-import HelpPopup from '../components/HelpPopup';
-import GameEndPopup from '../components/GameEndPopup';
 import SocialLinks from '../components/SocialLinks';
 import GameInfo from '../components/GameInfo';
 import Timer from '../components/Timer';
-import FeedbackPopup from '../components/FeedbackPopup';
 import Icon from '../components/Icon';
 import logCollector from '../utils/logCollector';
 import { notify } from '../utils/notifications';
@@ -17,6 +13,11 @@ import '../styles/SinglePlayer.css';
 import '../styles/social.css';
 import axios from 'axios';
 import { useLocalStorage } from 'usehooks-ts';
+
+const SettingsPopup = lazy(() => import('../components/SettingsPopup'));
+const HelpPopup = lazy(() => import('../components/HelpPopup'));
+const GameEndPopup = lazy(() => import('../components/GameEndPopup'));
+const FeedbackPopup = lazy(() => import('../components/FeedbackPopup'));
 
 function SinglePlayer() {
   const [guesses, setGuesses] = useState([]);
@@ -173,7 +174,7 @@ function SinglePlayer() {
           answer: answerCharacter
         });
       } else if (newGuessesLeft <= 0) {
-        const feedback = generateFeedback(guessData, answerCharacter, currentGameSettings);
+        const feedback = await generateFeedback(guessData, answerCharacter, currentGameSettings);
         setGuessesLeft(newGuessesLeft);
         setGuesses(prevGuesses => [...prevGuesses, {
           id: guessData.id,
@@ -207,7 +208,7 @@ function SinglePlayer() {
           answer: answerCharacter
         });
       } else {
-        const feedback = generateFeedback(guessData, answerCharacter, currentGameSettings);
+        const feedback = await generateFeedback(guessData, answerCharacter, currentGameSettings);
         setGuessesLeft(newGuessesLeft);
         setGuesses(prevGuesses => [...prevGuesses, {
           id: guessData.id,
@@ -420,33 +421,35 @@ function SinglePlayer() {
         answerCharacter={answerCharacter}
       />
 
-      {settingsPopup && (
-        <SettingsPopup
-          gameSettings={gameSettings}
-          onSettingsChange={handleSettingsChange}
-          onClose={() => setSettingsPopup(false)}
-          onRestart={handleRestartWithSettings}
-        />
-      )}
+      <Suspense fallback={null}>
+        {settingsPopup && (
+          <SettingsPopup
+            gameSettings={gameSettings}
+            onSettingsChange={handleSettingsChange}
+            onClose={() => setSettingsPopup(false)}
+            onRestart={handleRestartWithSettings}
+          />
+        )}
 
-      {helpPopup && (
-        <HelpPopup onClose={() => setHelpPopup(false)} />
-      )}
+        {helpPopup && (
+          <HelpPopup onClose={() => setHelpPopup(false)} />
+        )}
 
-      {gameEndPopup && (
-        <GameEndPopup
-          result={gameEndPopup.result}
-          answer={gameEndPopup.answer}
-          onClose={() => setGameEndPopup(null)}
-        />
-      )}
+        {gameEndPopup && (
+          <GameEndPopup
+            result={gameEndPopup.result}
+            answer={gameEndPopup.answer}
+            onClose={() => setGameEndPopup(null)}
+          />
+        )}
 
-      {showFeedbackPopup && (
-        <FeedbackPopup
-          onClose={() => setShowFeedbackPopup(false)}
-          onSubmit={handleFeedbackSubmit}
-        />
-      )}
+        {showFeedbackPopup && (
+          <FeedbackPopup
+            onClose={() => setShowFeedbackPopup(false)}
+            onSubmit={handleFeedbackSubmit}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import '../styles/popups.css';
 import { useState, useEffect } from 'react';
 import { submitCharacterTags, proposeCustomTags, submitFeedbackTags } from '../utils/db';
-import { idToTags } from '../data/id_tags.js';
+import { loadIdToTags } from '../utils/idTagsLoader';
 import Image from './Image';
 import { notify } from '../utils/notifications';
 import Icon from './Icon';
@@ -15,6 +15,7 @@ function TagContributionPopup({ character, onClose }) {
   const [activeVoteTag, setActiveVoteTag] = useState(null);
   const [upvotedTags, setUpvotedTags] = useState(new Set());
   const [downvotedTags, setDownvotedTags] = useState(new Set());
+  const [existingTags, setExistingTags] = useState([]);
   
   // Close vote box when clicking outside
   useEffect(() => {
@@ -26,6 +27,28 @@ function TagContributionPopup({ character, onClose }) {
     document.addEventListener('click', handleClickOutside);
     return () => document.removeEventListener('click', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    setExistingTags([]);
+    if (!character?.id) return () => {
+      active = false;
+    };
+
+    loadIdToTags()
+      .then(idToTags => {
+        if (active) {
+          setExistingTags(idToTags?.[character.id] || []);
+        }
+      })
+      .catch(error => {
+        console.error('Failed to load existing tags:', error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [character?.id]);
 
   const handleTagVoteClick = (event, tag) => {
     event.stopPropagation();
@@ -181,7 +204,7 @@ function TagContributionPopup({ character, onClose }) {
               <div className="existing-tags">
                 <h4>现有标签</h4>
                 <div className="existing-tags-list">
-                  {idToTags[character.id]?.map(tag => (
+                  {existingTags.map(tag => (
                     <div key={tag} className="existing-tag-container">
                       <button
                         className={getTagClassName(tag)}
@@ -197,7 +220,8 @@ function TagContributionPopup({ character, onClose }) {
                         </div>
                       )}
                     </div>
-                  )) || <span className="no-tags">暂无</span>}
+                  ))}
+                  {existingTags.length === 0 && <span className="no-tags">暂无</span>}
                 </div>
               </div>
             </div>
