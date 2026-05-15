@@ -138,6 +138,16 @@
   color: #6b7280;
 }
 
+.feedback-error {
+  padding: 9px 10px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .feedback-actions {
   display: flex;
   justify-content: flex-end;

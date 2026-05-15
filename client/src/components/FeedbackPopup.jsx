@@ -15,14 +15,19 @@ const FeedbackPopup = ({ onClose, onSubmit }) => {
   const [description, setDescription] = useState('');
   const [includeLogs, setIncludeLogs] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
   const handleSubmit = async () => {
     const trimmed = description.trim();
     if (!trimmed || isSubmitting) return;
     setIsSubmitting(true);
+    setSubmitError('');
     try {
       await onSubmit?.({ type, description: trimmed, includeLogs });
       onClose?.();
+    } catch (error) {
+      const message = error?.response?.data?.error || error?.message || '提交失败，请稍后重试';
+      setSubmitError(message);
     } finally {
       setIsSubmitting(false);
     }
@@ -70,6 +75,8 @@ const FeedbackPopup = ({ onClose, onSubmit }) => {
           </div>
           <span>包含客户端日志和报错信息（有助于问题排查）</span>
         </label>
+
+        {submitError && <div className="feedback-error">{submitError}</div>}
 
         <div className="feedback-actions">
           <button className="feedback-button secondary" onClick={onClose}>取消</button>

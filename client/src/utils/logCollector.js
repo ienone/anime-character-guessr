@@ -1,5 +1,30 @@
 const MAX_LOGS = 500;
 const MAX_ERRORS = 100;
+const FEEDBACK_LOG_LIMIT = 80;
+const FEEDBACK_ERROR_LIMIT = 30;
+const MAX_LOG_MESSAGE_CHARS = 800;
+const MAX_ERROR_STACK_CHARS = 1600;
+
+function truncateText(value, maxChars) {
+  const text = value == null ? '' : String(value);
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}...`;
+}
+
+function compactLogs(logs) {
+  return logs.slice(-FEEDBACK_LOG_LIMIT).map(log => ({
+    ...log,
+    message: truncateText(log.message, MAX_LOG_MESSAGE_CHARS)
+  }));
+}
+
+function compactErrors(errors) {
+  return errors.slice(-FEEDBACK_ERROR_LIMIT).map(error => ({
+    ...error,
+    message: truncateText(error.message, MAX_LOG_MESSAGE_CHARS),
+    stack: truncateText(error.stack, MAX_ERROR_STACK_CHARS)
+  }));
+}
 
 class LogCollector {
   constructor() {
@@ -146,9 +171,15 @@ class LogCollector {
       viewport: {
         width: window.innerWidth,
         height: window.innerHeight
-      },
-      logs: this.getLogs(),
-      errors: this.getErrors()
+      }
+    };
+  }
+
+  getFeedbackPayload() {
+    return {
+      logs: compactLogs(this.logs),
+      errors: compactErrors(this.errors),
+      diagnosticData: this.getDiagnosticData()
     };
   }
 }

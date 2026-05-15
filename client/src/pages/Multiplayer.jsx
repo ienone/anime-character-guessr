@@ -365,9 +365,7 @@ const Multiplayer = () => {
     };
 
     if (includeLogs) {
-      payload.logs = logCollector.getLogs();
-      payload.errors = logCollector.getErrors();
-      payload.diagnosticData = logCollector.getDiagnosticData();
+      Object.assign(payload, logCollector.getFeedbackPayload());
     }
 
     await axios.post(`${SOCKET_URL}/api/bug-feedback`, payload);
