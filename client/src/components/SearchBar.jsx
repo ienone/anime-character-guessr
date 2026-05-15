@@ -31,6 +31,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   
   const INITIAL_LIMIT = 10;
   const MORE_LIMIT = 5;
+  const SUBJECT_CHARACTER_LIMIT = 40;
 
   const performCharacterSearch = useCallback(async (query, reset = false, requestedOffset = 0) => {
     if (!query || !finishInit) return;
@@ -133,10 +134,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     setSelectedSubject(subject);
     try {
       const characters = await getCharactersBySubjectId(subject.id);
-      const detailResults = await Promise.allSettled(characters.map(character =>
+      const visibleCharacters = characters.slice(0, SUBJECT_CHARACTER_LIMIT);
+      const detailResults = await Promise.allSettled(visibleCharacters.map(character =>
         getCharacterDetails(character.id)
       ));
-      const formattedCharacters = characters.map((character, index) => {
+      const formattedCharacters = visibleCharacters.map((character, index) => {
         const detailResult = detailResults[index];
         const details = detailResult.status === 'fulfilled' ? detailResult.value : {};
         return {
@@ -157,6 +159,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       });
       setSearchResults(formattedCharacters);
       setFailedImages(new Set());
+      setHasMore(false);
     } catch (error) {
       console.error('Failed to fetch characters:', error);
       setSearchResults([]);
@@ -373,13 +376,24 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         className="result-character-icon"
         fallbackSrc=""
         cachedOnly
+        maxRetries={1}
+        retryDelay={500}
         onLoadError={() => markImageFailed(key)}
       />
     );
   };
 
   const renderSearchResults = () => {
-    if (searchResults.length === 0) return null;
+    if (searchResults.length === 0) {
+      if (!isSearching) return null;
+      return (
+        <div className="search-dropdown" ref={searchDropdownRef}>
+          <div className="search-loading">
+            {searchMode === 'subject' && selectedSubject ? '加载角色中...' : '搜索中...'}
+          </div>
+        </div>
+      );
+    }
 
     if (searchMode === 'subject' && !selectedSubject) {
       return (

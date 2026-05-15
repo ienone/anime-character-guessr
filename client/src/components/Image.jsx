@@ -13,8 +13,8 @@ import axios from 'axios'
 function Image({ 
   src, 
   alt = '', 
-  maxRetries = 10, 
-  retryDelay = 5000, 
+  maxRetries = 2,
+  retryDelay = 1000,
   fallbackSrc = '/assets/icon.jpg',
   preferSource = false,
   cachedOnly = false,
