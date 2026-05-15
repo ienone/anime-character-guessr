@@ -95,7 +95,7 @@ pub fn start_runtime_watchdog(state: Arc<ServerState>) {
                 );
             }
 
-            if ticks % 60 == 0 {
+            if ticks.is_multiple_of(60) {
                 let mut players = 0usize;
                 let mut active_games = 0usize;
                 for (_, room) in state.room_snapshots().await {
@@ -133,11 +133,9 @@ pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc
 async fn download_and_cache_image_inner(cache_key: String, url: String, pools: Arc<DbPools>) {
     // Coalesce duplicate requests
     let rx_opt = {
-        if let Some(entry) = PENDING_DOWNLOADS.get(&cache_key) {
-            Some(entry.value().subscribe())
-        } else {
-            None
-        }
+        PENDING_DOWNLOADS
+            .get(&cache_key)
+            .map(|entry| entry.value().subscribe())
     };
 
     if let Some(mut rx) = rx_opt {

@@ -226,13 +226,13 @@ pub async fn feedback_tags(
         };
 
         // Apply update object (e.g. { "tag1": 1, "tag2": -1 })
-        if let Value::Object(ref mut map) = tags {
-            if let Value::Object(updates) = update_action {
-                for (k, v) in updates {
-                    if let Some(delta) = v.as_i64() {
-                        let current_val = map.get(&k).and_then(|x| x.as_i64()).unwrap_or(0);
-                        map.insert(k, json!(current_val + delta));
-                    }
+        if let Value::Object(ref mut map) = tags
+            && let Value::Object(updates) = update_action
+        {
+            for (k, v) in updates {
+                if let Some(delta) = v.as_i64() {
+                    let current_val = map.get(&k).and_then(|x| x.as_i64()).unwrap_or(0);
+                    map.insert(k, json!(current_val + delta));
                 }
             }
         }

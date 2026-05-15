@@ -98,7 +98,7 @@ pub async fn metrics_handler() -> impl IntoResponse {
     let slow = REQUESTS_SLOW.load(Ordering::Relaxed);
     let errors = REQUESTS_ERROR.load(Ordering::Relaxed);
     let sum_ms = LATENCY_SUM_MS.load(Ordering::Relaxed);
-    let avg_ms = if total > 0 { sum_ms / total } else { 0 };
+    let avg_ms = sum_ms.checked_div(total).unwrap_or(0);
 
     let b10 = BUCKET_10MS.load(Ordering::Relaxed);
     let b50 = BUCKET_50MS.load(Ordering::Relaxed);
@@ -190,7 +190,7 @@ fn sample_process_metrics() {
 
         // On some platforms sysinfo may report >100 for multi-core aggregate usage.
         let cpu = p.cpu_usage() as f64;
-        let cpu_clamped = cpu.max(0.0).min(100.0);
+        let cpu_clamped = cpu.clamp(0.0, 100.0);
         let cpu_x100 = (cpu_clamped * 100.0).round() as u64;
         CPU_USAGE_PERCENT_X100.store(cpu_x100, Ordering::Relaxed);
     }

@@ -51,10 +51,10 @@ impl SearchCache {
 
     fn get(&mut self, key: &str) -> Option<Value> {
         let now = now_ms();
-        if let Some((expires_at, value)) = self.entries.get(key) {
-            if *expires_at > now {
-                return Some(value.clone());
-            }
+        if let Some((expires_at, value)) = self.entries.get(key)
+            && *expires_at > now
+        {
+            return Some(value.clone());
         }
         self.entries.remove(key);
         None
@@ -80,10 +80,10 @@ impl SearchCache {
             if !expired_or_missing && self.entries.len() <= SEARCH_CACHE_MAX_ENTRIES {
                 break;
             }
-            if let Some(key) = self.order.pop_front() {
-                if expired_or_missing || self.entries.len() > SEARCH_CACHE_MAX_ENTRIES {
-                    self.entries.remove(&key);
-                }
+            if let Some(key) = self.order.pop_front()
+                && (expired_or_missing || self.entries.len() > SEARCH_CACHE_MAX_ENTRIES)
+            {
+                self.entries.remove(&key);
             }
         }
     }

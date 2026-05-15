@@ -42,10 +42,10 @@ fn now_ms() -> i64 {
 
 fn cache_get_ttl(cache: &DashMap<String, CacheEntry>, key: &str) -> Option<Value> {
     let now = now_ms();
-    if let Some(entry) = cache.get(key) {
-        if entry.expires_at_ms > now {
-            return Some(entry.value.clone());
-        }
+    if let Some(entry) = cache.get(key)
+        && entry.expires_at_ms > now
+    {
+        return Some(entry.value.clone());
     }
     cache.remove(key);
     None
@@ -436,13 +436,13 @@ async fn get_random_character(
     match result {
         Ok((char_id, mut payload)) => {
             // Fill animeVAs via persisted mirror cache; BGM is used only as fallback and then stored in app.sqlite.
-            if let Some(vas) = ensure_vas_cached(&pools, char_id).await {
-                if let Value::Object(ref mut obj) = payload {
-                    obj.insert(
-                        "animeVAs".to_string(),
-                        Value::Array(vas.into_iter().map(Value::String).collect()),
-                    );
-                }
+            if let Some(vas) = ensure_vas_cached(&pools, char_id).await
+                && let Value::Object(ref mut obj) = payload
+            {
+                obj.insert(
+                    "animeVAs".to_string(),
+                    Value::Array(vas.into_iter().map(Value::String).collect()),
+                );
             }
             Json(payload).into_response()
         }
@@ -482,13 +482,13 @@ async fn get_character_by_id(
 
     match result {
         Ok(mut payload) => {
-            if let Some(vas) = ensure_vas_cached(&pools, char_id).await {
-                if let Value::Object(ref mut obj) = payload {
-                    obj.insert(
-                        "animeVAs".to_string(),
-                        Value::Array(vas.into_iter().map(Value::String).collect()),
-                    );
-                }
+            if let Some(vas) = ensure_vas_cached(&pools, char_id).await
+                && let Value::Object(ref mut obj) = payload
+            {
+                obj.insert(
+                    "animeVAs".to_string(),
+                    Value::Array(vas.into_iter().map(Value::String).collect()),
+                );
             }
             Json(payload).into_response()
         }
@@ -931,7 +931,7 @@ async fn get_character_image(
     }
 
     // 1. Check local cache
-    let local_path: Option<String> = match db::with_app_db(Arc::clone(&pools), move |conn| {
+    let local_path: Option<String> = db::with_app_db(Arc::clone(&pools), move |conn| {
         Ok(conn
             .query_row(
                 "SELECT local_path FROM image_cache WHERE id = ?1",
@@ -941,21 +941,18 @@ async fn get_character_image(
             .ok())
     })
     .await
-    {
-        Ok(v) => v,
-        Err(_) => None,
-    };
+    .unwrap_or_default();
 
-    if let Some(path) = local_path {
-        if let Ok(content) = tokio::fs::read(&path).await {
-            let mut headers = header::HeaderMap::new();
-            headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
-            headers.insert(
-                header::CACHE_CONTROL,
-                "public, max-age=31536000".parse().unwrap(),
-            );
-            return (headers, content).into_response();
-        }
+    if let Some(path) = local_path
+        && let Ok(content) = tokio::fs::read(&path).await
+    {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+        headers.insert(
+            header::CACHE_CONTROL,
+            "public, max-age=31536000".parse().unwrap(),
+        );
+        return (headers, content).into_response();
     }
 
     let pools_clone = Arc::clone(&pools);
@@ -1236,7 +1233,7 @@ async fn get_subject_image(
 
     // 1. Check local cache
     let key_lookup = cache_key.clone();
-    let local_path: Option<String> = match db::with_app_db(Arc::clone(&pools), move |conn| {
+    let local_path: Option<String> = db::with_app_db(Arc::clone(&pools), move |conn| {
         Ok(conn
             .query_row(
                 "SELECT local_path FROM image_cache WHERE id = ?1",
@@ -1246,21 +1243,18 @@ async fn get_subject_image(
             .ok())
     })
     .await
-    {
-        Ok(v) => v,
-        Err(_) => None,
-    };
+    .unwrap_or_default();
 
-    if let Some(path) = local_path {
-        if let Ok(content) = tokio::fs::read(&path).await {
-            let mut headers = header::HeaderMap::new();
-            headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
-            headers.insert(
-                header::CACHE_CONTROL,
-                "public, max-age=31536000".parse().unwrap(),
-            );
-            return (headers, content).into_response();
-        }
+    if let Some(path) = local_path
+        && let Ok(content) = tokio::fs::read(&path).await
+    {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+        headers.insert(
+            header::CACHE_CONTROL,
+            "public, max-age=31536000".parse().unwrap(),
+        );
+        return (headers, content).into_response();
     }
 
     let pools_clone = Arc::clone(&pools);

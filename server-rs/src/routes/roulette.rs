@@ -25,10 +25,8 @@ pub async fn roulette(State(pools): State<Arc<DbPools>>) -> impl IntoResponse {
             ))
         })?;
         let mut out: Vec<(i64, String)> = Vec::new();
-        for r in rows {
-            if let Ok(v) = r {
-                out.push(v);
-            }
+        for v in rows.flatten() {
+            out.push(v);
         }
         Ok(out)
     })

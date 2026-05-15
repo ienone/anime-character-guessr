@@ -11,6 +11,7 @@ use rusqlite::{Connection, params_from_iter};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Map;
 use serde_json::{Value, json};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -191,10 +192,11 @@ fn get_or_build_candidate_pool(
     settings: &GameSettings,
     key: &CandidateCacheKey,
 ) -> Result<Arc<Vec<i64>>> {
-    if let Some(entry) = CANDIDATE_CACHE.get(key) {
-        if entry.built_at.elapsed() < CANDIDATE_CACHE_TTL && !entry.candidates.is_empty() {
-            return Ok(Arc::clone(&entry.candidates));
-        }
+    if let Some(entry) = CANDIDATE_CACHE.get(key)
+        && entry.built_at.elapsed() < CANDIDATE_CACHE_TTL
+        && !entry.candidates.is_empty()
+    {
+        return Ok(Arc::clone(&entry.candidates));
     }
 
     let build_lock = CANDIDATE_BUILD_LOCKS
@@ -205,10 +207,11 @@ fn get_or_build_candidate_pool(
         .lock()
         .map_err(|_| anyhow::anyhow!("Candidate cache build lock poisoned"))?;
 
-    if let Some(entry) = CANDIDATE_CACHE.get(key) {
-        if entry.built_at.elapsed() < CANDIDATE_CACHE_TTL && !entry.candidates.is_empty() {
-            return Ok(Arc::clone(&entry.candidates));
-        }
+    if let Some(entry) = CANDIDATE_CACHE.get(key)
+        && entry.built_at.elapsed() < CANDIDATE_CACHE_TTL
+        && !entry.candidates.is_empty()
+    {
+        return Ok(Arc::clone(&entry.candidates));
     }
 
     let candidates = Arc::new(query_candidate_pool(conn, settings)?);
@@ -249,7 +252,7 @@ fn query_candidate_pool(conn: &Connection, settings: &GameSettings) -> Result<Ve
         .top_n_subjects
         .filter(|n| *n > 0)
         .map(|n| n.min(3000) as usize);
-    let characters_per_subject = settings.character_num.max(1).min(50);
+    let characters_per_subject = settings.character_num.clamp(1, 50);
     let added_subject_ids = settings.added_subject_ids.clone();
     let type_placeholders = std::iter::repeat_n("?", types.len())
         .collect::<Vec<_>>()
@@ -740,10 +743,10 @@ impl GameSettings {
     }
 
     fn matches_subject(&self, subject: &SubjectInfo) -> bool {
-        if let Some(primary) = self.primary_meta_filter() {
-            if !json_string_array_contains(&subject.meta_tags, primary) {
-                return false;
-            }
+        if let Some(primary) = self.primary_meta_filter()
+            && !json_string_array_contains(&subject.meta_tags, primary)
+        {
+            return false;
         }
         if let Some(source) = self.source_filter() {
             let aliases = source_aliases(source);
@@ -751,12 +754,11 @@ impl GameSettings {
                 return false;
             }
         }
-        if let Some(genre) = self.genre_filter() {
-            if !json_string_array_contains(&subject.meta_tags, genre)
-                && !json_tag_array_contains_any(&subject.tags, &[genre.to_string()])
-            {
-                return false;
-            }
+        if let Some(genre) = self.genre_filter()
+            && !json_string_array_contains(&subject.meta_tags, genre)
+            && !json_tag_array_contains_any(&subject.tags, &[genre.to_string()])
+        {
+            return false;
         }
         true
     }
@@ -803,7 +805,7 @@ impl CandidateCacheKey {
                 .filter(|n| *n > 0)
                 .map(|n| n.min(3000)),
             main_character_only: settings.main_character_only,
-            character_num: settings.character_num.max(1).min(50),
+            character_num: settings.character_num.clamp(1, 50),
             use_subject_per_year: settings.use_subject_per_year,
             added_subject_ids,
         }
@@ -974,15 +976,15 @@ fn assemble_payload(
             if s.year <= 0 || s.year > current_year {
                 return false;
             }
-            if let Some(sy) = settings.start_year {
-                if s.year < sy {
-                    return false;
-                }
+            if let Some(sy) = settings.start_year
+                && s.year < sy
+            {
+                return false;
             }
-            if let Some(ey) = settings.end_year {
-                if s.year > ey {
-                    return false;
-                }
+            if let Some(ey) = settings.end_year
+                && s.year > ey
+            {
+                return false;
             }
             true
         })
@@ -1048,7 +1050,7 @@ fn assemble_payload(
 
     // Sort by popularity descending (already sorted in cache, but filtered set may differ)
     let mut sorted_subjects: Vec<&SubjectInfo> = appearance_subjects.clone();
-    sorted_subjects.sort_by(|a, b| b.popularity.cmp(&a.popularity));
+    sorted_subjects.sort_by_key(|subject| Reverse(subject.popularity));
 
     for s in &sorted_subjects {
         let stuff_factor: i64 = if s.role == 1 { 3 } else { 1 }; // 主角 weight
@@ -1139,7 +1141,7 @@ fn assemble_payload(
     if settings.common_tags {
         // Merge top source tag into raw_tags
         let mut sorted_source: Vec<(String, i64)> = source_tag_counts.into_iter().collect();
-        sorted_source.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_source.sort_by_key(|entry| Reverse(entry.1));
         if let Some((top_src, top_cnt)) = sorted_source.first() {
             *raw_tags_map.entry(top_src.clone()).or_insert(0) += top_cnt;
         }
@@ -1148,7 +1150,7 @@ fn assemble_payload(
             .into_iter()
             .filter(|(k, _)| !k.contains("20"))
             .collect();
-        sorted_raw.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_raw.sort_by_key(|entry| Reverse(entry.1));
 
         let max_count = sorted_raw.first().map(|e| e.1).unwrap_or(0);
         let threshold = (max_count as f64 * 0.1) as i64;
@@ -1169,13 +1171,13 @@ fn assemble_payload(
     } else {
         // Build allMetaTags
         let mut sorted_source: Vec<(String, i64)> = source_tag_counts.into_iter().collect();
-        sorted_source.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_source.sort_by_key(|entry| Reverse(entry.1));
 
         let mut sorted_meta: Vec<(String, i64)> = meta_tag_counts.into_iter().collect();
-        sorted_meta.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_meta.sort_by_key(|entry| Reverse(entry.1));
 
         let mut sorted_tags: Vec<(String, i64)> = tag_counts.into_iter().collect();
-        sorted_tags.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_tags.sort_by_key(|entry| Reverse(entry.1));
 
         let mut meta_set: Vec<String> = Vec::new();
 

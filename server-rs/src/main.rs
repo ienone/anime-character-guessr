@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
-use tracing_subscriber;
 
 mod config;
 mod db;
