@@ -53,6 +53,8 @@ services:
       - PUBLIC_CLIENT_URL=${DOMAIN_NAME:-http://localhost}
       # Docker traffic reaches the server through the bundled nginx proxy
       - TRUST_PROXY_HEADERS=true
+      - TRUST_CLOUDFLARE_HEADERS=${TRUST_CLOUDFLARE_HEADERS:-false}
+      - TRUST_X_FORWARDED_FOR=${TRUST_X_FORWARDED_FOR:-false}
     volumes:
       # Mount pre-built archive.sqlite (read-only asset)
       - ./archive.sqlite:/data/archive.sqlite:ro

@@ -54,12 +54,42 @@ fn cache_get_ttl(cache: &DashMap<String, CacheEntry>, key: &str) -> Option<Value
 
 fn cache_put_ttl(cache: &DashMap<String, CacheEntry>, key: String, ttl_ms: i64, value: Value) {
     cache.insert(
-        key,
+        key.clone(),
         CacheEntry {
             expires_at_ms: now_ms() + ttl_ms,
             value,
         },
     );
+    prune_ttl_cache(cache, &key);
+}
+
+fn prune_ttl_cache(cache: &DashMap<String, CacheEntry>, protected_key: &str) {
+    let now = now_ms();
+    let expired_keys = cache
+        .iter()
+        .filter(|entry| entry.value().expires_at_ms <= now)
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for key in expired_keys {
+        if key != protected_key {
+            cache.remove(&key);
+        }
+    }
+
+    if cache.len() <= TTL_CACHE_MAX_ENTRIES {
+        return;
+    }
+
+    let remove_count = cache.len().saturating_sub(TTL_CACHE_MAX_ENTRIES);
+    let keys = cache
+        .iter()
+        .filter(|entry| entry.key().as_str() != protected_key)
+        .map(|entry| entry.key().clone())
+        .take(remove_count)
+        .collect::<Vec<_>>();
+    for key in keys {
+        cache.remove(&key);
+    }
 }
 
 // stable_hash_json was previously used for BGM search caching; removed after
@@ -85,6 +115,9 @@ lazy_static::lazy_static! {
 const IMAGE_SOURCE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(4);
 const IMAGE_SOURCE_PERMIT_TIMEOUT: Duration = Duration::from_millis(500);
 const BGM_PROXY_LIMIT_PER_MINUTE: usize = 90;
+const GAME_RANDOM_LIMIT_PER_MINUTE: usize = 60;
+const GAME_CHARACTER_LIMIT_PER_MINUTE: usize = 120;
+const TTL_CACHE_MAX_ENTRIES: usize = 2048;
 
 /// /api/* — game logic, leaderboard, stats
 pub fn api_routes(pools: Arc<DbPools>) -> Router {
@@ -112,7 +145,6 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         .route("/redeem", get(stats::redeem))
         // Player leaderboard
         .route("/leaderboard", get(leaderboard::get_leaderboard))
-        .route("/leaderboard/submit", post(leaderboard::submit_score))
         // Character leaderboards
         .route(
             "/leaderboard/characters",
@@ -128,12 +160,7 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         .route("/guess-character-count", post(stats::guess_character_count))
         .route("/character-usage/{id}", get(stats::character_usage))
         .route("/subject-added", post(stats::subject_added))
-        // Read-only tag compatibility endpoints and bug feedback.
-        .route("/character-tags/{id}", get(tags::get_character_tags))
-        .route(
-            "/game-character-tags/{subject_id}",
-            get(tags::get_game_character_tags),
-        )
+        // Bug feedback.
         .route("/bug-feedback", post(tags::bug_feedback))
         .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state(pools)
@@ -418,8 +445,19 @@ async fn resolve_subject_image_source(
 /// Pick a random character based on game settings from archive.sqlite.
 async fn get_random_character(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) = write_guard::enforce_public_write_limit(
+        &headers,
+        Some(peer_addr),
+        "game-random",
+        GAME_RANDOM_LIMIT_PER_MINUTE,
+    ) {
+        return response.into_response();
+    }
+
     let settings = game::GameSettings::from_json(&body);
     let pools_for_query = Arc::clone(&pools);
     let result = db::with_archive_db_timed(
@@ -455,10 +493,28 @@ async fn get_random_character(
 /// Return full gameplay payload for a specific character from archive.sqlite.
 async fn get_character_by_id(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) = write_guard::enforce_public_write_limit(
+        &headers,
+        Some(peer_addr),
+        "game-character",
+        GAME_CHARACTER_LIMIT_PER_MINUTE,
+    ) {
+        return response.into_response();
+    }
+
     let char_id = match body.get("id").and_then(|v| v.as_i64()) {
-        Some(id) => id,
+        Some(id) if id > 0 => id,
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "id must be positive" })),
+            )
+                .into_response();
+        }
         None => {
             return (
                 StatusCode::BAD_REQUEST,

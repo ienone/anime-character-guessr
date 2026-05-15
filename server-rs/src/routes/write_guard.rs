@@ -75,7 +75,7 @@ pub fn enforce_public_write_limit(
     if hits.len() >= max_per_minute {
         return Err(guard_reject(
             StatusCode::TOO_MANY_REQUESTS,
-            "too many write requests, please retry later",
+            "too many requests, please retry later",
         ));
     }
 
@@ -114,14 +114,50 @@ fn trust_forwarded_headers() -> bool {
         .unwrap_or(false)
 }
 
-fn header_client_key(headers: &HeaderMap) -> Option<String> {
+fn trust_cloudflare_headers() -> bool {
+    std::env::var("TRUST_CLOUDFLARE_HEADERS")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false)
+}
+
+fn trust_x_forwarded_for() -> bool {
+    std::env::var("TRUST_X_FORWARDED_FOR")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false)
+}
+
+fn header_value_client_key(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
-        .get("cf-connecting-ip")
-        .or_else(|| headers.get("x-real-ip"))
-        .or_else(|| headers.get("x-forwarded-for"))
+        .get(name)
         .and_then(|value| value.to_str().ok())
         .map(|raw| normalize_client_key(raw, "proxy"))
         .filter(|value| value != "proxy:unknown")
+}
+
+fn header_client_key(headers: &HeaderMap) -> Option<String> {
+    if trust_cloudflare_headers()
+        && let Some(client) = header_value_client_key(headers, "cf-connecting-ip")
+    {
+        return Some(client);
+    }
+
+    if let Some(client) = header_value_client_key(headers, "x-real-ip") {
+        return Some(client);
+    }
+
+    if trust_x_forwarded_for() {
+        return header_value_client_key(headers, "x-forwarded-for");
+    }
+
+    None
 }
 
 fn normalize_client_key(raw: &str, prefix: &str) -> String {

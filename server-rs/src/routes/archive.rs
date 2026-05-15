@@ -1,13 +1,14 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Path, State},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
 };
 use rusqlite::{params, params_from_iter};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -119,7 +120,12 @@ pub fn archive_routes(pools: Arc<DbPools>) -> Router<Arc<DbPools>> {
 
 /// GET /api/archive/subjects/:id
 /// Returns a subset of BGM subject JSON from local archive.sqlite.
-async fn get_subject(State(pools): State<Arc<DbPools>>, Path(id): Path<i64>) -> impl IntoResponse {
+async fn get_subject(
+    State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
     if id <= 0 {
         return (
             StatusCode::BAD_REQUEST,
@@ -177,6 +183,10 @@ async fn get_subject(State(pools): State<Arc<DbPools>>, Path(id): Path<i64>) -> 
                 return Json(v).into_response();
             }
 
+            if let Some(rejection) = super::bgm_proxy_limit_rejection(&headers, peer_addr) {
+                return rejection.into_response();
+            }
+
             let url = format!("https://api.bgm.tv/v0/subjects/{}", id);
             match super::bgm_get(&url).await {
                 Ok(v) => {
@@ -207,6 +217,8 @@ async fn get_subject(State(pools): State<Arc<DbPools>>, Path(id): Path<i64>) -> 
 /// Local replacement for `GET /v0/subjects/:id/characters`.
 async fn get_subject_characters(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(subject_id): Path<i64>,
 ) -> impl IntoResponse {
     if subject_id <= 0 {
@@ -280,6 +292,10 @@ async fn get_subject_characters(
                 return Json(v).into_response();
             }
 
+            if let Some(rejection) = super::bgm_proxy_limit_rejection(&headers, peer_addr) {
+                return rejection.into_response();
+            }
+
             let url = format!("https://api.bgm.tv/v0/subjects/{}/characters", subject_id);
             match super::bgm_get(&url).await {
                 Ok(raw) => {
@@ -311,6 +327,8 @@ async fn get_subject_characters(
 /// Local replacement for `GET /v0/characters/:id` (subset used by frontend).
 async fn get_character_basic(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     if id <= 0 {
@@ -353,6 +371,10 @@ async fn get_character_basic(
             let cache_key = id.to_string();
             if let Some(v) = super::cache_get_ttl(&super::CHARACTER_DETAILS_CACHE, &cache_key) {
                 return Json(v).into_response();
+            }
+
+            if let Some(rejection) = super::bgm_proxy_limit_rejection(&headers, peer_addr) {
+                return rejection.into_response();
             }
 
             let url = format!("https://api.bgm.tv/v0/characters/{}", id);

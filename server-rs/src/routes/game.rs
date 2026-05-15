@@ -21,6 +21,11 @@ use dashmap::DashMap;
 
 const CANDIDATE_CACHE_MAX_ENTRIES: usize = 128;
 const CANDIDATE_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const MAX_META_TAGS: usize = 8;
+const MAX_META_TAG_CHARS: usize = 48;
+const MAX_ADDED_SUBJECTS: usize = 100;
+const MAX_ADDED_SUBJECT_NAME_CHARS: usize = 120;
+const MAX_USE_HINTS: usize = 20;
 
 static CANDIDATE_CACHE: LazyLock<DashMap<CandidateCacheKey, CandidateCacheEntry>> =
     LazyLock::new(DashMap::new);
@@ -415,6 +420,10 @@ fn default_max_attempts() -> usize {
     10
 }
 
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 fn value_as_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Number(n) => n.as_i64(),
@@ -652,6 +661,83 @@ impl Default for GameSettings {
 }
 
 impl GameSettings {
+    fn normalize_public_bounds(&mut self) {
+        if let (Some(start), Some(end)) = (self.start_year, self.end_year)
+            && start > end
+        {
+            self.start_year = Some(end);
+            self.end_year = Some(start);
+        }
+        self.start_year = self.start_year.map(|year| year.clamp(1800, 2038));
+        self.end_year = self.end_year.map(|year| year.clamp(1800, 2038));
+
+        self.meta_tags = self
+            .meta_tags
+            .iter()
+            .take(MAX_META_TAGS)
+            .map(|tag| truncate_chars(tag.trim(), MAX_META_TAG_CHARS))
+            .collect();
+        while self
+            .meta_tags
+            .last()
+            .map(|tag| tag.is_empty())
+            .unwrap_or(false)
+        {
+            self.meta_tags.pop();
+        }
+
+        self.top_n_subjects = self
+            .top_n_subjects
+            .filter(|value| *value > 0)
+            .map(|value| value.min(3000));
+        self.subject_tag_num = self.subject_tag_num.clamp(0, 10);
+        self.character_tag_num = self.character_tag_num.clamp(0, 10);
+        self.character_num = self.character_num.clamp(1, 50);
+        self.max_attempts = self.max_attempts.clamp(1, 15);
+        self.use_hints = self
+            .use_hints
+            .iter()
+            .copied()
+            .filter(|id| *id > 0)
+            .take(MAX_USE_HINTS)
+            .collect();
+        self.use_image_hint = self.use_image_hint.filter(|id| *id > 0);
+        self.time_limit = self.time_limit.and_then(|seconds| {
+            if seconds <= 0 {
+                None
+            } else {
+                Some(seconds.clamp(15, 120))
+            }
+        });
+
+        let mut seen_subjects = HashSet::new();
+        self.added_subjects = self
+            .added_subjects
+            .drain(..)
+            .filter(|subject| subject.id > 0)
+            .filter(|subject| seen_subjects.insert(subject.id))
+            .take(MAX_ADDED_SUBJECTS)
+            .map(|mut subject| {
+                subject.name = truncate_chars(subject.name.trim(), MAX_ADDED_SUBJECT_NAME_CHARS);
+                subject.name_cn =
+                    truncate_chars(subject.name_cn.trim(), MAX_ADDED_SUBJECT_NAME_CHARS);
+                subject
+            })
+            .collect();
+
+        let mut added_ids = self
+            .added_subjects
+            .iter()
+            .map(|subject| subject.id)
+            .chain(self.added_subject_ids.iter().copied())
+            .filter(|id| *id > 0)
+            .collect::<Vec<_>>();
+        added_ids.sort_unstable();
+        added_ids.dedup();
+        added_ids.truncate(MAX_ADDED_SUBJECTS);
+        self.added_subject_ids = added_ids;
+    }
+
     pub fn subject_types(&self) -> Vec<i64> {
         let primary = self.meta_tags.first().map(|s| s.as_str()).unwrap_or("");
         match primary {
@@ -786,6 +872,7 @@ impl GameSettings {
                 })
                 .unwrap_or_default();
         }
+        settings.normalize_public_bounds();
         settings
     }
 }
