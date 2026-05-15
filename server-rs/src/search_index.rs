@@ -63,8 +63,8 @@ impl TantivySearch {
             .collect::<Vec<_>>();
         docs.sort_by(|a, b| {
             a.0.cmp(&b.0)
-                .then_with(|| b.2.cmp(&a.2))
                 .then_with(|| b.1.total_cmp(&a.1))
+                .then_with(|| b.2.cmp(&a.2))
         });
         Ok(docs
             .into_iter()
@@ -120,8 +120,8 @@ impl TantivySearch {
         }
         filtered.sort_by(|a, b| {
             a.0.cmp(&b.0)
-                .then_with(|| b.2.cmp(&a.2))
                 .then_with(|| b.1.total_cmp(&a.1))
+                .then_with(|| b.2.cmp(&a.2))
         });
         for (_, _, _, doc) in filtered.into_iter().take(limit) {
             let id = first_u64(&doc, "id").unwrap_or(0);

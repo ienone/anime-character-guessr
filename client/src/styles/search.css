@@ -213,6 +213,15 @@
   background-color: #f0f0f0;
 }
 
+.search-result-item.load-more.disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.search-result-item.load-more.disabled:hover {
+  background-color: #f8f8f8;
+}
+
 /* Scrollbar styling for the dropdown */
 .search-dropdown::-webkit-scrollbar {
   width: 8px;

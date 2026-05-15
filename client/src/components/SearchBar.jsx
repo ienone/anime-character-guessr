@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { searchSubjects, getCharactersBySubjectId, getCharacterDetails } from '../utils/bangumi';
+import { searchSubjects, getCharactersBySubjectId } from '../utils/bangumi';
 import Image from './Image';
 import '../styles/search.css';
 import { submitGuessCharacterCount } from '../utils/db';
@@ -29,35 +29,28 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const characterSearchAbortRef = useRef(null);
   const subjectSearchAbortRef = useRef(null);
   const searchRequestSeqRef = useRef(0);
+  const subjectSelectRequestSeqRef = useRef(0);
+  const loadMoreInFlightRef = useRef(false);
   
   const INITIAL_LIMIT = 10;
   const MORE_LIMIT = 5;
   const SUBJECT_CHARACTER_LIMIT = 40;
 
-  const formatSubjectCharacters = useCallback(async (subject, characters) => {
-    const detailResults = await Promise.allSettled(characters.map(character =>
-      getCharacterDetails(character.id)
-    ));
-    return characters.map((character, index) => {
-      const detailResult = detailResults[index];
-      const details = detailResult.status === 'fulfilled' ? detailResult.value : {};
-      return {
-        id: character.id,
-        image: character.images?.grid || details.imageGrid || details.image || null,
-        name: character.name,
-        nameCn: details.nameCn || null,
-        gender: details.gender || '?',
-        popularity: details.popularity ?? 0,
-        defaultSubject: subject
-          ? {
-            id: subject.id,
-            name: subject.name,
-            nameCn: subject.name_cn || subject.nameCn || ''
-          }
-          : null
-      };
-    });
-  }, []);
+  const formatSubjectCharacters = useCallback((subject, characters) => characters.map(character => ({
+    id: character.id,
+    image: character.imageGrid || character.image || character.images?.grid || character.images?.medium || null,
+    name: character.name,
+    nameCn: character.nameCn || character.name_cn || character.name,
+    gender: character.gender || '?',
+    popularity: character.popularity ?? 0,
+    defaultSubject: subject
+      ? {
+        id: subject.id,
+        name: subject.name,
+        nameCn: subject.name_cn || subject.nameCn || ''
+      }
+      : character.defaultSubject || null
+  })), []);
 
   const performCharacterSearch = useCallback(async (query, reset = false, requestedOffset = 0) => {
     if (!query || !finishInit) return;
@@ -101,7 +94,10 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         setSearchResults(newResults);
         setOffset(INITIAL_LIMIT);
       } else {
-        setSearchResults(prev => [...prev, ...newResults]);
+        setSearchResults(prev => {
+          const seen = new Set(prev.map(item => item.id));
+          return [...prev, ...newResults.filter(item => !seen.has(item.id))];
+        });
         setOffset(currentOffset + MORE_LIMIT);
       }
       
@@ -152,25 +148,37 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const handleSubjectSearch = useCallback(async () => {
     const query = searchQuery.trim();
     if (!query || !finishInit) return;
+    subjectSelectRequestSeqRef.current++;
+    setSelectedSubject(null);
+    setSubjectCharacters([]);
     await performSubjectSearch(query);
   }, [searchQuery, finishInit, performSubjectSearch]);
 
   const handleSubjectSelect = useCallback(async (subject) => {
+    const requestSeq = ++subjectSelectRequestSeqRef.current;
     setIsSearching(true);
     setSelectedSubject(subject);
+    setSearchResults([]);
+    setFailedImages(new Set());
     try {
       const characters = await getCharactersBySubjectId(subject.id);
+      if (requestSeq !== subjectSelectRequestSeqRef.current) return;
       const visibleCharacters = characters.slice(0, SUBJECT_CHARACTER_LIMIT);
-      const formattedCharacters = await formatSubjectCharacters(subject, visibleCharacters);
+      const formattedCharacters = formatSubjectCharacters(subject, visibleCharacters);
+      if (requestSeq !== subjectSelectRequestSeqRef.current) return;
       setSubjectCharacters(characters);
       setSearchResults(formattedCharacters);
       setFailedImages(new Set());
       setHasMore(characters.length > visibleCharacters.length);
     } catch (error) {
-      console.error('Failed to fetch characters:', error);
-      setSearchResults([]);
+      if (requestSeq === subjectSelectRequestSeqRef.current) {
+        console.error('Failed to fetch characters:', error);
+        setSearchResults([]);
+      }
     } finally {
-      setIsSearching(false);
+      if (requestSeq === subjectSelectRequestSeqRef.current) {
+        setIsSearching(false);
+      }
     }
   }, [formatSubjectCharacters]);
 
@@ -187,8 +195,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
 
     setIsLoadingMore(true);
     try {
-      const formattedCharacters = await formatSubjectCharacters(selectedSubject, nextCharacters);
-      setSearchResults(prev => [...prev, ...formattedCharacters]);
+      const formattedCharacters = formatSubjectCharacters(selectedSubject, nextCharacters);
+      setSearchResults(prev => {
+        const seen = new Set(prev.map(item => item.id));
+        return [...prev, ...formattedCharacters.filter(item => !seen.has(item.id))];
+      });
       setHasMore(searchResults.length + nextCharacters.length < subjectCharacters.length);
     } catch (error) {
       console.error('Failed to fetch more subject characters:', error);
@@ -198,12 +209,22 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   }, [formatSubjectCharacters, isLoadingMore, searchResults.length, selectedSubject, subjectCharacters]);
 
   const handleLoadMore = useCallback(() => {
+    if (loadMoreInFlightRef.current || isLoadingMore || isSearching || !hasMore) return false;
+    loadMoreInFlightRef.current = true;
     if (searchMode === 'subject' && selectedSubject) {
-      handleLoadMoreSubjectCharacters();
+      handleLoadMoreSubjectCharacters().finally(() => {
+        loadMoreInFlightRef.current = false;
+      });
+      return true;
     } else if (searchMode === 'character') {
-      handleSearch(false);
+      handleSearch(false).finally(() => {
+        loadMoreInFlightRef.current = false;
+      });
+      return true;
     }
-  }, [handleLoadMoreSubjectCharacters, searchMode, selectedSubject, handleSearch]);
+    loadMoreInFlightRef.current = false;
+    return false;
+  }, [handleLoadMoreSubjectCharacters, hasMore, isLoadingMore, isSearching, searchMode, selectedSubject, handleSearch]);
 
   const handleCharacterSelect = useCallback((character) => {
     if (!finishInit) return;
@@ -216,6 +237,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     setHasMore(true);
     setSelectedSubject(null);
     setSubjectCharacters([]);
+    subjectSelectRequestSeqRef.current++;
     setSearchMode('character');
   }, [finishInit, onCharacterSelect]);
 
@@ -229,6 +251,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         setHasMore(true);
         setSelectedSubject(null);
         setSubjectCharacters([]);
+        subjectSelectRequestSeqRef.current++;
       }
     }
 
@@ -302,8 +325,9 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
             }
           } else if (selectedItemIndex === searchResults.length && hasMore) {
             // 如果选择的是"加载更多"
-            setIsLoadingNewResults(true); // 标记正在加载更多结果
-            handleLoadMore();
+            if (handleLoadMore()) {
+              setIsLoadingNewResults(true); // 标记正在加载更多结果
+            }
           } else if (selectedItemIndex < searchResults.length) {
             // 如果选择的是角色
             handleCharacterSelect(searchResults[selectedItemIndex]);
@@ -336,10 +360,12 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   // Reset pagination when search query changes
   useEffect(() => {
     searchRequestSeqRef.current++;
+    subjectSelectRequestSeqRef.current++;
     characterSearchAbortRef.current?.abort();
     subjectSearchAbortRef.current?.abort();
     setIsSearching(false);
     setIsLoadingMore(false);
+    loadMoreInFlightRef.current = false;
     setOffset(0);
     setHasMore(true);
     setSearchResults([]);
@@ -360,7 +386,9 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       setSubjectCharacters([]);
       setIsSearching(false);
       setIsLoadingMore(false);
+      loadMoreInFlightRef.current = false;
       searchRequestSeqRef.current++;
+      subjectSelectRequestSeqRef.current++;
       characterSearchAbortRef.current?.abort();
       subjectSearchAbortRef.current?.abort();
     }
@@ -411,8 +439,8 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         className="result-character-icon"
         fallbackSrc=""
         cachedOnly
-        maxRetries={1}
-        retryDelay={500}
+        maxRetries={3}
+        retryDelay={700}
         onLoadError={() => markImageFailed(key)}
       />
     );
@@ -464,6 +492,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
             <button 
               className="back-to-subjects"
               onClick={() => {
+                subjectSelectRequestSeqRef.current++;
                 setSelectedSubject(null);
                 setSubjectCharacters([]);
                 handleSubjectSearch();
@@ -498,8 +527,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
             ))}
             {hasMore && (searchMode === 'character' || selectedSubject) && (
               <div 
-                className={`search-result-item load-more ${selectedItemIndex === searchResults.length ? 'selected' : ''}`}
-                onClick={handleLoadMore}
+                className={`search-result-item load-more ${selectedItemIndex === searchResults.length ? 'selected' : ''} ${isLoadingMore ? 'disabled' : ''}`}
+                onClick={() => {
+                  handleLoadMore();
+                }}
+                aria-disabled={isLoadingMore || isSearching}
                 ref={selectedItemIndex === searchResults.length ? selectedItemRef : null}
               >
                 {isLoadingMore ? '加载中...' : selectedSubject ? '更多角色' : '更多'}
@@ -529,6 +561,9 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         <button 
           className={`search-button ${searchMode === 'character' ? 'active' : ''}`}
           onClick={() => {
+            subjectSelectRequestSeqRef.current++;
+            setSelectedSubject(null);
+            setSubjectCharacters([]);
             setSearchMode('character');
             if (searchQuery.trim()) handleSearch(true);
           }}
@@ -540,9 +575,8 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
           <button 
             className={`search-button ${searchMode === 'subject' ? 'active' : ''}`}
             onClick={() => {
-              const query = searchQuery.trim();
               setSearchMode('subject');
-              if (query) performSubjectSearch(query);
+              handleSubjectSearch();
             }}
             disabled={!searchQuery.trim() || isSearching || isGuessing || gameEnd || !finishInit}
           >

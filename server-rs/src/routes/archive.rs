@@ -219,9 +219,13 @@ async fn get_subject_characters(
 
     let result = db::with_archive_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT sc.character_id, sc.type, c.name
+            "SELECT sc.character_id, sc.type, c.name,
+                    COALESCE(p.name_cn, '') AS name_cn,
+                    COALESCE(p.gender, '?') AS gender,
+                    c.popularity
              FROM subject_characters sc
              JOIN characters c ON sc.character_id = c.id
+             LEFT JOIN character_profile p ON p.character_id = c.id
              WHERE sc.subject_id = ?1
              ORDER BY sc.order_num ASC, c.popularity DESC",
         )?;
@@ -230,12 +234,15 @@ async fn get_subject_characters(
                 row.get::<_, i64>(0)?,    // character_id
                 row.get::<_, i64>(1)?,    // sc.type (1 main, 2 supporting)
                 row.get::<_, String>(2)?, // character name
+                row.get::<_, String>(3).unwrap_or_default(),
+                row.get::<_, String>(4).unwrap_or_else(|_| "?".to_string()),
+                row.get::<_, i64>(5).unwrap_or(0),
             ))
         })?;
 
         let mut out: Vec<Value> = Vec::new();
         for row in rows {
-            let (cid, role, name) = match row {
+            let (cid, role, name, name_cn, gender, popularity) = match row {
                 Ok(v) => v,
                 Err(_) => continue,
             };
@@ -248,6 +255,11 @@ async fn get_subject_characters(
                 "id": cid,
                 "relation": relation,
                 "name": name,
+                "nameCn": if name_cn.is_empty() { Value::Null } else { json!(name_cn) },
+                "gender": gender,
+                "image": img_url.clone(),
+                "imageGrid": img_url.clone(),
+                "popularity": popularity,
                 "images": { "grid": img_url, "medium": img_url },
             }));
         }
