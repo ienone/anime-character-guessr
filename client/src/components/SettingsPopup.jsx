@@ -2,7 +2,6 @@ import '../styles/popups.css';
 import '../styles/SettingsPopup.css';
 import { getIndexInfo, searchSubjects } from '../utils/bangumi';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import axiosCache from '../utils/cached-axios';
 import { getPresetConfig } from '../data/presets';
 import { sanitizeHtml } from '../utils/sanitizeHtml';
 import { notify } from '../utils/notifications';
@@ -244,8 +243,13 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
   };
 
   const handleClearCache = () => {
-    axiosCache.clearCache();
-    notify('缓存已清空！', 'success');
+    try {
+      localStorage.removeItem('requestCache');
+      notify('本地缓存记录已清空！', 'success');
+    } catch (error) {
+      console.warn('Failed to clear local cache record:', error);
+      notify('清空缓存失败，请检查浏览器存储权限', 'error');
+    }
   }
 
   const applyPresetConfig = async (presetName) => {
@@ -293,7 +297,7 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
             <div className="header-subtitle">将鼠标移到各设置的标签上可以看到提示，移到输入框上可以看到数值范围</div>
           </div>
             <div className="header-actions">
-            <button className="header-btn clear" onClick={handleClearCache} title="清空缓存">
+            <button className="header-btn clear" onClick={handleClearCache} title="清空本地缓存记录">
               <Icon name="trash" />
             </button>
             <button className="header-btn close" onClick={handleClose} title="关闭">

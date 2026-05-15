@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import '../styles/Leaderboard.css';
 import { fetchLeaderboardCharacters } from '../data/leaderboard_characters';
-import { fetchLeaderboardGuesses, fetchLeaderboardWeekly } from '../data/leaderboard_guesses';
+import { fetchLeaderboardWeekly } from '../data/leaderboard_guesses';
 import Image from './Image';
 
 const Leaderboard = ({ defaultExpanded = false }) => {
@@ -14,18 +14,11 @@ const Leaderboard = ({ defaultExpanded = false }) => {
   useEffect(() => {
     let mounted = true;
     Promise.all([
-      fetchLeaderboardGuesses(30),
-      fetchLeaderboardCharacters(30),
-      fetchLeaderboardWeekly(30)
-    ]).then(([guesses, characters, weekly]) => {
+      fetchLeaderboardWeekly(30),
+      fetchLeaderboardCharacters(30)
+    ]).then(([weekly, characters]) => {
       if (mounted) {
-        // 将周榜数据合并到总榜中，通过link匹配
-        const weeklyMap = new Map(weekly.map(w => [w.link, w.count]));
-        const guessesWithWeekly = guesses.map(char => ({
-          ...char,
-          weeklyCount: weeklyMap.get(char.link) || 0
-        }));
-        setCharacters1(guessesWithWeekly);
+        setCharacters1(weekly);
         setCharacters2(characters);
         setLoading(false);
       }
@@ -46,7 +39,7 @@ const Leaderboard = ({ defaultExpanded = false }) => {
     <>
       <div className="leaderboard-container">
         <div className="leaderboard-header" onClick={toggleExpand1}>
-          <h3>大家都在猜（每周一4：00清空周榜）</h3>
+          <h3>大家都在猜（周榜，每周一4：00清空）</h3>
           <span className={`expand-icon ${isExpanded1 ? 'expanded' : ''}`}>{isExpanded1 ? '▼' : '▶'}</span>
         </div>
         {isExpanded1 && (
@@ -79,8 +72,7 @@ const Leaderboard = ({ defaultExpanded = false }) => {
                         {char.nameCn || char.name}
                       </a>
                       <div className="podium-count">
-                        <span className="count-total">总计 {char.count}次</span>
-                        {char.weeklyCount > 0 && <span className="count-weekly">本周 {char.weeklyCount}次</span>}
+                        <span className="count-weekly">本周 {char.count}次</span>
                       </div>
                     </div>
                   ))}
@@ -99,8 +91,7 @@ const Leaderboard = ({ defaultExpanded = false }) => {
                         {char.nameCn || char.name}
                       </a>
                       <div className="list-count">
-                        <span className="count-total">{char.count}次</span>
-                        {char.weeklyCount > 0 && <span className="count-weekly">+{char.weeklyCount}</span>}
+                        <span className="count-weekly">{char.count}次</span>
                       </div>
                     </div>
                   ))}
