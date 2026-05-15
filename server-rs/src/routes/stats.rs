@@ -1,19 +1,18 @@
 use crate::db::{self, DbPools};
 use axum::{
     Json,
-    extract::{ConnectInfo, Query, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Query, State},
+    http::StatusCode,
     response::IntoResponse,
 };
 use chrono::{Datelike, Duration, FixedOffset, Utc};
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
-use super::write_guard::{enforce_public_write_limit, reject, truncate_chars};
+use super::write_guard::truncate_chars;
 
-const STATS_WRITE_LIMIT_PER_MINUTE: usize = 120;
 const MAX_CHARACTER_NAME_CHARS: usize = 128;
 const WEEKLY_RESET_HOUR: i64 = 4;
 const WEEKLY_RESET_TZ_OFFSET_SECONDS: i32 = 8 * 60 * 60;
@@ -60,43 +59,17 @@ fn reset_weekly_count_if_needed(conn: &mut rusqlite::Connection) -> anyhow::Resu
     Ok(())
 }
 
-/// POST /api/answer-character-count
-/// Increments the count of times a character has been used as an answer.
-pub async fn answer_character_count(
-    State(pools): State<Arc<DbPools>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
-    if let Err(response) = enforce_public_write_limit(
-        &headers,
-        Some(peer_addr),
-        "answer-character-count",
-        STATS_WRITE_LIMIT_PER_MINUTE,
-    ) {
-        return response.into_response();
-    }
+fn normalize_character_name(name: impl Into<String>) -> String {
+    let name = name.into();
+    truncate_chars(name.trim(), MAX_CHARACTER_NAME_CHARS)
+}
 
-    let char_id = match body.get("characterId").and_then(|v| v.as_i64()) {
-        Some(id) if id > 0 => id,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "characterId must be a number" })),
-            )
-                .into_response();
-        }
-        _ => return reject(StatusCode::BAD_REQUEST, "characterId must be positive"),
-    };
-    let char_name = body
-        .get("characterName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let char_name = truncate_chars(&char_name, MAX_CHARACTER_NAME_CHARS);
-
-    let result = db::with_app_db(Arc::clone(&pools), move |conn| {
+async fn increment_answer_character_count(
+    pools: Arc<DbPools>,
+    char_id: i64,
+    char_name: String,
+) -> anyhow::Result<()> {
+    db::with_app_db(pools, move |conn| {
         conn.execute(
             "INSERT INTO answer_count (id, character_name, count) VALUES (?1, ?2, 1)
              ON CONFLICT(id) DO UPDATE SET
@@ -106,51 +79,15 @@ pub async fn answer_character_count(
         )?;
         Ok(())
     })
-    .await;
-
-    match result {
-        Ok(()) => Json(json!({ "message": "Character answer count updated successfully", "characterId": char_id })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-    }
+    .await
 }
 
-/// POST /api/guess-character-count
-/// Increments the weekly guess counter for a character.
-pub async fn guess_character_count(
-    State(pools): State<Arc<DbPools>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
-    if let Err(response) = enforce_public_write_limit(
-        &headers,
-        Some(peer_addr),
-        "guess-character-count",
-        STATS_WRITE_LIMIT_PER_MINUTE,
-    ) {
-        return response.into_response();
-    }
-
-    let char_id = match body.get("characterId").and_then(|v| v.as_i64()) {
-        Some(id) if id > 0 => id,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "characterId must be a number" })),
-            )
-                .into_response();
-        }
-        _ => return reject(StatusCode::BAD_REQUEST, "characterId must be positive"),
-    };
-    let char_name = body
-        .get("characterName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let char_name = truncate_chars(&char_name, MAX_CHARACTER_NAME_CHARS);
-
-    let result = db::with_app_db(Arc::clone(&pools), move |conn| {
+async fn increment_guess_character_count(
+    pools: Arc<DbPools>,
+    char_id: i64,
+    char_name: String,
+) -> anyhow::Result<()> {
+    db::with_app_db(pools, move |conn| {
         reset_weekly_count_if_needed(conn)?;
         conn.execute(
             "INSERT INTO weekly_count (id, character_name, count) VALUES (?1, ?2, 1)
@@ -161,11 +98,34 @@ pub async fn guess_character_count(
         )?;
         Ok(())
     })
-    .await;
+    .await
+}
 
-    match result {
-        Ok(()) => Json(json!({ "message": "Character weekly guess count updated successfully", "characterId": char_id })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+pub async fn record_answer_character_count(
+    pools: Arc<DbPools>,
+    char_id: i64,
+    char_name: impl Into<String>,
+) {
+    if char_id <= 0 {
+        return;
+    }
+    let char_name = normalize_character_name(char_name);
+    if let Err(e) = increment_answer_character_count(pools, char_id, char_name).await {
+        tracing::warn!(char_id, error = %e, "failed to record answer character count");
+    }
+}
+
+pub async fn record_guess_character_count(
+    pools: Arc<DbPools>,
+    char_id: i64,
+    char_name: impl Into<String>,
+) {
+    if char_id <= 0 {
+        return;
+    }
+    let char_name = normalize_character_name(char_name);
+    if let Err(e) = increment_guess_character_count(pools, char_id, char_name).await {
+        tracing::warn!(char_id, error = %e, "failed to record weekly guess count");
     }
 }
 

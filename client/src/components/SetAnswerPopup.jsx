@@ -3,7 +3,6 @@ import SearchBar from './SearchBar';
 import Image from './Image';
 import '../styles/SetAnswerPopup.css';
 import { designateCharacter } from '../utils/bangumi';
-import { submitAnswerCharacterCount } from '../utils/db';
 import { notify } from '../utils/notifications';
 
 const SetAnswerPopup = ({ onSetAnswer, onCancel, gameSettings }) => {
@@ -28,11 +27,6 @@ const SetAnswerPopup = ({ onSetAnswer, onCancel, gameSettings }) => {
       setIsSubmitting(true);
       try {
         const character = await designateCharacter(selectedCharacter.id, gameSettings);
-        try {
-          await submitAnswerCharacterCount(selectedCharacter.id, character.nameCn || character.name);
-        } catch (error) {
-          console.error('Failed to submit answer count:', error);
-        }
         onSetAnswer({
           character,
           hints: hints.slice(0, Array.isArray(gameSettings.useHints) ? gameSettings.useHints.length : 0)

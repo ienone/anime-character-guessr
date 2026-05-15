@@ -10,6 +10,7 @@ use axum::{
 };
 use dashmap::DashMap;
 use serde_json::{Value, json};
+use std::fmt;
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{Semaphore, broadcast};
@@ -142,12 +143,6 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
             get(stats::leaderboard_characters),
         )
         .route("/leaderboard/weekly", get(stats::leaderboard_weekly))
-        // Stats write endpoints
-        .route(
-            "/answer-character-count",
-            post(stats::answer_character_count),
-        )
-        .route("/guess-character-count", post(stats::guess_character_count))
         // Bug feedback.
         .route("/bug-feedback", post(tags::bug_feedback))
         .layer(DefaultBodyLimit::max(256 * 1024))
@@ -429,6 +424,23 @@ async fn resolve_subject_image_source(
     Json(json!({ "sourceUrl": source_url })).into_response()
 }
 
+fn character_name_for_stats(payload: &Value) -> String {
+    let Some(obj) = payload.as_object() else {
+        return String::new();
+    };
+
+    ["nameCn", "name_cn", "name"]
+        .iter()
+        .find_map(|key| {
+            obj.get(*key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
 /// POST /api/game/random
 /// Pick a random character based on game settings from archive.sqlite.
 async fn get_random_character(
@@ -466,6 +478,11 @@ async fn get_random_character(
                     Value::Array(vas.into_iter().map(Value::String).collect()),
                 );
             }
+            let stats_name = character_name_for_stats(&payload);
+            let stats_pools = Arc::clone(&pools);
+            tokio::spawn(async move {
+                stats::record_answer_character_count(stats_pools, char_id, stats_name).await;
+            });
             Json(payload).into_response()
         }
         Err(e) => (
@@ -510,6 +527,12 @@ async fn get_character_by_id(
                 .into_response();
         }
     };
+    let stats_purpose = body
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .unwrap_or("guess")
+        .trim()
+        .to_ascii_lowercase();
     let settings = game::GameSettings::from_json(body.get("settings").unwrap_or(&json!({})));
     let pools_for_query = Arc::clone(&pools);
     let result = db::with_archive_db_timed(
@@ -529,6 +552,22 @@ async fn get_character_by_id(
                     "animeVAs".to_string(),
                     Value::Array(vas.into_iter().map(Value::String).collect()),
                 );
+            }
+            let stats_name = character_name_for_stats(&payload);
+            let stats_pools = Arc::clone(&pools);
+            match stats_purpose.as_str() {
+                "guess" => {
+                    tokio::spawn(async move {
+                        stats::record_guess_character_count(stats_pools, char_id, stats_name).await;
+                    });
+                }
+                "answer" => {
+                    tokio::spawn(async move {
+                        stats::record_answer_character_count(stats_pools, char_id, stats_name)
+                            .await;
+                    });
+                }
+                _ => {}
             }
             Json(payload).into_response()
         }
@@ -567,6 +606,29 @@ fn positive_query_id(q: &HashMap<String, String>, key: &'static str) -> Result<i
     }
 }
 
+#[derive(Debug)]
+struct BgmHttpStatusError {
+    status: StatusCode,
+}
+
+impl fmt::Display for BgmHttpStatusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BGM API returned {}", self.status)
+    }
+}
+
+impl std::error::Error for BgmHttpStatusError {}
+
+fn bgm_proxy_error_response(error: anyhow::Error) -> Response {
+    let status = error
+        .downcast_ref::<BgmHttpStatusError>()
+        .map(|inner| inner.status)
+        .filter(|status| *status == StatusCode::NOT_FOUND)
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+
+    (status, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
 /// GET /api/bgm/index-info?indexId=xxx
 async fn bgm_proxy_index_info(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -593,11 +655,7 @@ async fn bgm_proxy_index_info(
             cache_put_ttl(&INDEX_INFO_CACHE, index_id, 10 * 60 * 1000, minimal.clone());
             Json(minimal).into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => bgm_proxy_error_response(e),
     }
 }
 
@@ -643,11 +701,7 @@ async fn bgm_proxy_index_subjects(
             );
             Json(data).into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => bgm_proxy_error_response(e),
     }
 }
 
@@ -663,7 +717,12 @@ async fn bgm_get(url: &str) -> anyhow::Result<Value> {
         let resp = client.get(url).send().await;
         match resp {
             Ok(r) => {
-                let r = r.error_for_status()?;
+                let status = r.status();
+                if !status.is_success() {
+                    let status =
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                    return Err(BgmHttpStatusError { status }.into());
+                }
                 return Ok(r.json().await?);
             }
             Err(e) => {

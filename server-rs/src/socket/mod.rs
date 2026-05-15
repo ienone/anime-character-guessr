@@ -3,6 +3,7 @@ pub mod state;
 
 use crate::db::{self, DbPools};
 use crate::routes::game::{self, GameSettings};
+use crate::routes::stats;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -66,6 +67,20 @@ fn emit_error(socket: &SocketRef, event: &str, message: &str) {
             "message": format!("{}: {}", event, message),
         }),
     );
+}
+
+fn character_name_for_stats(character: &CharacterPayload) -> String {
+    ["nameCn", "name_cn", "name"]
+        .iter()
+        .find_map(|key| {
+            character
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
 }
 
 fn active_room_player_count(room: &Room) -> usize {
@@ -2254,6 +2269,7 @@ fn register_room_handlers(
                         }
                     }
                 };
+                let answer_stats = (character.id, character_name_for_stats(&character));
 
                 let started = state
                     .run_room_command(&room_id, RoomCommand::SocketEvent("gameStart"), |room| {
@@ -2306,7 +2322,15 @@ fn register_room_handlers(
                     .await;
 
                 match started {
-                    Some(Ok(true)) => broadcast_lobby_rooms_updated(&io_clone),
+                    Some(Ok(true)) => {
+                        broadcast_lobby_rooms_updated(&io_clone);
+                        let stats_pools = Arc::clone(&pools);
+                        let (char_id, char_name) = answer_stats;
+                        tokio::spawn(async move {
+                            stats::record_answer_character_count(stats_pools, char_id, char_name)
+                                .await;
+                        });
+                    }
                     Some(Err(message)) => emit_error(&socket, "gameStart", message),
                     Some(Ok(false)) | None => {}
                 }
@@ -2380,11 +2404,13 @@ fn register_room_handlers(
 
     let state_set_ans = Arc::clone(&state);
     let io_set_ans = io.clone();
+    let pools_set_ans = Arc::clone(&db_pools);
     socket.on(
         "setAnswer",
         move |socket: SocketRef, Data::<Value>(data)| {
             let state = Arc::clone(&state_set_ans);
             let io_clone = io_set_ans.clone();
+            let pools = Arc::clone(&pools_set_ans);
             async move {
                 let room_id = data
                     .get("roomId")
@@ -2403,6 +2429,7 @@ fn register_room_handlers(
                         return;
                     }
                 };
+                let answer_stats = (character.id, character_name_for_stats(&character));
                 let hints = hints_from_payload(&data);
                 let actor_id = socket.id.to_string();
                 let result = state
@@ -2483,8 +2510,17 @@ fn register_room_handlers(
                         Ok(())
                     })
                     .await;
-                if let Some(Err(message)) = result {
-                    emit_error(&socket, "setAnswer", message);
+                match result {
+                    Some(Ok(())) => {
+                        let stats_pools = Arc::clone(&pools);
+                        let (char_id, char_name) = answer_stats;
+                        tokio::spawn(async move {
+                            stats::record_answer_character_count(stats_pools, char_id, char_name)
+                                .await;
+                        });
+                    }
+                    Some(Err(message)) => emit_error(&socket, "setAnswer", message),
+                    None => {}
                 }
             }
         },
@@ -2551,6 +2587,7 @@ fn register_room_handlers(
                         return;
                     }
                 };
+                let guess_stats = (guess_data.id, character_name_for_stats(&guess_data));
 
                 let Some(command_result) = state
                     .run_room_command(&room_id, RoomCommand::SocketEvent("playerGuess"), |room| {
@@ -2724,6 +2761,12 @@ fn register_room_handlers(
                                 "isPartialCorrect": is_partial_correct,
                             }),
                         );
+                        let stats_pools = Arc::clone(&pools);
+                        let (char_id, char_name) = guess_stats;
+                        tokio::spawn(async move {
+                            stats::record_guess_character_count(stats_pools, char_id, char_name)
+                                .await;
+                        });
                         if let Some(character) = answer_reveal {
                             let _ = socket.emit(
                                 "answerReveal",

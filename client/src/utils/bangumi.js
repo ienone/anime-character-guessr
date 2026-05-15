@@ -77,11 +77,12 @@ async function backendGetRandomCharacter(gameSettings) {
  * Fetch character appearance data from backend for a given character ID.
  * Used during the guess phase.
  */
-async function backendGetCharacterAppearances(characterId, gameSettings) {
+async function backendGetCharacterAppearances(characterId, gameSettings, purpose = 'guess') {
   let response
   try {
     response = await perfAxios.post(`${SERVER_URL}/api/game/character`, {
       id: characterId,
+      purpose,
       settings: {
         startYear: gameSettings.startYear,
         endYear: gameSettings.endYear,
@@ -132,8 +133,8 @@ async function serverFetchIndexSubjects(indexId, offset, limit) {
 }
 
 
-async function getCharacterAppearances(characterId, gameSettings) {
-  return await backendGetCharacterAppearances(characterId, gameSettings)
+async function getCharacterAppearances(characterId, gameSettings, purpose = 'guess') {
+  return await backendGetCharacterAppearances(characterId, gameSettings, purpose)
 }
 
 async function getCharacterDetails(characterId) {
@@ -241,7 +242,7 @@ async function getRandomCharacter(gameSettings) {
 
   const selectedCharacter = filteredCharacters[Math.floor(Math.random() * filteredCharacters.length)]
   const characterDetails = await getCharacterDetails(selectedCharacter.id)
-  const appearances = await getCharacterAppearances(selectedCharacter.id, gameSettings)
+  const appearances = await getCharacterAppearances(selectedCharacter.id, gameSettings, 'answer')
 
   return {
     ...selectedCharacter,
@@ -256,7 +257,7 @@ async function designateCharacter(characterId, gameSettings) {
     const characterDetails = await getCharacterDetails(characterId);
 
     // Get character appearances
-    const appearances = await getCharacterAppearances(characterId, gameSettings);
+    const appearances = await getCharacterAppearances(characterId, gameSettings, 'designate');
 
     return {
       id: characterId,

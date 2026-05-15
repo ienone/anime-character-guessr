@@ -3,7 +3,6 @@ import axios from 'axios';
 import { searchSubjects, getCharactersBySubjectId } from '../utils/bangumi';
 import Image from './Image';
 import '../styles/search.css';
-import { submitGuessCharacterCount } from '../utils/db';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
 
@@ -228,7 +227,6 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
 
   const handleCharacterSelect = useCallback((character) => {
     if (!finishInit) return;
-    submitGuessCharacterCount(character.id, character.nameCn || character.name);
     onCharacterSelect(character);
     setSearchQuery('');
     setSearchResults([]);
