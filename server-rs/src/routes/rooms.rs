@@ -81,6 +81,24 @@ fn admin_forbidden() -> Response {
         .into_response()
 }
 
+fn public_client_url() -> String {
+    std::env::var("PUBLIC_CLIENT_URL")
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            std::env::var("CLIENT_URL").ok().and_then(|urls| {
+                urls.split(',')
+                    .map(str::trim)
+                    .find(|url| !url.is_empty() && *url != "*")
+                    .map(ToOwned::to_owned)
+            })
+        })
+        .unwrap_or_else(|| "http://localhost:5173".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// GET /quick-join?lang=en
 async fn quick_join(State(rs): State<RoomState>, Query(q): Query<LangQuery>) -> impl IntoResponse {
     let public_rooms: Vec<String> = rs
@@ -117,14 +135,16 @@ async fn quick_join(State(rs): State<RoomState>, Query(q): Query<LangQuery>) -> 
         }
     };
 
-    let base_url =
-        std::env::var("CLIENT_URL").unwrap_or_else(|_| "http://localhost:5173".to_string());
     let client_url = if q.lang.as_deref() == Some("en") {
         "https://vertikarl.github.io/anime-character-guessr-english/#".to_string()
     } else {
-        base_url
+        public_client_url()
     };
-    let url = format!("{}/multiplayer/{}", client_url, room_id);
+    let url = format!(
+        "{}/multiplayer/{}",
+        client_url.trim_end_matches('/'),
+        room_id
+    );
     Json(json!({ "url": url })).into_response()
 }
 

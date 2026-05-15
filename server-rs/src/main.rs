@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!(%panic_info, "panic");
     }));
 
-    let config = config::load_config();
+    let config = config::load_config()?;
     info!("Starting Anime Character Guessr Server...");
 
     utils::ensure_directories(&config.image_cache_dir)?;
@@ -95,7 +95,11 @@ async fn main() -> anyhow::Result<()> {
     info!("Listening on {}", addr);
 
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

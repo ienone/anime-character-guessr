@@ -1,13 +1,13 @@
 use crate::db::{self, DbPools};
 use axum::{
     Json,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use super::write_guard::{enforce_public_write_limit, reject, validate_chars};
 
@@ -77,11 +77,13 @@ pub async fn get_leaderboard(State(pools): State<Arc<DbPools>>) -> impl IntoResp
 /// Called internally by the socket game-end handler (or from tests).
 pub async fn submit_score(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<ScoreSubmission>,
 ) -> impl IntoResponse {
     if let Err(response) = enforce_public_write_limit(
         &headers,
+        Some(peer_addr),
         "leaderboard-submit",
         LEADERBOARD_SUBMIT_LIMIT_PER_MINUTE,
     ) {

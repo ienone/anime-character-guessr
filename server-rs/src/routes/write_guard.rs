@@ -3,8 +3,9 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -40,10 +41,11 @@ fn guard_reject(status: StatusCode, message: impl Into<String>) -> GuardRejectio
 
 pub fn enforce_public_write_limit(
     headers: &HeaderMap,
+    peer_addr: Option<SocketAddr>,
     scope: &str,
     max_per_minute: usize,
 ) -> Result<(), GuardRejection> {
-    let client = client_key(headers);
+    let client = client_key(headers, peer_addr);
     let key = format!("{scope}:{client}");
     let now = Instant::now();
     let mut limits = PUBLIC_WRITE_LIMITS.lock().map_err(|_| {
@@ -102,42 +104,27 @@ pub fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.to_string()
 }
 
-pub fn validate_json_object(
-    value: &Value,
-    field: &str,
-    max_keys: usize,
-    max_key_chars: usize,
-) -> Result<(), GuardRejection> {
-    let Some(map) = value.as_object() else {
-        return Err(guard_reject(
-            StatusCode::BAD_REQUEST,
-            format!("{field} must be an object"),
-        ));
-    };
-
-    if map.len() > max_keys {
-        return Err(guard_reject(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("{field} contains too many keys"),
-        ));
-    }
-
-    for key in map.keys() {
-        validate_chars(key, field, max_key_chars)?;
-    }
-
-    Ok(())
+fn trust_forwarded_headers() -> bool {
+    std::env::var("TRUST_PROXY_HEADERS")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false)
 }
 
-fn client_key(headers: &HeaderMap) -> String {
-    let raw = headers
+fn header_client_key(headers: &HeaderMap) -> Option<String> {
+    headers
         .get("cf-connecting-ip")
         .or_else(|| headers.get("x-real-ip"))
         .or_else(|| headers.get("x-forwarded-for"))
-        .or_else(|| headers.get(header::USER_AGENT))
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("unknown");
+        .map(|raw| normalize_client_key(raw, "proxy"))
+        .filter(|value| value != "proxy:unknown")
+}
 
+fn normalize_client_key(raw: &str, prefix: &str) -> String {
     let normalized: String = raw
         .split(',')
         .next()
@@ -149,8 +136,26 @@ fn client_key(headers: &HeaderMap) -> String {
         .collect();
 
     if normalized.is_empty() {
-        "unknown".to_string()
+        format!("{prefix}:unknown")
     } else {
-        normalized
+        format!("{prefix}:{normalized}")
     }
+}
+
+fn client_key(headers: &HeaderMap, peer_addr: Option<SocketAddr>) -> String {
+    if trust_forwarded_headers()
+        && let Some(forwarded) = header_client_key(headers)
+    {
+        return forwarded;
+    }
+
+    if let Some(peer) = peer_addr {
+        return normalize_client_key(&peer.ip().to_string(), "peer");
+    }
+
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| normalize_client_key(value, "ua"))
+        .unwrap_or_else(|| "unknown".to_string())
 }

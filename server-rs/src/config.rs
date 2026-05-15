@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::env;
 
 #[derive(Debug, Clone)]
@@ -12,12 +13,12 @@ pub struct Config {
     pub client_url: String,
 }
 
-pub fn load_config() -> Config {
-    Config {
+pub fn load_config() -> anyhow::Result<Config> {
+    Ok(Config {
         port: env::var("PORT")
             .unwrap_or_else(|_| "3001".to_string())
             .parse()
-            .expect("PORT must be a valid u16"),
+            .context("PORT must be a valid u16")?,
         archive_db_path: env::var("ARCHIVE_DB_PATH")
             .unwrap_or_else(|_| "../archive.sqlite".to_string()),
         app_db_path: env::var("APP_DB_PATH").unwrap_or_else(|_| "data/app.sqlite".to_string()),
@@ -27,5 +28,5 @@ pub fn load_config() -> Config {
         client_url: env::var("CLIENT_URL").unwrap_or_else(|_| {
             "http://localhost:5173,http://localhost:3000,http://localhost".to_string()
         }),
-    }
+    })
 }

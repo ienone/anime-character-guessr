@@ -249,6 +249,13 @@ fn init_app_schema(conn: &Connection) -> anyhow::Result<()> {
             character_name TEXT NOT NULL DEFAULT '',
             count INTEGER NOT NULL DEFAULT 0
         );
+        CREATE INDEX IF NOT EXISTS idx_answer_count_count ON answer_count(count DESC);
+        CREATE INDEX IF NOT EXISTS idx_guess_count_count ON guess_count(count DESC);
+        CREATE INDEX IF NOT EXISTS idx_weekly_count_count ON weekly_count(count DESC);
+        CREATE TABLE IF NOT EXISTS app_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS redeem_codes (
             code TEXT PRIMARY KEY,
             avatar_id TEXT NOT NULL DEFAULT '',

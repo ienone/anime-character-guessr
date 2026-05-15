@@ -1,33 +1,76 @@
 use crate::db::{self, DbPools};
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use chrono::{Datelike, Duration, FixedOffset, Utc};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use super::write_guard::{enforce_public_write_limit, reject, truncate_chars};
 
 const STATS_WRITE_LIMIT_PER_MINUTE: usize = 120;
 const MAX_CHARACTER_NAME_CHARS: usize = 128;
+const WEEKLY_RESET_HOUR: i64 = 4;
+const WEEKLY_RESET_TZ_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 
 #[derive(Deserialize)]
 pub struct LimitQuery {
     limit: Option<i64>,
 }
 
+fn normalize_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(30).clamp(1, 100)
+}
+
+fn current_week_key() -> String {
+    let tz = FixedOffset::east_opt(WEEKLY_RESET_TZ_OFFSET_SECONDS)
+        .expect("weekly reset timezone offset is valid");
+    let shifted = Utc::now().with_timezone(&tz) - Duration::hours(WEEKLY_RESET_HOUR);
+    let week = shifted.iso_week();
+    format!("{:04}-W{:02}", week.year(), week.week())
+}
+
+fn reset_weekly_count_if_needed(conn: &mut rusqlite::Connection) -> anyhow::Result<()> {
+    let current_period = current_week_key();
+    let stored_period: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = 'weekly_count_period'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if stored_period.as_deref() == Some(current_period.as_str()) {
+        return Ok(());
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM weekly_count", [])?;
+    tx.execute(
+        "INSERT INTO app_metadata (key, value) VALUES ('weekly_count_period', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [&current_period],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// POST /api/answer-character-count
 /// Increments the count of times a character has been used as an answer.
 pub async fn answer_character_count(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     if let Err(response) = enforce_public_write_limit(
         &headers,
+        Some(peer_addr),
         "answer-character-count",
         STATS_WRITE_LIMIT_PER_MINUTE,
     ) {
@@ -75,11 +118,13 @@ pub async fn answer_character_count(
 /// Increments guess_count and weekly_count for a character.
 pub async fn guess_character_count(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     if let Err(response) = enforce_public_write_limit(
         &headers,
+        Some(peer_addr),
         "guess-character-count",
         STATS_WRITE_LIMIT_PER_MINUTE,
     ) {
@@ -106,6 +151,7 @@ pub async fn guess_character_count(
     let char_name = truncate_chars(&char_name, MAX_CHARACTER_NAME_CHARS);
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
+        reset_weekly_count_if_needed(conn)?;
         conn.execute(
             "INSERT INTO guess_count (id, character_name, count) VALUES (?1, ?2, 1)
              ON CONFLICT(id) DO UPDATE SET
@@ -177,7 +223,7 @@ pub async fn leaderboard_characters(
     State(pools): State<Arc<DbPools>>,
     Query(q): Query<LimitQuery>,
 ) -> impl IntoResponse {
-    let limit = q.limit.unwrap_or(30).min(100);
+    let limit = normalize_limit(q.limit);
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, character_name, count FROM answer_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
@@ -209,7 +255,7 @@ pub async fn leaderboard_guesses(
     State(pools): State<Arc<DbPools>>,
     Query(q): Query<LimitQuery>,
 ) -> impl IntoResponse {
-    let limit = q.limit.unwrap_or(30).min(100);
+    let limit = normalize_limit(q.limit);
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, character_name, count FROM guess_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
@@ -237,32 +283,26 @@ pub async fn leaderboard_guesses(
 }
 
 /// GET /api/leaderboard/weekly?limit=30
-/// Returns top characters from guess_count with their weekly_count overlay.
+/// Returns top characters ranked by the current weekly_count bucket.
 pub async fn leaderboard_weekly(
     State(pools): State<Arc<DbPools>>,
     Query(q): Query<LimitQuery>,
 ) -> impl IntoResponse {
-    let limit = q.limit.unwrap_or(30).min(100);
+    let limit = normalize_limit(q.limit);
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
-        // Top characters by total guesses
+        reset_weekly_count_if_needed(conn)?;
         let mut stmt = conn.prepare(
-            "SELECT id FROM guess_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
+            "SELECT id, character_name, count FROM weekly_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
         )?;
-        let top_ids: Vec<i64> = stmt.query_map([limit], |row| row.get(0))?.filter_map(Result::ok).collect();
-        if top_ids.is_empty() { return Ok(vec![]); }
-
-        // Weekly counts for those IDs
-        let placeholders = top_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id, count FROM weekly_count WHERE id IN ({})", placeholders);
-        let mut stmt2 = conn.prepare(&sql)?;
-        let weekly_map: std::collections::HashMap<i64, i64> = stmt2
-            .query_map(rusqlite::params_from_iter(top_ids.iter()), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
-            .filter_map(Result::ok)
-            .collect();
-
-        let rows: Vec<Value> = top_ids.iter().map(|id| {
-            json!({ "_id": id, "count": weekly_map.get(id).copied().unwrap_or(0), "image": format!("/img/{}.webp", id) })
-        }).collect();
+        let rows: Vec<Value> = stmt.query_map([limit], |row| {
+            let id = row.get::<_, i64>(0)?;
+            Ok(json!({
+                "_id": id,
+                "characterName": row.get::<_, String>(1)?,
+                "count": row.get::<_, i64>(2)?,
+                "image": format!("/img/{}.webp", id),
+            }))
+        })?.filter_map(Result::ok).collect();
         Ok(rows)
     }).await;
 

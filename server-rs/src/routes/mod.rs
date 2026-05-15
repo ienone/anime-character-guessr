@@ -1,17 +1,17 @@
 use crate::db::{self, DbPools};
 use crate::utils;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Redirect;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
-    response::IntoResponse,
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use dashmap::DashMap;
 use serde_json::{Value, json};
-use std::sync::Arc;
 use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{Semaphore, broadcast};
 use tracing::warn;
 
@@ -68,6 +68,7 @@ fn cache_put_ttl(cache: &DashMap<String, CacheEntry>, key: String, ttl_ms: i64, 
 lazy_static::lazy_static! {
     static ref INDEX_INFO_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = indexId
     static ref INDEX_SUBJECTS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = indexId:offset:limit
+    static ref BGM_CHARACTER_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = characterId
     // Cache for archive fallbacks (when archive.sqlite doesn't contain the requested item)
     static ref SUBJECT_DETAILS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = subjectId
     static ref SUBJECT_CHARACTERS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = subjectId
@@ -83,6 +84,7 @@ lazy_static::lazy_static! {
 
 const IMAGE_SOURCE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(4);
 const IMAGE_SOURCE_PERMIT_TIMEOUT: Duration = Duration::from_millis(500);
+const BGM_PROXY_LIMIT_PER_MINUTE: usize = 90;
 
 /// /api/* — game logic, leaderboard, stats
 pub fn api_routes(pools: Arc<DbPools>) -> Router {
@@ -126,19 +128,12 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         .route("/guess-character-count", post(stats::guess_character_count))
         .route("/character-usage/{id}", get(stats::character_usage))
         .route("/subject-added", post(stats::subject_added))
-        // Tags & Feedback
-        .route("/character-tags", post(tags::update_character_tags))
+        // Read-only tag compatibility endpoints and bug feedback.
         .route("/character-tags/{id}", get(tags::get_character_tags))
-        .route(
-            "/game-character-tags",
-            post(tags::update_game_character_tags),
-        )
         .route(
             "/game-character-tags/{subject_id}",
             get(tags::get_game_character_tags),
         )
-        .route("/propose-tags", post(tags::propose_tags))
-        .route("/feedback-tags", post(tags::feedback_tags))
         .route("/bug-feedback", post(tags::bug_feedback))
         .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state(pools)
@@ -509,18 +504,39 @@ async fn get_character_by_id(
 use axum::extract::Query as AxumQuery;
 use std::collections::HashMap;
 
+fn bgm_proxy_limit_rejection(
+    headers: &HeaderMap,
+    peer_addr: SocketAddr,
+) -> Option<write_guard::GuardRejection> {
+    write_guard::enforce_public_write_limit(
+        headers,
+        Some(peer_addr),
+        "bgm-proxy",
+        BGM_PROXY_LIMIT_PER_MINUTE,
+    )
+    .err()
+}
+
+fn positive_query_id(q: &HashMap<String, String>, key: &'static str) -> Result<i64, String> {
+    match q.get(key).and_then(|id| id.parse::<i64>().ok()) {
+        Some(id) if id > 0 => Ok(id),
+        _ => Err(format!("{key} must be a positive number")),
+    }
+}
+
 /// GET /api/bgm/index-info?indexId=xxx
 async fn bgm_proxy_index_info(
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     AxumQuery(q): AxumQuery<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let index_id = match q.get("indexId") {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "indexId required" })),
-            )
-                .into_response();
+) -> Response {
+    if let Some(rejection) = bgm_proxy_limit_rejection(&headers, peer_addr) {
+        return rejection.into_response();
+    }
+    let index_id = match positive_query_id(&q, "indexId") {
+        Ok(id) => id.to_string(),
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
         }
     };
     if let Some(v) = cache_get_ttl(&INDEX_INFO_CACHE, &index_id) {
@@ -544,16 +560,17 @@ async fn bgm_proxy_index_info(
 
 /// GET /api/bgm/index-subjects?indexId=xxx&offset=0&limit=10
 async fn bgm_proxy_index_subjects(
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     AxumQuery(q): AxumQuery<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let index_id = match q.get("indexId") {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "indexId required" })),
-            )
-                .into_response();
+) -> Response {
+    if let Some(rejection) = bgm_proxy_limit_rejection(&headers, peer_addr) {
+        return rejection.into_response();
+    }
+    let index_id = match positive_query_id(&q, "indexId") {
+        Ok(id) => id.to_string(),
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
         }
     };
     let offset = q
@@ -593,21 +610,28 @@ async fn bgm_proxy_index_subjects(
 
 /// GET /api/bgm/character?id=xxx — proxy single character details from BGM
 async fn bgm_proxy_character(
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     AxumQuery(q): AxumQuery<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let id = match q.get("id") {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "id required" })),
-            )
-                .into_response();
+) -> Response {
+    if let Some(rejection) = bgm_proxy_limit_rejection(&headers, peer_addr) {
+        return rejection.into_response();
+    }
+    let id = match positive_query_id(&q, "id") {
+        Ok(id) => id.to_string(),
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
         }
     };
+    if let Some(v) = cache_get_ttl(&BGM_CHARACTER_CACHE, &id) {
+        return Json(v).into_response();
+    }
     let url = format!("https://api.bgm.tv/v0/characters/{}", id);
     match bgm_get(&url).await {
-        Ok(data) => Json(data).into_response(),
+        Ok(data) => {
+            cache_put_ttl(&BGM_CHARACTER_CACHE, id, 10 * 60 * 1000, data.clone());
+            Json(data).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": e.to_string() })),

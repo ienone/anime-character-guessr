@@ -49,6 +49,10 @@ services:
       - ROOM_ADMIN_TOKEN=${ROOM_ADMIN_TOKEN:-}
       # CORS allowed origin (must match the frontend URL)
       - CLIENT_URL=${DOMAIN_NAME:-http://localhost}
+      # Public URL used when generating quick-join links
+      - PUBLIC_CLIENT_URL=${DOMAIN_NAME:-http://localhost}
+      # Docker traffic reaches the server through the bundled nginx proxy
+      - TRUST_PROXY_HEADERS=true
     volumes:
       # Mount pre-built archive.sqlite (read-only asset)
       - ./archive.sqlite:/data/archive.sqlite:ro
