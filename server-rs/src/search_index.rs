@@ -2,9 +2,12 @@ use anyhow::Context;
 use serde_json::{Value, json};
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, TantivyDocument};
-use tantivy::{Document, Index, IndexReader, ReloadPolicy};
+use tantivy::query::{BooleanQuery, Query, QueryParser, TermQuery};
+use tantivy::schema::{Field, IndexRecordOption, Schema, TantivyDocument};
+use tantivy::{Document, Index, IndexReader, ReloadPolicy, Term};
+
+const SUBJECT_SEARCH_INITIAL_CANDIDATES: usize = 256;
+const SUBJECT_SEARCH_MAX_CANDIDATES: usize = 12_000;
 
 pub struct TantivySearch {
     characters: TantivyIndex,
@@ -20,6 +23,7 @@ struct TantivyIndex {
 
 struct TantivyFields {
     query_fields: Vec<Field>,
+    type_filter_field: Option<Field>,
 }
 
 impl TantivySearch {
@@ -106,24 +110,28 @@ impl TantivySearch {
         types: &[i64],
         limit: usize,
     ) -> anyhow::Result<Vec<Value>> {
-        let docs = self.subjects.search(keyword, 12_000, 0)?;
-        let mut out = Vec::new();
-        let mut filtered = Vec::new();
-        for (score, doc) in docs {
-            let subject_type = first_u64(&doc, "type").unwrap_or(0) as i64;
-            if !types.contains(&subject_type) {
-                continue;
-            }
-            let bucket = subject_relevance_bucket(&doc, keyword);
-            let popularity = first_u64(&doc, "popularity").unwrap_or(0);
-            filtered.push((bucket, score, popularity, doc));
+        if limit == 0 || types.is_empty() {
+            return Ok(Vec::new());
         }
-        filtered.sort_by(|a, b| {
+
+        let docs = if self.subjects.fields.type_filter_field.is_some() {
+            let candidate_limit = subject_candidate_window(limit);
+            self.subjects
+                .search_with_u64_filter(keyword, types, candidate_limit, 0)?
+        } else {
+            self.subjects
+                .search_progressively_filtered(keyword, types, limit)?
+        };
+
+        let mut ranked = rank_subject_docs(docs, keyword, types);
+        ranked.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then_with(|| b.1.total_cmp(&a.1))
                 .then_with(|| b.2.cmp(&a.2))
         });
-        for (_, _, _, doc) in filtered.into_iter().take(limit) {
+
+        let mut out = Vec::new();
+        for (_, _, _, doc) in ranked.into_iter().take(limit) {
             let id = first_u64(&doc, "id").unwrap_or(0);
             let subject_type = first_u64(&doc, "type").unwrap_or(0) as i64;
             let img_url = format!("/img/subject/{}.webp", id);
@@ -152,11 +160,18 @@ impl TantivyIndex {
             .iter()
             .map(|name| schema.get_field(name))
             .collect::<Result<Vec<_>, _>>()?;
+        let type_filter_field = schema
+            .get_field("type")
+            .ok()
+            .filter(|field| schema.get_field_entry(*field).is_indexed());
         Ok(Self {
             index,
             reader,
             schema,
-            fields: TantivyFields { query_fields },
+            fields: TantivyFields {
+                query_fields,
+                type_filter_field,
+            },
         })
     }
 
@@ -187,6 +202,117 @@ impl TantivyIndex {
         }
         Ok(out)
     }
+
+    fn search_with_u64_filter(
+        &self,
+        keyword: &str,
+        filter_values: &[i64],
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<(f32, Value)>> {
+        let query_text = sanitize_query(keyword);
+        if query_text.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut parser = QueryParser::for_index(&self.index, self.fields.query_fields.clone());
+        parser.set_conjunction_by_default();
+        let text_query = parser.parse_query(&query_text)?;
+        let Some(type_field) = self.fields.type_filter_field else {
+            return self.search(keyword, limit, offset);
+        };
+
+        let type_queries = filter_values
+            .iter()
+            .copied()
+            .filter(|value| *value >= 0)
+            .map(|value| {
+                let term = Term::from_field_u64(type_field, value as u64);
+                Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>
+            })
+            .collect::<Vec<_>>();
+        if type_queries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let type_query: Box<dyn Query> = if type_queries.len() == 1 {
+            type_queries.into_iter().next().unwrap()
+        } else {
+            Box::new(BooleanQuery::union(type_queries))
+        };
+        let query = BooleanQuery::intersection(vec![text_query, type_query]);
+        self.collect_docs(&query, limit, offset)
+    }
+
+    fn search_progressively_filtered(
+        &self,
+        keyword: &str,
+        types: &[i64],
+        limit: usize,
+    ) -> anyhow::Result<Vec<(f32, Value)>> {
+        let mut candidate_limit = subject_candidate_window(limit);
+        loop {
+            let docs = self.search(keyword, candidate_limit, 0)?;
+            let matched = docs
+                .iter()
+                .filter(|(_, doc)| {
+                    let subject_type = first_u64(doc, "type").unwrap_or(0) as i64;
+                    types.contains(&subject_type)
+                })
+                .count();
+            let exhausted =
+                docs.len() < candidate_limit || candidate_limit >= SUBJECT_SEARCH_MAX_CANDIDATES;
+            if matched >= limit || exhausted {
+                return Ok(docs);
+            }
+            candidate_limit = (candidate_limit * 3).min(SUBJECT_SEARCH_MAX_CANDIDATES);
+        }
+    }
+
+    fn collect_docs(
+        &self,
+        query: &dyn Query,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<(f32, Value)>> {
+        let searcher = self.reader.searcher();
+        let top_docs = searcher.search(
+            query,
+            &TopDocs::with_limit(limit)
+                .and_offset(offset)
+                .order_by_score(),
+        )?;
+        let mut out = Vec::new();
+        for (score, doc_address) in top_docs {
+            let doc: TantivyDocument = searcher.doc(doc_address)?;
+            out.push((score, serde_json::from_str(&doc.to_json(&self.schema))?));
+        }
+        Ok(out)
+    }
+}
+
+fn subject_candidate_window(limit: usize) -> usize {
+    (limit.saturating_mul(20))
+        .clamp(SUBJECT_SEARCH_INITIAL_CANDIDATES, 600)
+        .min(SUBJECT_SEARCH_MAX_CANDIDATES)
+}
+
+fn rank_subject_docs(
+    docs: Vec<(f32, Value)>,
+    keyword: &str,
+    types: &[i64],
+) -> Vec<(u8, f32, u64, Value)> {
+    docs.into_iter()
+        .filter_map(|(score, doc)| {
+            let subject_type = first_u64(&doc, "type").unwrap_or(0) as i64;
+            if !types.contains(&subject_type) {
+                return None;
+            }
+            let bucket = subject_relevance_bucket(&doc, keyword);
+            let popularity = first_u64(&doc, "popularity").unwrap_or(0);
+            Some((bucket, score, popularity, doc))
+        })
+        .collect()
 }
 
 fn character_relevance_bucket(doc: &Value, keyword: &str) -> u8 {

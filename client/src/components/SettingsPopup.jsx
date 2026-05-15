@@ -40,6 +40,84 @@ const getAddedSubjectTitle = (subject) => {
 
 const cloneSettings = (settings) => JSON.parse(JSON.stringify(settings || {}));
 
+const normalizeNumber = (value, fallback, min, max) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(max, Math.max(min, Math.trunc(number)))
+}
+
+const normalizeOptionalYear = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? Math.min(2038, Math.max(1800, Math.trunc(number))) : null
+}
+
+const normalizeSettings = (settings) => {
+  const source = cloneSettings(settings)
+  const metaTags = Array.isArray(source.metaTags)
+    ? source.metaTags.slice(0, 3).map(tag => String(tag ?? '').trim())
+    : []
+  while (metaTags.length < 3) metaTags.push('')
+
+  const addedSubjects = Array.isArray(source.addedSubjects)
+    ? source.addedSubjects
+      .map(subject => {
+        const id = Number(getAddedSubjectId(subject))
+        if (!Number.isFinite(id) || id <= 0) return null
+        if (subject && typeof subject === 'object') {
+          return {
+            ...subject,
+            id,
+            name: String(subject.name ?? '').slice(0, 120),
+            name_cn: String(subject.name_cn ?? subject.nameCn ?? '').slice(0, 120),
+          }
+        }
+        return { id }
+      })
+      .filter(Boolean)
+    : []
+
+  const useHints = Array.isArray(source.useHints)
+    ? source.useHints
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value) && value > 0)
+      .map(value => Math.trunc(value))
+      .slice(0, 20)
+    : []
+
+  const indexId = source.indexId == null ? null : String(source.indexId).trim()
+  const maxAttempts = normalizeNumber(source.maxAttempts, 10, 1, 15)
+  const timeLimit = source.timeLimit
+    ? normalizeNumber(source.timeLimit, null, 15, 120)
+    : null
+
+  return {
+    ...source,
+    startYear: normalizeOptionalYear(source.startYear),
+    endYear: normalizeOptionalYear(source.endYear),
+    metaTags,
+    topNSubjects: normalizeNumber(source.topNSubjects, 0, 0, 3000),
+    commonTags: source.commonTags !== false,
+    subjectTagNum: normalizeNumber(source.subjectTagNum, 6, 0, 10),
+    characterTagNum: normalizeNumber(source.characterTagNum, 6, 0, 10),
+    mainCharacterOnly: source.mainCharacterOnly !== false,
+    characterNum: normalizeNumber(source.characterNum, 6, 1, 50),
+    useSubjectPerYear: Boolean(source.useSubjectPerYear),
+    addedSubjects,
+    maxAttempts,
+    syncMode: Boolean(source.syncMode),
+    nonstopMode: Boolean(source.nonstopMode),
+    globalPick: Boolean(source.globalPick),
+    tagBan: Boolean(source.tagBan),
+    useHints,
+    useImageHint: normalizeNumber(source.useImageHint, 0, 0, maxAttempts),
+    timeLimit,
+    subjectSearch: source.subjectSearch !== false,
+    useIndex: Boolean(source.useIndex && indexId),
+    indexId: indexId || null,
+  }
+}
+
 function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onClose, onRestart, hideRestart = false, isMultiplayer = false }) {
   const [indexInputValue, setIndexInputValue] = useState('');
   const [indexInfo, setIndexInfo] = useState(null);
@@ -49,7 +127,7 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
   const searchAbortRef = useRef(null);
   const searchRequestSeqRef = useRef(0);
   const [hintInputs, setHintInputs] = useState(['8','5','3']);
-  const [localSettings, setLocalSettings] = useState(() => cloneSettings(committedSettings));
+  const [localSettings, setLocalSettings] = useState(() => normalizeSettings(committedSettings));
   const [isGuessSettingsOpen, setIsGuessSettingsOpen] = useState(false);
   const [isAnswerSettingsOpen, setIsAnswerSettingsOpen] = useState(false);
   const gameSettings = localSettings;
@@ -63,7 +141,7 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
   const isExclusiveMetaCategory = exclusiveMetaCategories.includes((gameSettings.metaTags || [])[0]);
 
   useEffect(() => {
-    const nextSettings = cloneSettings(committedSettings);
+    const nextSettings = normalizeSettings(committedSettings);
     setLocalSettings(nextSettings);
     setIndexInputValue(nextSettings.indexId || '');
   }, [committedSettings]);
@@ -242,16 +320,6 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
     updateLocalSetting('addedSubjects', newAddedSubjects);
   };
 
-  const handleClearCache = () => {
-    try {
-      localStorage.removeItem('requestCache');
-      notify('本地缓存记录已清空！', 'success');
-    } catch (error) {
-      console.warn('Failed to clear local cache record:', error);
-      notify('清空缓存失败，请检查浏览器存储权限', 'error');
-    }
-  }
-
   const applyPresetConfig = async (presetName) => {
     const presetConfig = getPresetConfig(presetName);
     if (!presetConfig) return;
@@ -264,7 +332,7 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
           next[key] = value;
         }
       });
-      return next;
+      return normalizeSettings(next);
     });
     
     // 特殊处理indexId，确保使用setIndex函数
@@ -277,14 +345,15 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
 
   // 关闭时放弃本地更改（恢复到父级传入的 gameSettings）
   const handleClose = () => {
-    setLocalSettings(cloneSettings(committedSettings));
+    setLocalSettings(normalizeSettings(committedSettings));
     onClose();
   };
 
   // 确认时一次性同步草稿设置，避免关闭前触发重开局或多人设置广播
   const handleConfirm = () => {
-    onSettingsChange(localSettings);
-    if (typeof onRestart === 'function') onRestart(localSettings);
+    const normalized = normalizeSettings(localSettings);
+    onSettingsChange(normalized);
+    if (typeof onRestart === 'function') onRestart(normalized);
     onClose();
   };
 
@@ -297,9 +366,6 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
             <div className="header-subtitle">将鼠标移到各设置的标签上可以看到提示，移到输入框上可以看到数值范围</div>
           </div>
             <div className="header-actions">
-            <button className="header-btn clear" onClick={handleClearCache} title="清空本地缓存记录">
-              <Icon name="trash" />
-            </button>
             <button className="header-btn close" onClick={handleClose} title="关闭">
               <Icon name="xmark" />
             </button>
@@ -391,7 +457,9 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
                         reader.onload = (event) => {
                             try {
                             const imported = JSON.parse(event.target.result);
-                            setLocalSettings(prev => ({ ...prev, ...imported }));
+                            const normalized = normalizeSettings({ ...localSettings, ...imported });
+                            setLocalSettings(normalized);
+                            setIndexInputValue(normalized.indexId || '');
                             notify('设置已导入！', 'success');
                             } catch (err) {
                             notify('导入失败无效的JSON文件', 'error');
@@ -896,7 +964,7 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
               </div>
 
               {/* Combined Display Area */}
-              {(gameSettings.useIndex || gameSettings.addedSubjects.length > 0) && (
+              {(gameSettings.useIndex || (gameSettings.addedSubjects || []).length > 0) && (
                   <div className="combined-display-area">
                       {gameSettings.useIndex && indexInfo && (
                           <div className="catalog-info">
@@ -920,9 +988,9 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
                           </div>
                       )}
                       
-                      {gameSettings.addedSubjects.length > 0 && (
+                      {(gameSettings.addedSubjects || []).length > 0 && (
                           <div className="extra-subjects-list">
-                              {gameSettings.addedSubjects.map((subject) => (
+                              {(gameSettings.addedSubjects || []).map((subject) => (
                                   <div key={getAddedSubjectId(subject)} className="subject-tag-large">
                                       <a href={`https://bangumi.tv/subject/${getAddedSubjectId(subject)}`} target="_blank" rel="noopener noreferrer">{getAddedSubjectTitle(subject)}</a>
                                       <button 

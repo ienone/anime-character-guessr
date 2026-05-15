@@ -31,7 +31,7 @@ Install dependencies separately in `client/` and build the Rust server from `ser
 
 ## Coding Style & Naming Conventions
 
-Use ES modules throughout JavaScript files. Client components and pages use PascalCase filenames such as `SearchBar.jsx`; utility modules use lower camel case or descriptive lowercase names such as `cached-axios.js`. Keep UI logic in `client/src/components/` or `client/src/pages/`, shared data in `client/src/data/`, and frontend API helpers in `client/src/utils/`.
+Use ES modules throughout JavaScript files. Client components and pages use PascalCase filenames such as `SearchBar.jsx`; utility modules use lower camel case or descriptive lowercase names. Keep UI logic in `client/src/components/` or `client/src/pages/`, shared data in `client/src/data/`, and frontend API helpers in `client/src/utils/`.
 
 Follow the existing frontend style: two-space indentation, semicolon-free JavaScript, single quotes, and concise functional React components. Run `npm run lint` in `client/` before changing frontend code.
 
@@ -45,7 +45,7 @@ Backend tests are Rust tests under `server-rs/` and run with `cargo test`. Add f
 
 Recent commits use short Conventional Commit-style prefixes, including `fix:`, `chore:`, and `Revert`, sometimes with Chinese descriptions. Keep messages concise and scoped, for example `fix: resolve multiplayer room cleanup`.
 
-Pull requests should describe the change, list checks run, link related issues, and include screenshots for visible UI changes. For tag contributions, place assets under `client/public/assets/`, JSON under `client/public/data/extra_tags/`, and update `client/src/data/extra_tag_subjects.js` when needed.
+Pull requests should describe the change, list checks run, link related issues, and include screenshots for visible UI changes.
 
 ## Security & Configuration Tips
 

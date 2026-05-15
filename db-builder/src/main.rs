@@ -5,10 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use chrono;
 use rusqlite::Connection;
 use serde_json::Value;
-use tantivy::schema::{FAST, STORED, STRING, Schema, TantivyDocument, TEXT};
+use tantivy::schema::{Schema, TantivyDocument, FAST, INDEXED, STORED, STRING, TEXT};
 use tantivy::{doc, Index};
 
 const DEFAULT_DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
@@ -349,7 +348,7 @@ fn migrate_app_db(
                 continue;
             };
 
-            let entry = va_by_char.entry(character_id).or_insert_with(Vec::new);
+            let entry = va_by_char.entry(character_id).or_default();
             if entry.len() >= 8 {
                 continue;
             }
@@ -504,7 +503,7 @@ fn build_tantivy_subject_index(db: &Connection, index_dir: &Path) -> Result<()> 
 
     let mut schema_builder = Schema::builder();
     let id = schema_builder.add_u64_field("id", STORED | FAST);
-    let stype = schema_builder.add_u64_field("type", STORED | FAST);
+    let stype = schema_builder.add_u64_field("type", INDEXED | STORED | FAST);
     let date = schema_builder.add_text_field("date", STORED);
     let popularity = schema_builder.add_u64_field("popularity", STORED | FAST);
     let name = schema_builder.add_text_field("name", TEXT | STORED);
@@ -553,8 +552,7 @@ fn build_tantivy_subject_index(db: &Connection, index_dir: &Path) -> Result<()> 
 
 fn recreate_dir(path: &Path) -> Result<()> {
     if path.exists() {
-        fs::remove_dir_all(path)
-            .with_context(|| format!("failed to remove {}", path.display()))?;
+        fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
     }
     fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
     Ok(())
@@ -796,11 +794,11 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
     {
         let mut subject_stmt = tx.prepare(
             "INSERT INTO subjects (id, type, name, name_cn, date, year, popularity, score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         let mut detail_stmt = tx.prepare(
             "INSERT INTO subject_details (subject_id, tags_json, meta_tags_json)
-             VALUES (?1, ?2, ?3)"
+             VALUES (?1, ?2, ?3)",
         )?;
 
         for line in reader.lines() {
@@ -858,11 +856,7 @@ fn process_subjects(db: &mut Connection, dump_dir: &Path) -> Result<HashSet<i64>
                     collects,
                     v["score"].as_f64().unwrap_or(-1.0),
                 ))?;
-                detail_stmt.execute((
-                    id,
-                    tags_json,
-                    meta_tags_json,
-                ))?;
+                detail_stmt.execute((id, tags_json, meta_tags_json))?;
             }
         }
     }
@@ -973,12 +967,7 @@ fn process_characters(
                     .collect::<Vec<_>>()
                     .join(" ");
 
-                char_stmt.execute((
-                    id,
-                    name,
-                    v["role"].as_i64().unwrap_or(0),
-                    popularity,
-                ))?;
+                char_stmt.execute((id, name, v["role"].as_i64().unwrap_or(0), popularity))?;
                 profile_stmt.execute((
                     id,
                     parsed.name_cn.as_deref().unwrap_or(""),
@@ -988,7 +977,12 @@ fn process_characters(
                     summary,
                 ))?;
                 for alias in &parsed.aliases {
-                    alias_stmt.execute((id, alias.value.as_str(), alias.alias_type.as_str(), alias.priority))?;
+                    alias_stmt.execute((
+                        id,
+                        alias.value.as_str(),
+                        alias.alias_type.as_str(),
+                        alias.priority,
+                    ))?;
                 }
                 search_stmt.execute((
                     id,
