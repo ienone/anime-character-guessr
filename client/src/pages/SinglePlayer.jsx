@@ -9,7 +9,9 @@ import SocialLinks from '../components/SocialLinks';
 import GameInfo from '../components/GameInfo';
 import Timer from '../components/Timer';
 import FeedbackPopup from '../components/FeedbackPopup';
+import Icon from '../components/Icon';
 import logCollector from '../utils/logCollector';
+import { notify } from '../utils/notifications';
 import '../styles/game.css';
 import '../styles/SinglePlayer.css';
 import '../styles/social.css';
@@ -101,7 +103,7 @@ function SinglePlayer() {
         console.error('Failed to initialize game:', error);
         if (isMounted) {
           const message = error?.response?.data?.message || error?.message || '游戏初始化失败，请刷新页面重试，或在设置里清理缓存';
-          alert(message);
+          notify(message, 'error');
           setInitFailed(true);
         }
       }
@@ -120,7 +122,7 @@ function SinglePlayer() {
     setIsGuessing(true);
     setShouldResetTimer(true);
     if (character.id === 56822 || character.id === 56823) {
-      alert('有点意思');
+      notify('有点意思');
     }
 
     try {
@@ -165,7 +167,7 @@ function SinglePlayer() {
         }]);
 
         setGameEnd(true);
-        alert('熟悉这个角色吗？欢迎贡献标签');
+        notify('熟悉这个角色吗？欢迎贡献标签', 'success');
         setGameEndPopup({
           result: 'win',
           answer: answerCharacter
@@ -199,7 +201,7 @@ function SinglePlayer() {
         }]);
 
         setGameEnd(true);
-        alert('认识这个角色吗？欢迎贡献标签');
+        notify('认识这个角色吗？欢迎贡献标签');
         setGameEndPopup({
           result: 'lose',
           answer: answerCharacter
@@ -234,7 +236,7 @@ function SinglePlayer() {
       }
     } catch (error) {
       console.error('Error processing guess:', error);
-      alert('出错了，请重试');
+      notify('出错了，请重试', 'error');
     } finally {
       setIsGuessing(false);
       setShouldResetTimer(false);
@@ -301,7 +303,7 @@ function SinglePlayer() {
       } catch (error) {
         console.error('Failed to initialize new game:', error);
         const message = error?.response?.data?.message || error?.message || '游戏初始化失败，请刷新页面重试，或在设置里清理缓存';
-        alert(message);
+        notify(message, 'error');
         setInitFailed(true);
       }
     } finally {
@@ -341,7 +343,7 @@ function SinglePlayer() {
       result: 'lose',
       answer: answerCharacter
     });
-    alert('已投降！查看角色详情');
+    notify('已投降！查看角色详情', 'warning');
   };
 
   const handleFeedbackSubmit = async ({ type, description, includeLogs }) => {
@@ -368,7 +370,7 @@ function SinglePlayer() {
         title="Bug/标签反馈"
         onClick={() => setShowFeedbackPopup(true)}
       >
-        🐞
+        <Icon name="exclamationCircle" />
       </button>
 
       <SocialLinks

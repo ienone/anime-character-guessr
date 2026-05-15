@@ -2,10 +2,12 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Home from './pages/Home';
 import SinglePlayer from './pages/SinglePlayer';
 import Multiplayer from './pages/Multiplayer';
+import ToastNotifications from './components/ToastNotifications';
 
 function App() {
   return (
     <Router>
+      <ToastNotifications />
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/singleplayer" element={<SinglePlayer />} />

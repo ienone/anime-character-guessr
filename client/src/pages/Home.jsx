@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import '../styles/Home.css';
 import WelcomePopup from '../components/WelcomePopup';
+import Icon from '../components/Icon';
 
 const LINE_OPTIONS = [
   { url: 'https://anime-character-guessr.netlify.app/', name: 'Netlify' },
@@ -143,7 +144,7 @@ const Home = () => {
             className="fotter-btn"
             onClick={e => { e.preventDefault(); setShowWelcomePopup(true); }}
           >
-            <i className="fas fa-bullhorn" style={{marginRight: '8px'}}></i>显示公告
+            <Icon name="bullhorn" className="app-icon-inline" />显示公告
           </a>
           <a
             href="https://status.baka.website/status/ccb"
@@ -151,7 +152,7 @@ const Home = () => {
             rel="noopener noreferrer"
             className="fotter-btn"
           >
-            <i className="fas fa-server" style={{marginRight: '8px'}}></i>服务状态
+            <Icon name="server" className="app-icon-inline" />服务状态
           </a>
           <a 
             href="https://www.bilibili.com/video/BV14CVRzUELs" 
@@ -159,7 +160,7 @@ const Home = () => {
             rel="noopener noreferrer"
             className="fotter-btn"
           >
-            <i className="fab fa-bilibili" style={{marginRight: '8px'}}></i>玩法简介
+            <Icon name="bilibili" className="app-icon-inline" />玩法简介
           </a>
           <a 
             href="https://github.com/kennylimz/anime-character-guessr" 
@@ -167,7 +168,7 @@ const Home = () => {
             rel="noopener noreferrer"
             className="fotter-btn"
           >
-            <i className="fab fa-github" style={{marginRight: '8px'}}></i>GitHub仓库
+            <Icon name="github" className="app-icon-inline" />GitHub仓库
           </a>
           <a 
             href="https://qm.qq.com/q/2sWbSsCwBu" 
@@ -175,7 +176,7 @@ const Home = () => {
             rel="noopener noreferrer"
             className="fotter-btn"
           >
-            <i className="fab fa-qq" style={{marginRight: '8px'}}></i>加入QQ群
+            <Icon name="qq" className="app-icon-inline" />加入QQ群
           </a>
           <a 
             href="https://www.bilibili.com/video/BV1MstxzgEhg/" 
@@ -183,7 +184,7 @@ const Home = () => {
             rel="noopener noreferrer"
             className="fotter-btn"
           >
-            <i className="fas fa-desktop" style={{marginRight: '8px'}}></i>作者的新玩具
+            <Icon name="desktop" className="app-icon-inline" />作者的新玩具
           </a>
         </div>
         <p>

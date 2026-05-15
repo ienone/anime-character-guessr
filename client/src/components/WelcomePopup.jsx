@@ -1,12 +1,13 @@
 import '../styles/popups.css';
 import announcements from '../data/announcements';
 import UpdateAnnouncement from './UpdateAnnouncement';
+import Icon from './Icon';
 
 function WelcomePopup({ onClose }) {
   return (
     <div className="popup-overlay">
       <div className="popup-content welcome-popup">
-        <button className="popup-close" onClick={onClose}><i className="fas fa-xmark"></i></button>
+        <button className="popup-close" onClick={onClose}><Icon name="xmark" /></button>
         <div className="popup-header welcome-header">
           <div className="welcome-header-inner">
             <div className="title-container">

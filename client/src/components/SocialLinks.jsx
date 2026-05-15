@@ -1,4 +1,5 @@
 import '../styles/social.css';
+import Icon from './Icon';
 
 function SocialLinks({ onSettingsClick, onHelpClick, onFeedbackClick, showFeedbackInline = false }) {
   return (
@@ -8,13 +9,13 @@ function SocialLinks({ onSettingsClick, onHelpClick, onFeedbackClick, showFeedba
         <div className="arrow"></div>
       </div>
       <button className="social-link settings-button" onClick={onSettingsClick}>
-        <i className="fas fa-cog"></i>
+        <Icon name="cog" />
       </button>
       <a href="/" className="social-link" title="Home">
-          <i className="fas fa-home"></i>
+          <Icon name="home" />
       </a>
       <button className="social-link help-button" onClick={onHelpClick}>
-        <i className="fas fa-question-circle"></i>
+        <Icon name="questionCircle" />
       </button>
 
       {/* Inline feedback button for small screens; shown only when requested */}
@@ -24,7 +25,7 @@ function SocialLinks({ onSettingsClick, onHelpClick, onFeedbackClick, showFeedba
           title="Bug/标签反馈"
           onClick={onFeedbackClick}
         >
-          🐞
+          <Icon name="exclamationCircle" />
         </button>
       )}
 
@@ -32,10 +33,10 @@ function SocialLinks({ onSettingsClick, onHelpClick, onFeedbackClick, showFeedba
         <img src="https://avatars.githubusercontent.com/u/7521082?s=200&v=4" alt="Bangumi" className="bangumi-icon" />
       </a>
       <a href="https://github.com/kennylimz/anime-character-guessr" target="_blank" rel="noopener noreferrer" className="social-link">
-        <i className="fab fa-github"></i>
+        <Icon name="github" />
       </a>
       <a href="https://space.bilibili.com/87983557" target="_blank" rel="noopener noreferrer" className="social-link">
-        <i className="fa-brands fa-bilibili"></i>
+        <Icon name="bilibili" />
       </a>
     </div>
   );

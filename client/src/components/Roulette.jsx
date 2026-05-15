@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import '../styles/Roulette.css';
 import axios from 'axios';
 import Image from './Image'
+import { notify } from '../utils/notifications';
 
 const serverUrl = import.meta.env.VITE_SERVER_URL || ''
 
@@ -37,7 +38,7 @@ const Roulette = ({ defaultExpanded = false }) => {
 
   const handleRedeem = async () => {
     if (!redeemCode.trim()) {
-      alert('请输入兑换码');
+      notify('请输入兑换码', 'warning');
       return;
     }
 
@@ -53,13 +54,13 @@ const Roulette = ({ defaultExpanded = false }) => {
         setSelected(null);
         setRedeemCode('');
         
-        alert('兑换成功！');
+        notify('兑换成功！', 'success');
       }
     } catch (error) {
       if (error.response?.status === 404) {
-        alert('兑换码无效或已过期');
+        notify('兑换码无效或已过期', 'warning');
       } else {
-        alert('兑换失败，请稍后重试');
+        notify('兑换失败，请稍后重试', 'error');
       }
       console.error('Redeem error:', error);
     } finally {

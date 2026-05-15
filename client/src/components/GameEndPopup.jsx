@@ -4,6 +4,7 @@ import { useState } from 'react';
 import TagContributionPopup from './TagContributionPopup';
 import { idToTags } from '../data/id_tags';
 import Image from './Image';
+import Icon from './Icon';
 
 function renderSummaryWithTags(summary) {
   if (!summary || typeof summary !== 'string') return summary;
@@ -118,7 +119,7 @@ function GameEndPopup({ result, answer, onClose }) {
   return (
     <div className="popup-overlay">
       <div className="popup-content">
-        <button className="popup-close" onClick={onClose}><i class="fas fa-xmark"></i></button>
+        <button className="popup-close" onClick={onClose}><Icon name="xmark" /></button>
         <div className="popup-header">
           <h2>{result === 'win' ? '🎉 给你猜对了，有点东西' : '😢 已经结束咧'}</h2>
         </div>

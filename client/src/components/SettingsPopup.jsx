@@ -4,12 +4,15 @@ import { getIndexInfo, searchSubjects } from '../utils/bangumi';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import axiosCache from '../utils/cached-axios';
 import { getPresetConfig } from '../data/presets';
+import { sanitizeHtml } from '../utils/sanitizeHtml';
+import { notify } from '../utils/notifications';
+import Icon from './Icon';
 
 // Helper Components
 const Tooltip = ({ content }) => (
   <div className="tooltip-wrapper">
     <div className="tooltip-icon">?</div>
-    <div className="tooltip-content" dangerouslySetInnerHTML={{ __html: content }} />
+    <div className="tooltip-content" dangerouslySetInnerHTML={{ __html: sanitizeHtml(content) }} />
   </div>
 );
 
@@ -101,9 +104,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
     } catch (error) {
       console.error('Failed to fetch index info:', error);
       if (error.message === 'Index not found') {
-        alert('目录不存在或者FIFA了');
+        notify('目录不存在或者FIFA了', 'warning');
       } else {
-        alert('导入失败，请稍后重试');
+        notify('导入失败，请稍后重试', 'error');
       }
       // Reset index settings on error
       onSettingsChange('useIndex', false);
@@ -115,7 +118,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
   const handleImport = async () => {
     if (!indexInputValue) {
-      alert('请输入目录ID');
+      notify('请输入目录ID', 'warning');
       return;
     }
     try {
@@ -127,9 +130,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
     } catch (error) {
       console.error('Failed to fetch index info:', error);
       if (error.message === 'Index not found') {
-        alert('目录不存在或者FIFA了');
+        notify('目录不存在或者FIFA了', 'warning');
       } else {
-        alert('导入失败，请稍后重试');
+        notify('导入失败，请稍后重试', 'error');
       }
       // Reset index settings on error
       onSettingsChange('useIndex', false);
@@ -198,7 +201,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
   const handleClearCache = () => {
     axiosCache.clearCache();
-    alert('缓存已清空！');
+    notify('缓存已清空！', 'success');
   }
 
   const applyPresetConfig = async (presetName) => {
@@ -249,13 +252,13 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
           </div>
             <div className="header-actions">
             <button className="header-btn clear" onClick={handleClearCache} title="清空缓存">
-              <i className="fas fa-trash"></i>
+              <Icon name="trash" />
             </button>
             <button className="header-btn close" onClick={handleClose} title="关闭">
-              <i className="fas fa-xmark"></i>
+              <Icon name="xmark" />
             </button>
             <button className="header-btn confirm" onClick={handleConfirm} title="确认修改">
-              <i className="fas fa-check"></i>
+              <Icon name="check" />
             </button>
             </div>
         </div>
@@ -327,7 +330,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                         document.body.removeChild(dlAnchorElem);
                     }}
                     >
-                    <i className="fas fa-download"></i> 导出配置
+                    <Icon name="download" className="app-icon-inline" />导出配置
                     </button>
                     <button
                     className="action-btn"
@@ -345,9 +348,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             Object.entries(imported).forEach(([key, value]) => {
                                 onSettingsChange(key, value);
                             });
-                            alert('设置已导入！');
+                            notify('设置已导入！', 'success');
                             } catch (err) {
-                            alert('导入失败无效的JSON文件');
+                            notify('导入失败无效的JSON文件', 'error');
                             }
                         };
                         reader.readAsText(file);
@@ -355,7 +358,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                         input.click();
                     }}
                     >
-                    <i className="fas fa-upload"></i> 导入配置
+                    <Icon name="upload" className="app-icon-inline" />导入配置
                     </button>
                 </div>
               </div>
@@ -365,9 +368,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                     key={preset}
                     className="preset-card"
                     onClick={() => {
-                        if (preset === '木柜子痴') alert('😅');
-                        if (preset === '二游高手') alert('那很有生活了😅');
-                        if (preset === 'MOBA糕手') alert('风暴要火');
+                        if (preset === '木柜子痴') notify('😅');
+                        if (preset === '二游高手') notify('那很有生活了😅');
+                        if (preset === 'MOBA糕手') notify('风暴要火');
                         applyPresetConfig(preset === '米哈游高手' ? '米哈游高手' : preset);
                     }}
                   >
@@ -395,13 +398,13 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                     <h3 className="group-title">猜测设置</h3>
                     <div className="group-subtitle">影响和玩家猜测有关的内容</div>
                 </div>
-                <i 
-                    className="fas fa-chevron-down" 
+                <Icon
+                    name="chevronDown"
                     style={{ 
                         transform: isGuessSettingsOpen ? 'rotate(180deg)' : 'rotate(0deg)',
                         transition: 'transform 0.3s ease'
                     }}
-                ></i>
+                />
               </div>
 
               {isGuessSettingsOpen && (
@@ -566,13 +569,13 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                     <h3 className="group-title">答案设置</h3>
                     <div className="group-subtitle">影响和答案角色有关的内容</div>
                 </div>
-                <i 
-                    className="fas fa-chevron-down" 
+                <Icon
+                    name="chevronDown"
                     style={{ 
                         transform: isAnswerSettingsOpen ? 'rotate(180deg)' : 'rotate(0deg)',
                         transition: 'transform 0.3s ease'
                     }}
-                ></i>
+                />
               </div>
 
               {isAnswerSettingsOpen && (

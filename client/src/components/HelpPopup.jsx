@@ -1,10 +1,11 @@
 import '../styles/popups.css';
+import Icon from './Icon';
 
 function HelpPopup({ onClose }) {
   return (
     <div className="popup-overlay">
       <div className="popup-content">
-        <button className="popup-close" onClick={onClose}><i class="fas fa-xmark"></i></button>
+        <button className="popup-close" onClick={onClose}><Icon name="xmark" /></button>
         <div className="popup-header">
           <h2>为什么我在这里？</h2>
         </div>

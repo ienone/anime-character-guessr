@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import '../styles/GuessesTable.css';
 import axios from 'axios';
 import { subjectsWithExtraTags } from '../data/extra_tag_subjects';
+import { sanitizeHtml } from '../utils/sanitizeHtml';
 
 function ModifiedTagDisplay({ guessCharacter, answerCharacter }) {
   const [guessTagData, setGuessTagData] = useState(null);
@@ -92,7 +93,7 @@ function ModifiedTagDisplay({ guessCharacter, answerCharacter }) {
                 <span
                   key={tagKey}
                   className={`meta-tag external-tag${isShared ? ' shared-tag' : ''}`}
-                  dangerouslySetInnerHTML={{ __html: tagContent }}
+                  dangerouslySetInnerHTML={{ __html: sanitizeHtml(tagContent) }}
                 />
               );
             })}

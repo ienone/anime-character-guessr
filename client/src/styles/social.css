@@ -97,7 +97,7 @@
   top: 78px;
   background: #fff;
   color: #b42318;
-  letter-spacing: -0.2px;
+  letter-spacing: 0;
 }
 
 /* Desktop single-player: place feedback button at top-left (align with back button) */
@@ -189,10 +189,7 @@
 
 
 .social-link:hover .bangumi-icon,
-.social-link:hover i,
-.social-link:hover .fa,
-.social-link:hover .fab,
-.social-link:hover .fa-brands {
+.social-link:hover .app-icon {
   transform: scale(1.1);
   transition: transform 0.2s;
 }

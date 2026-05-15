@@ -3,6 +3,8 @@ import { useState, useEffect } from 'react';
 import { submitCharacterTags, proposeCustomTags, submitFeedbackTags } from '../utils/db';
 import { idToTags } from '../data/id_tags.js';
 import Image from './Image';
+import { notify } from '../utils/notifications';
+import Icon from './Icon';
 
 function TagContributionPopup({ character, onClose }) {
   const [selectedTags, setSelectedTags] = useState([]);
@@ -130,11 +132,11 @@ function TagContributionPopup({ character, onClose }) {
       
       await Promise.all(submitPromises);
       
-      alert('感谢您的贡献！');
+      notify('感谢您的贡献！', 'success');
       onClose();
     } catch (error) {
       console.error('Error submitting tags:', error);
-      alert('提交失败，请稍后重试');
+      notify('提交失败，请稍后重试', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -159,7 +161,7 @@ function TagContributionPopup({ character, onClose }) {
   return (
     <div className="popup-overlay">
       <div className="popup-content">
-        <button className="popup-close" onClick={onClose}><i class="fas fa-xmark"></i></button>
+        <button className="popup-close" onClick={onClose}><Icon name="xmark" /></button>
         <div className="popup-header">
           <h2>为 {character.nameCn} 贡献标签</h2>
         </div>

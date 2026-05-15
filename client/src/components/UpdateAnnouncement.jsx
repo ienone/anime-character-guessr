@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import '../styles/UpdateAnnouncement.css';
+import { sanitizeHtml } from '../utils/sanitizeHtml';
 
 /**
  * 更新公告组件
@@ -43,7 +44,7 @@ const UpdateAnnouncement = ({
                 {announcement.date && <span className="date">{announcement.date}</span>}
               </div>
             )}
-            <div className="announcement-text" dangerouslySetInnerHTML={{ __html: announcement.content }} />
+            <div className="announcement-text" dangerouslySetInnerHTML={{ __html: sanitizeHtml(announcement.content) }} />
           </div>
         ))}
       </div>
