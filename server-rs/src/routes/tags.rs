@@ -1,7 +1,7 @@
 use crate::db::{self, DbPools};
 use axum::{
     Json,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -13,72 +13,6 @@ use super::write_guard::{enforce_public_write_limit, reject, truncate_chars, val
 const BUG_FEEDBACK_LIMIT_PER_MINUTE: usize = 6;
 const MAX_BUG_DESCRIPTION_CHARS: usize = 4_000;
 const MAX_BUG_BLOB_CHARS: usize = 60_000;
-
-/// GET /api/character-tags/:id
-pub async fn get_character_tags(
-    State(pools): State<Arc<DbPools>>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    let result = db::with_app_db(Arc::clone(&pools), move |conn| {
-        let row = conn.query_row(
-            "SELECT tag_counts FROM character_tags WHERE id = ?1",
-            [id],
-            |row| row.get::<_, String>(0),
-        );
-        match row {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!(e)),
-        }
-    })
-    .await;
-
-    match result {
-        Ok(Some(v)) => {
-            let tags: Value = serde_json::from_str(&v).unwrap_or(json!({}));
-            Json(json!({ "_id": id, "tagCounts": tags })).into_response()
-        }
-        Ok(None) => Json(json!({ "_id": id, "tagCounts": {} })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /api/game-character-tags/:subjectId
-pub async fn get_game_character_tags(
-    State(pools): State<Arc<DbPools>>,
-    Path(subject_id): Path<i64>,
-) -> impl IntoResponse {
-    let result = db::with_app_db(Arc::clone(&pools), move |conn| {
-        let row = conn.query_row(
-            "SELECT tags_json FROM game_character_tags WHERE subject_id = ?1",
-            [subject_id],
-            |row| row.get::<_, String>(0),
-        );
-        match row {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!(e)),
-        }
-    })
-    .await;
-
-    match result {
-        Ok(Some(v)) => {
-            let tags: Value = serde_json::from_str(&v).unwrap_or(json!({}));
-            Json(json!({ "subjectId": subject_id, "characters": tags })).into_response()
-        }
-        Ok(None) => Json(json!({ "subjectId": subject_id, "characters": {} })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
 
 /// POST /api/bug-feedback
 pub async fn bug_feedback(

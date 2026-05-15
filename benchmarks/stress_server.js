@@ -79,13 +79,7 @@ function requestFor(scenario, i) {
   }
 
   if (scenario === 'app-write') {
-    const userId = `stress-${i % 250}`
     const choices = [
-      jsonRequest('/api/leaderboard/submit', {
-        user_id: userId,
-        username: userId,
-        score_delta: (i % 7) - 3,
-      }),
       jsonRequest('/api/answer-character-count', {
         characterId: id,
         characterName: `stress-${id}`,

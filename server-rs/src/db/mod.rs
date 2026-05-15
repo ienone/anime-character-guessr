@@ -261,18 +261,6 @@ fn init_app_schema(conn: &Connection) -> anyhow::Result<()> {
             avatar_id TEXT NOT NULL DEFAULT '',
             avatar_image TEXT NOT NULL DEFAULT ''
         );
-        CREATE TABLE IF NOT EXISTS character_tags (
-            id INTEGER PRIMARY KEY,
-            tag_counts TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS game_character_tags (
-            subject_id INTEGER PRIMARY KEY,
-            tags_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS new_tags (
-            id INTEGER PRIMARY KEY,
-            tag_counts TEXT NOT NULL DEFAULT '{}'
-        );
         CREATE TABLE IF NOT EXISTS bug_feedback (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             bug_type TEXT NOT NULL,
