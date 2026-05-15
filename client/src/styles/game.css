@@ -131,6 +131,27 @@ html, body, #root {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
+.image-hint {
+  height: 200px;
+}
+
+.hint-blur-0 { filter: blur(0); }
+.hint-blur-1 { filter: blur(1px); }
+.hint-blur-2 { filter: blur(2px); }
+.hint-blur-3 { filter: blur(3px); }
+.hint-blur-4 { filter: blur(4px); }
+.hint-blur-5 { filter: blur(5px); }
+.hint-blur-6 { filter: blur(6px); }
+.hint-blur-7 { filter: blur(7px); }
+.hint-blur-8 { filter: blur(8px); }
+.hint-blur-9 { filter: blur(9px); }
+.hint-blur-10 { filter: blur(10px); }
+.hint-blur-11 { filter: blur(11px); }
+.hint-blur-12 { filter: blur(12px); }
+.hint-blur-13 { filter: blur(13px); }
+.hint-blur-14 { filter: blur(14px); }
+.hint-blur-15 { filter: blur(15px); }
+
 .hint-label {
   color: #64748b;
   font-size: 14px;
