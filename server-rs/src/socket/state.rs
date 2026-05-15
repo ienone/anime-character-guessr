@@ -521,8 +521,17 @@ impl ServerState {
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
         let mut snapshots = Vec::with_capacity(actors.len());
+        let mut tasks = tokio::task::JoinSet::new();
+
         for (room_id, actor) in actors {
-            snapshots.push((room_id, actor.snapshot().await));
+            tasks.spawn(async move { (room_id, actor.snapshot().await) });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(error) => tracing::warn!(%error, "room snapshot task failed"),
+            }
         }
         snapshots
     }

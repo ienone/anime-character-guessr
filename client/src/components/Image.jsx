@@ -91,6 +91,7 @@ function Image({
       } catch {
         // If resolve fails (server down), fall back to trying the original src.
         // Normal retry logic will handle errors.
+        if (cancelled || !mountedRef.current) return
         setCurrentSrc(src)
       }
     }
