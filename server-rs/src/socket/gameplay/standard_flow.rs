@@ -218,42 +218,33 @@ pub fn emit_sync_and_nonstop_state(
     }
 }
 
-pub fn apply_setter_observers(room: &mut Room, room_id: &str, setter_id: &str, io: &SocketIo) {
+pub fn setter_teammate_observer_ids(room: &Room, setter_id: &str) -> HashSet<String> {
     let Some(team_id) = room
         .players
         .iter()
         .find(|p| p.id == setter_id)
         .and_then(|p| p.team.clone())
     else {
-        return;
+        return HashSet::new();
     };
 
     if team_id == "0" {
-        return;
+        return HashSet::new();
     }
 
-    for p in &mut room.players {
-        if p.team.as_deref() == Some(team_id.as_str())
-            && p.id != setter_id
-            && !p.is_answer_setter
-            && !p.disconnected
-        {
-            p.temp_observer = true;
-        }
-    }
-
-    emit_to_room(
-        io,
-        room_id.to_string(),
-        "updatePlayers",
-        json!({
-            "players": room.players,
-            "answerSetterId": room.answer_setter_id,
-        }),
-    );
+    room.players
+        .iter()
+        .filter(|p| {
+            p.team.as_deref() == Some(team_id.as_str())
+                && p.id != setter_id
+                && !p.is_answer_setter
+                && !p.disconnected
+        })
+        .map(|p| p.id.clone())
+        .collect()
 }
 
-pub fn revert_setter_observers(room: &mut Room, room_id: &str, io: &SocketIo) {
+pub fn clear_setter_observers(room: &mut Room) -> bool {
     let mut changed = false;
     for p in &mut room.players {
         if p.temp_observer {
@@ -261,8 +252,42 @@ pub fn revert_setter_observers(room: &mut Room, room_id: &str, io: &SocketIo) {
             changed = true;
         }
     }
+    changed
+}
 
-    if changed {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitForAnswerCancel {
+    pub setter_id: Option<String>,
+    pub setter_username: Option<String>,
+    pub cleared_temp_observers: bool,
+}
+
+pub fn cancel_waiting_for_answer(room: &mut Room) -> Option<WaitForAnswerCancel> {
+    let was_waiting = room.waiting_for_answer;
+    let setter_id = room.answer_setter_id.take();
+    let setter_username = setter_id.as_ref().and_then(|id| {
+        room.players
+            .iter()
+            .find(|p| p.id == *id)
+            .map(|p| p.username.clone())
+    });
+
+    room.waiting_for_answer = false;
+    let cleared_temp_observers = clear_setter_observers(room);
+
+    if was_waiting || setter_id.is_some() || cleared_temp_observers {
+        Some(WaitForAnswerCancel {
+            setter_id,
+            setter_username,
+            cleared_temp_observers,
+        })
+    } else {
+        None
+    }
+}
+
+pub fn revert_setter_observers(room: &mut Room, room_id: &str, io: &SocketIo) {
+    if clear_setter_observers(room) {
         emit_to_room(
             io,
             room_id.to_string(),
@@ -346,6 +371,21 @@ pub fn init_game_state(
     hints: Option<Vec<String>>,
     answer_setter_id: Option<&str>,
 ) {
+    init_game_state_with_temp_observers(room, character, settings, hints, answer_setter_id, None);
+}
+
+pub fn init_game_state_with_temp_observers(
+    room: &mut Room,
+    character: CharacterPayload,
+    settings: Option<GameSettings>,
+    hints: Option<Vec<String>>,
+    answer_setter_id: Option<&str>,
+    temp_observer_ids: Option<&HashSet<String>>,
+) {
+    for p in &mut room.players {
+        p.temp_observer = temp_observer_ids.is_some_and(|ids| ids.contains(&p.id));
+    }
+
     let initial_active_players = room
         .players
         .iter()
@@ -393,12 +433,9 @@ pub fn init_game_state(
     for p in &mut room.players {
         p.attempt_marks.clear();
         p.round_result = None;
-        if p.temp_observer {
-            p.temp_observer = false;
-        }
         p.sync_completed_round = None;
         p.is_answer_setter = answer_setter_id == Some(p.id.as_str());
-        if !p.is_answer_setter && p.team.as_deref() != Some("0") {
+        if !p.is_answer_setter && p.team.as_deref() != Some("0") && !p.temp_observer {
             game.guesses.push(PlayerGuessHistory {
                 username: p.username.clone(),
                 guesses: Vec::new(),
@@ -1529,6 +1566,86 @@ mod tests {
             sync_completed_round: None,
             is_answer_setter: false,
         }
+    }
+
+    fn test_room(players: Vec<Player>) -> Room {
+        Room {
+            host: players.first().map(|p| p.id.clone()).unwrap_or_default(),
+            is_public: true,
+            room_name: String::new(),
+            players,
+            last_active: 0,
+            current_game: None,
+            answer_setter_id: None,
+            waiting_for_answer: false,
+            settings: Some(GameSettings::default()),
+            _last_players_broadcast_at: None,
+            _pending_player_broadcast_extra: None,
+            _player_broadcast_due_at: None,
+            _player_broadcast_flush_scheduled: false,
+        }
+    }
+
+    #[test]
+    fn init_game_state_preserves_explicit_setter_teammate_observers() {
+        let mut setter = test_player("setter", "setter", None);
+        setter.team = Some("1".to_string());
+        let mut teammate = test_player("mate", "mate", None);
+        teammate.team = Some("1".to_string());
+        let mut opponent = test_player("op", "op", None);
+        opponent.team = Some("2".to_string());
+        let mut room = test_room(vec![setter, teammate, opponent]);
+        let observer_ids = setter_teammate_observer_ids(&room, "setter");
+
+        init_game_state_with_temp_observers(
+            &mut room,
+            CharacterPayload::from_value(json!({ "id": 1, "name": "answer" })).unwrap(),
+            Some(GameSettings::default()),
+            None,
+            Some("setter"),
+            Some(&observer_ids),
+        );
+
+        assert!(
+            room.players
+                .iter()
+                .find(|p| p.id == "mate")
+                .unwrap()
+                .temp_observer
+        );
+        assert!(
+            !room
+                .players
+                .iter()
+                .find(|p| p.id == "op")
+                .unwrap()
+                .temp_observer
+        );
+        let game = room.current_game.as_ref().unwrap();
+        assert_eq!(game.nonstop_total_players, 1);
+        assert_eq!(game.guesses.len(), 1);
+        assert_eq!(game.guesses[0].username, "op");
+    }
+
+    #[test]
+    fn cancel_waiting_for_answer_clears_pending_setter_and_temp_observers() {
+        let mut setter = test_player("setter", "setter", None);
+        setter.team = Some("1".to_string());
+        let mut teammate = test_player("mate", "mate", None);
+        teammate.team = Some("1".to_string());
+        teammate.temp_observer = true;
+        let mut room = test_room(vec![setter, teammate]);
+        room.answer_setter_id = Some("setter".to_string());
+        room.waiting_for_answer = true;
+
+        let canceled = cancel_waiting_for_answer(&mut room).unwrap();
+
+        assert_eq!(canceled.setter_id.as_deref(), Some("setter"));
+        assert_eq!(canceled.setter_username.as_deref(), Some("setter"));
+        assert!(canceled.cleared_temp_observers);
+        assert_eq!(room.answer_setter_id, None);
+        assert!(!room.waiting_for_answer);
+        assert!(room.players.iter().all(|p| !p.temp_observer));
     }
 
     #[test]

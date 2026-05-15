@@ -24,6 +24,8 @@ use tracing::{info, warn};
 const OUTBOX_CAPACITY: usize = 256;
 const HIGH_OUTBOX_OVERFLOW_CAPACITY: usize = 256;
 const LOBBY_OUTBOX_CAPACITY: usize = 64;
+pub const MAX_ROOM_PLAYERS: usize = 8;
+const ANSWER_SETTER_TIMEOUT_SECS: u64 = 120;
 
 static TARGET_OUTBOXES: LazyLock<dashmap::DashMap<String, TargetOutbox>> =
     LazyLock::new(dashmap::DashMap::new);
@@ -64,6 +66,124 @@ fn emit_error(socket: &SocketRef, event: &str, message: &str) {
             "message": format!("{}: {}", event, message),
         }),
     );
+}
+
+fn active_room_player_count(room: &Room) -> usize {
+    room.players.iter().filter(|p| !p.disconnected).count()
+}
+
+fn can_player_change_team(room: &Room, player: &Player) -> Result<(), &'static str> {
+    if room.current_game.is_some() {
+        return Err("游戏进行中不能切换队伍或旁观状态");
+    }
+    if room.waiting_for_answer {
+        return Err("等待出题时不能切换队伍或旁观状态");
+    }
+    if player.ready {
+        return Err("已准备后不能切换队伍或旁观状态，请先取消准备");
+    }
+    if player.disconnected {
+        return Err("断线玩家不能切换队伍或旁观状态");
+    }
+    Ok(())
+}
+
+fn validate_answer_setter(
+    room: &Room,
+    actor_id: &str,
+    setter_id: &str,
+) -> Result<String, &'static str> {
+    if !room
+        .players
+        .iter()
+        .any(|p| p.id == actor_id && p.is_host && !p.disconnected)
+    {
+        return Err("只有房主可以选择出题人");
+    }
+    if room.current_game.is_some() {
+        return Err("游戏进行中不能更换出题人");
+    }
+    if room.waiting_for_answer {
+        return Err("正在等待出题，不能重复指定出题人");
+    }
+
+    let Some(setter) = room.players.iter().find(|p| p.id == setter_id) else {
+        return Err("找不到选中的玩家");
+    };
+    if setter.disconnected {
+        return Err("不能选择断线玩家出题");
+    }
+    if setter.team.as_deref() == Some("0") || setter.temp_observer {
+        return Err("旁观者不能作为出题人");
+    }
+    if !setter.is_host && !setter.ready {
+        return Err("只能选择已准备玩家出题");
+    }
+    Ok(setter.username.clone())
+}
+
+fn build_wait_for_answer_canceled_payload(message: impl Into<String>) -> Value {
+    json!({
+        "message": message.into(),
+    })
+}
+
+fn cancel_waiting_for_answer_with_message(
+    room: &mut Room,
+    message: impl Into<String>,
+) -> Option<(Value, Value)> {
+    gameplay::cancel_waiting_for_answer(room).map(|_| {
+        let players_payload = prepare_players_broadcast(
+            room,
+            Some(json!({
+                "answerSetterId": Value::Null,
+                "forceImmediate": true,
+            })),
+        );
+        (build_wait_for_answer_canceled_payload(message), players_payload)
+    })
+}
+
+fn schedule_answer_setter_timeout(
+    state: Arc<ServerState>,
+    io: SocketIo,
+    room_id: String,
+    setter_id: String,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(ANSWER_SETTER_TIMEOUT_SECS)).await;
+
+        let result = state
+            .run_room_command(
+                &room_id,
+                RoomCommand::SocketEvent("answerSetterTimeout"),
+                |room| {
+                    if !room.waiting_for_answer
+                        || room.answer_setter_id.as_deref() != Some(setter_id.as_str())
+                    {
+                        return None;
+                    }
+
+                    let setter_username = room
+                        .players
+                        .iter()
+                        .find(|p| p.id == setter_id)
+                        .map(|p| p.username.clone())
+                        .unwrap_or_else(|| "出题人".to_string());
+                    cancel_waiting_for_answer_with_message(
+                        room,
+                        format!("指定的出题人 {} 超时未提交，等待已取消", setter_username),
+                    )
+                },
+            )
+            .await;
+
+        if let Some(Some((cancel_payload, players_payload))) = result {
+            emit_to_room(&io, room_id.clone(), "updatePlayers", players_payload);
+            emit_to_room(&io, room_id.clone(), "waitForAnswerCanceled", cancel_payload);
+            broadcast_lobby_rooms_updated(&io);
+        }
+    });
 }
 
 fn merge_extra(a: Option<Value>, b: Option<Value>) -> Option<Value> {
@@ -1128,6 +1248,13 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                             };
                         }
 
+                        if active_room_player_count(room) >= MAX_ROOM_PLAYERS {
+                            return JoinRoomCommandResult::Error {
+                                message: "房间人数已满，请加入其他房间",
+                                pre_flush,
+                            };
+                        }
+
                         if let Some(ref inc_id) = incoming_avatar_id {
                             let inc_str = inc_id.as_key_string();
                             let is_taken = room.players.iter().any(|p| {
@@ -1236,8 +1363,10 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
 
                     let mut host_transferred = None;
                     let mut wait_for_answer_canceled = None;
+                    let disconnected_username = room.players[idx].username.clone();
+                    let disconnected_was_host = room.host == socket_id;
 
-                    if room.host == socket_id {
+                    if disconnected_was_host {
                         if let Some((new_host_id, new_host_name)) = room
                             .players
                             .iter()
@@ -1267,15 +1396,24 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                         }
                     } else {
                         room.players[idx].disconnected = true;
-                        if room.answer_setter_id.as_deref() == Some(socket_id.as_str()) {
-                            room.answer_setter_id = None;
-                            room.waiting_for_answer = false;
-                            wait_for_answer_canceled = Some(json!({
-                                    "message": format!(
-                                        "指定的出题人 {} 已离开，等待被取消",
-                                        room.players[idx].username
-                                    )
-                            }));
+                    }
+
+                    let cancel_message = if room.answer_setter_id.as_deref()
+                        == Some(socket_id.as_str())
+                    {
+                        Some(format!(
+                            "指定的出题人 {} 已离开，等待被取消",
+                            disconnected_username
+                        ))
+                    } else if disconnected_was_host && room.waiting_for_answer {
+                        Some(format!("房主 {} 已离开，等待出题已取消", disconnected_username))
+                    } else {
+                        None
+                    };
+                    if let Some(message) = cancel_message {
+                        if gameplay::cancel_waiting_for_answer(room).is_some() {
+                            wait_for_answer_canceled =
+                                Some(build_wait_for_answer_canceled_payload(message));
                         }
                     }
 
@@ -1343,6 +1481,9 @@ fn register_room_handlers(
                         }
                         if room.current_game.is_some() {
                             return Err("游戏进行中不能更改准备状态");
+                        }
+                        if room.waiting_for_answer {
+                            return Err("等待出题时不能更改准备状态");
                         }
                         room.players[player_idx].ready = !room.players[player_idx].ready;
                         Ok(PlayerBroadcastCommandResult {
@@ -1576,6 +1717,12 @@ fn register_room_handlers(
                             if !room.players.iter().any(|p| p.id == actor_id && p.is_host) {
                                 return Err("只有房主可以进入出题模式");
                             }
+                            if room.current_game.is_some() {
+                                return Err("游戏进行中不能进入出题模式");
+                            }
+                            if room.waiting_for_answer {
+                                return Err("正在等待出题，不能重复进入出题模式");
+                            }
                             for p in &mut room.players {
                                 if !p.is_host {
                                     p.ready = true;
@@ -1691,22 +1838,36 @@ fn register_room_handlers(
                         |room| {
                             let pre_flush = prepare_players_flush_if_due(room);
                             let mut players_update = None;
-                            if let Some(p) = room.players.iter_mut().find(|p| p.id == actor_id) {
-                                p.team = team_parsed;
+                            if let Some(player_idx) =
+                                room.players.iter().position(|p| p.id == actor_id)
+                            {
+                                if let Err(message) =
+                                    can_player_change_team(room, &room.players[player_idx])
+                                {
+                                    return Err((message, pre_flush));
+                                }
+                                room.players[player_idx].team = team_parsed;
                                 players_update = Some(prepare_players_broadcast(
                                     room,
                                     Some(json!({ "forceImmediate": true })),
                                 ));
                             }
-                            PlayerBroadcastCommandResult {
+                            Ok(PlayerBroadcastCommandResult {
                                 pre_flush,
                                 players_update,
-                            }
+                            })
                         },
                     )
                     .await;
-                if let Some(result) = result {
-                    emit_player_broadcast_result(&io_clone, &room_id, result);
+                match result {
+                    Some(Ok(result)) => emit_player_broadcast_result(&io_clone, &room_id, result),
+                    Some(Err((message, pre_flush))) => {
+                        if let Some(payload) = pre_flush {
+                            emit_to_room(&io_clone, room_id.clone(), "updatePlayers", payload);
+                        }
+                        emit_error(&socket, "updatePlayerTeam", message);
+                    }
+                    None => {}
                 }
             }
         },
@@ -1748,12 +1909,11 @@ fn register_room_handlers(
                         let cancel_message = if room.answer_setter_id.as_deref()
                             == Some(player_to_kick.id.as_str())
                         {
-                            room.answer_setter_id = None;
-                            room.waiting_for_answer = false;
-                            Some(format!(
+                            let message = format!(
                                 "指定的出题人 {} 已被踢出，等待已取消",
                                 player_to_kick.username
-                            ))
+                            );
+                            gameplay::cancel_waiting_for_answer(room).map(|_| message)
                         } else {
                             None
                         };
@@ -1865,20 +2025,39 @@ fn register_room_handlers(
                             }
                         }
 
+                        let wait_for_answer_canceled = if room.waiting_for_answer {
+                            let message =
+                                format!("房主权限已转移给 {}，等待出题已取消", new_host_name);
+                            gameplay::cancel_waiting_for_answer(room)
+                                .map(|_| build_wait_for_answer_canceled_payload(message))
+                        } else {
+                            None
+                        };
+
                         let players_payload = prepare_players_broadcast(
                             room,
-                            Some(json!({ "forceImmediate": true })),
+                            Some(json!({
+                                "answerSetterId": Value::Null,
+                                "forceImmediate": true,
+                            })),
                         );
                         Ok((
                             current_host_name,
                             new_host_id.clone(),
                             new_host_name,
+                            wait_for_answer_canceled,
                             players_payload,
                         ))
                     })
                     .await;
 
-                let (current_host_name, new_host_id, new_host_name, players_payload) =
+                let (
+                    current_host_name,
+                    new_host_id,
+                    new_host_name,
+                    wait_for_answer_canceled,
+                    players_payload,
+                ) =
                     match transfer {
                         Some(Ok(transfer)) => transfer,
                         Some(Err(message)) => {
@@ -1899,6 +2078,14 @@ fn register_room_handlers(
                             "newHostName": new_host_name
                     }),
                 );
+                if let Some(payload) = wait_for_answer_canceled {
+                    emit_to_room(
+                        &io_clone,
+                        room_id.clone(),
+                        "waitForAnswerCanceled",
+                        payload,
+                    );
+                }
             }
         },
     );
@@ -1927,17 +2114,7 @@ fn register_room_handlers(
                         &room_id,
                         RoomCommand::SocketEvent("setAnswerSetter"),
                         |room| {
-                            if !room.players.iter().any(|p| p.id == actor_id && p.is_host) {
-                                return Err("只有房主可以选择出题人");
-                            }
-
-                            let setter_name = match room.players.iter().find(|p| p.id == setter_id)
-                            {
-                                Some(p) => p.username.clone(),
-                                None => {
-                                    return Err("找不到选中的玩家");
-                                }
-                            };
+                            let setter_name = validate_answer_setter(room, &actor_id, &setter_id)?;
 
                             for p in &mut room.players {
                                 if p.temp_observer {
@@ -1993,9 +2170,15 @@ fn register_room_handlers(
                     room_id.clone(),
                     "waitForAnswer",
                     json!({
-                            "answerSetterId": setter_id,
+                            "answerSetterId": setter_id.clone(),
                             "setterUsername": setter_name
                     }),
+                );
+                schedule_answer_setter_timeout(
+                    Arc::clone(&state),
+                    io_clone.clone(),
+                    room_id,
+                    setter_id,
                 );
             }
         },
@@ -2081,9 +2264,7 @@ fn register_room_handlers(
                         room.players.retain(|p| !p.disconnected || p.score > 0);
 
                         // gameStart is the non-manual start path: clear any pending setter state
-                        gameplay::revert_setter_observers(room, &room_id, &io_clone);
-                        room.answer_setter_id = None;
-                        room.waiting_for_answer = false;
+                        let _ = gameplay::cancel_waiting_for_answer(room);
 
                         gameplay::init_game_state(room, character, Some(game_settings), None, None);
 
@@ -2122,6 +2303,71 @@ fn register_room_handlers(
         },
     );
 
+    let state_cancel_wait = Arc::clone(&state);
+    let io_cancel_wait = io.clone();
+    socket.on(
+        "cancelWaitForAnswer",
+        move |socket: SocketRef, Data::<Value>(data)| {
+            let state = Arc::clone(&state_cancel_wait);
+            let io_clone = io_cancel_wait.clone();
+            async move {
+                let room_id = data
+                    .get("roomId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let actor_id = socket.id.to_string();
+                let result = state
+                    .run_room_command(
+                        &room_id,
+                        RoomCommand::SocketEvent("cancelWaitForAnswer"),
+                        |room| {
+                            let can_cancel = room
+                                .players
+                                .iter()
+                                .any(|p| p.id == actor_id && p.is_host && !p.disconnected)
+                                || room.answer_setter_id.as_deref() == Some(actor_id.as_str());
+                            if !can_cancel {
+                                return Err("只有房主或出题人可以取消等待出题");
+                            }
+                            if !room.waiting_for_answer && room.answer_setter_id.is_none() {
+                                return Err("当前没有等待中的出题请求");
+                            }
+
+                            let message = if room.answer_setter_id.as_deref()
+                                == Some(actor_id.as_str())
+                            {
+                                "出题人已取消出题，等待已取消"
+                            } else {
+                                "房主已取消等待出题"
+                            };
+                            cancel_waiting_for_answer_with_message(room, message)
+                                .ok_or("当前没有等待中的出题请求")
+                        },
+                    )
+                    .await;
+
+                let (cancel_payload, players_payload) = match result {
+                    Some(Ok(result)) => result,
+                    Some(Err(message)) => {
+                        emit_error(&socket, "cancelWaitForAnswer", message);
+                        return;
+                    }
+                    None => return,
+                };
+
+                emit_to_room(&io_clone, room_id.clone(), "updatePlayers", players_payload);
+                emit_to_room(
+                    &io_clone,
+                    room_id.clone(),
+                    "waitForAnswerCanceled",
+                    cancel_payload,
+                );
+                broadcast_lobby_rooms_updated(&io_clone);
+            }
+        },
+    );
+
     let state_set_ans = Arc::clone(&state);
     let io_set_ans = io.clone();
     socket.on(
@@ -2155,6 +2401,9 @@ fn register_room_handlers(
                         if !is_setter {
                             return Err("只有被指定的出题人可以出题");
                         }
+                        if !room.waiting_for_answer {
+                            return Err("当前没有等待中的出题请求");
+                        }
                         if room.current_game.is_some() {
                             return Err("游戏已经在进行中");
                         }
@@ -2170,13 +2419,15 @@ fn register_room_handlers(
                         room.players.retain(|p| !p.disconnected || p.score > 0);
                         let settings = room.settings.clone();
 
-                        gameplay::apply_setter_observers(room, &room_id, &actor_id, &io_clone);
-                        gameplay::init_game_state(
+                        let setter_observer_ids =
+                            gameplay::setter_teammate_observer_ids(room, &actor_id);
+                        gameplay::init_game_state_with_temp_observers(
                             room,
                             character,
                             settings,
                             hints,
                             Some(actor_id.as_str()),
+                            Some(&setter_observer_ids),
                         );
 
                         room.waiting_for_answer = false;
@@ -2609,6 +2860,9 @@ fn register_room_handlers(
                         };
                         if room.players[player_idx].temp_observer {
                             return Err("旁观者无法猜测");
+                        }
+                        if !gameplay::latest_guess_matches_answer(room, &actor_id) {
+                            return Err("血战结算必须由服务端确认的正确猜测触发");
                         }
 
                         let team = room.players[player_idx].team.clone();

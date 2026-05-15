@@ -192,6 +192,19 @@ pub fn apply_guess(room: &mut Room, command: GuessCommand) -> Result<GuessOutcom
     })
 }
 
+pub fn latest_guess_matches_answer(room: &Room, player_id: &str) -> bool {
+    let Some(game) = room.current_game.as_ref() else {
+        return false;
+    };
+
+    game.guesses
+        .iter()
+        .flat_map(|history| history.guesses.iter())
+        .rev()
+        .find(|guess| guess.player_id == player_id)
+        .is_some_and(|guess| guess.is_correct && guess.guess_data.id == game.character.id)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -260,6 +273,36 @@ mod tests {
             _player_broadcast_due_at: None,
             _player_broadcast_flush_scheduled: false,
         }
+    }
+
+    #[test]
+    fn latest_guess_must_be_correct_answer_for_nonstop_settlement() {
+        let mut room = test_room();
+        assert!(!latest_guess_matches_answer(&room, "socket-1"));
+
+        apply_guess(
+            &mut room,
+            GuessCommand {
+                actor_id: "socket-1".to_string(),
+                character: CharacterPayload::from_value(json!({ "id": 2, "name": "wrong" }))
+                    .unwrap(),
+                feedback: json!({ "isCorrect": false, "isPartialCorrect": false }),
+            },
+        )
+        .unwrap();
+        assert!(!latest_guess_matches_answer(&room, "socket-1"));
+
+        apply_guess(
+            &mut room,
+            GuessCommand {
+                actor_id: "socket-1".to_string(),
+                character: CharacterPayload::from_value(json!({ "id": 1, "name": "answer" }))
+                    .unwrap(),
+                feedback: json!({ "isCorrect": true, "isPartialCorrect": false }),
+            },
+        )
+        .unwrap();
+        assert!(latest_guess_matches_answer(&room, "socket-1"));
     }
 
     #[test]

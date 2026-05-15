@@ -12,12 +12,16 @@ use socketioxide::SocketIo;
 use std::sync::Arc;
 
 use crate::socket::state::ServerState;
-use crate::socket::{broadcast_lobby_rooms_updated, emit_to_room};
+use crate::socket::{MAX_ROOM_PLAYERS, broadcast_lobby_rooms_updated, emit_to_room};
 
 #[derive(Clone)]
 pub struct RoomState {
     pub state: Arc<ServerState>,
     pub io: SocketIo,
+}
+
+fn active_player_count(players: &[crate::socket::state::Player]) -> usize {
+    players.iter().filter(|p| !p.disconnected).count()
 }
 
 pub fn room_routes(state: Arc<ServerState>, io: SocketIo) -> Router {
@@ -45,7 +49,7 @@ async fn quick_join(State(rs): State<RoomState>, Query(q): Query<LangQuery>) -> 
         .room_snapshots()
         .await
         .into_iter()
-        .filter(|(_, room)| room.is_public)
+        .filter(|(_, room)| room.is_public && active_player_count(&room.players) < MAX_ROOM_PLAYERS)
         .map(|(id, _)| id)
         .collect();
 
@@ -120,8 +124,9 @@ async fn list_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
             json!({
                 "id": id,
                 "isPublic": room.is_public,
-                "playerCount": room.players.len(),
-                "players": room.players.iter().map(|p| p.username.clone()).collect::<Vec<_>>(),
+                "playerCount": active_player_count(&room.players),
+                "maxPlayers": MAX_ROOM_PLAYERS,
+                "players": room.players.iter().filter(|p| !p.disconnected).map(|p| p.username.clone()).collect::<Vec<_>>(),
                 "isGameStarted": room.current_game.is_some(),
                 "roomName": room.room_name,
                 "displayRoomName": display_room_name,
@@ -185,7 +190,7 @@ async fn close_room_get(
     Path(room_id): Path<String>,
 ) -> impl IntoResponse {
     let player_count = match rs.state.room_snapshot(&room_id).await {
-        Some(r) => r.players.len(),
+        Some(r) => active_player_count(&r.players),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -219,7 +224,7 @@ async fn close_room_post(
     Json(body): Json<CloseReason>,
 ) -> impl IntoResponse {
     let player_count = match rs.state.room_snapshot(&room_id).await {
-        Some(r) => r.players.len(),
+        Some(r) => active_player_count(&r.players),
         None => {
             return (
                 StatusCode::NOT_FOUND,
