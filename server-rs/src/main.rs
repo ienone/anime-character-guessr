@@ -1,4 +1,4 @@
-use axum::http::{HeaderValue, Method, header};
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::{Router, routing::get};
 use socketioxide::SocketIo;
 use std::net::SocketAddr;
@@ -120,6 +120,7 @@ fn build_cors_layer(client_url: &str) -> CorsLayer {
             header::AUTHORIZATION,
             header::ACCEPT,
             header::ORIGIN,
+            HeaderName::from_static("x-admin-token"),
         ])
         .allow_credentials(true);
 

@@ -25,6 +25,20 @@ const ToggleSwitch = ({ checked, onChange, disabled }) => (
   </div>
 );
 
+const getAddedSubjectId = (subject) => {
+  if (typeof subject === 'number') return subject;
+  if (typeof subject === 'string') return Number(subject);
+  return subject?.id;
+};
+
+const getAddedSubjectTitle = (subject) => {
+  const id = getAddedSubjectId(subject);
+  if (subject && typeof subject === 'object') {
+    return subject.name_cn || subject.nameCn || subject.name || `#${id}`;
+  }
+  return `#${id}`;
+};
+
 const cloneSettings = (settings) => JSON.parse(JSON.stringify(settings || {}));
 
 function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onClose, onRestart, hideRestart = false, isMultiplayer = false }) {
@@ -206,8 +220,9 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
   }, [searchQuery, handleSearch]);
 
   const handleAddSubject = (subject) => {
+    const subjectId = getAddedSubjectId(subject);
     const newAddedSubjects = [
-      ...(gameSettings.addedSubjects || []),
+      ...(gameSettings.addedSubjects || []).filter(item => getAddedSubjectId(item) !== subjectId),
       {
         id: subject.id,
         name: subject.name,
@@ -224,7 +239,7 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
 
   const handleRemoveSubject = (id) => {
     // Remove the subject from gameSettings
-    const newAddedSubjects = (gameSettings.addedSubjects || []).filter(subject => subject.id !== id);
+    const newAddedSubjects = (gameSettings.addedSubjects || []).filter(subject => getAddedSubjectId(subject) !== id);
     updateLocalSetting('addedSubjects', newAddedSubjects);
   };
 
@@ -904,11 +919,11 @@ function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onCl
                       {gameSettings.addedSubjects.length > 0 && (
                           <div className="extra-subjects-list">
                               {gameSettings.addedSubjects.map((subject) => (
-                                  <div key={subject.id} className="subject-tag-large">
-                                      <a href={`https://bangumi.tv/subject/${subject.id}`} target="_blank" rel="noopener noreferrer">{subject.name}</a>
+                                  <div key={getAddedSubjectId(subject)} className="subject-tag-large">
+                                      <a href={`https://bangumi.tv/subject/${getAddedSubjectId(subject)}`} target="_blank" rel="noopener noreferrer">{getAddedSubjectTitle(subject)}</a>
                                       <button 
                                           className="tag-remove-btn"
-                                          onClick={() => handleRemoveSubject(subject.id)}
+                                          onClick={() => handleRemoveSubject(getAddedSubjectId(subject))}
                                       >
                                           ×
                                       </button>

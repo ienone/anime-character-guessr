@@ -16,6 +16,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const [hasMore, setHasMore] = useState(true);
   const [searchMode, setSearchMode] = useState('character'); // 'character' or 'subject'
   const [selectedSubject, setSelectedSubject] = useState(null);
+  const [subjectCharacters, setSubjectCharacters] = useState([]);
   const [selectedItemIndex, setSelectedItemIndex] = useState(-1); // 当前键盘选中的项目索引
   const [isLoadingNewResults, setIsLoadingNewResults] = useState(false); // 标记是否正在加载更多结果
   const [failedImages, setFailedImages] = useState(() => new Set());
@@ -32,6 +33,31 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const INITIAL_LIMIT = 10;
   const MORE_LIMIT = 5;
   const SUBJECT_CHARACTER_LIMIT = 40;
+
+  const formatSubjectCharacters = useCallback(async (subject, characters) => {
+    const detailResults = await Promise.allSettled(characters.map(character =>
+      getCharacterDetails(character.id)
+    ));
+    return characters.map((character, index) => {
+      const detailResult = detailResults[index];
+      const details = detailResult.status === 'fulfilled' ? detailResult.value : {};
+      return {
+        id: character.id,
+        image: character.images?.grid || details.imageGrid || details.image || null,
+        name: character.name,
+        nameCn: details.nameCn || null,
+        gender: details.gender || '?',
+        popularity: details.popularity ?? 0,
+        defaultSubject: subject
+          ? {
+            id: subject.id,
+            name: subject.name,
+            nameCn: subject.name_cn || subject.nameCn || ''
+          }
+          : null
+      };
+    });
+  }, []);
 
   const performCharacterSearch = useCallback(async (query, reset = false, requestedOffset = 0) => {
     if (!query || !finishInit) return;
@@ -135,44 +161,49 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     try {
       const characters = await getCharactersBySubjectId(subject.id);
       const visibleCharacters = characters.slice(0, SUBJECT_CHARACTER_LIMIT);
-      const detailResults = await Promise.allSettled(visibleCharacters.map(character =>
-        getCharacterDetails(character.id)
-      ));
-      const formattedCharacters = visibleCharacters.map((character, index) => {
-        const detailResult = detailResults[index];
-        const details = detailResult.status === 'fulfilled' ? detailResult.value : {};
-        return {
-          id: character.id,
-          image: character.images?.grid || details.imageGrid || details.image || null,
-          name: character.name,
-          nameCn: details.nameCn || null,
-          gender: details.gender || '?',
-          popularity: details.popularity ?? 0,
-          defaultSubject: subject
-            ? {
-              id: subject.id,
-              name: subject.name,
-              nameCn: subject.name_cn || subject.nameCn || ''
-            }
-            : null
-        };
-      });
+      const formattedCharacters = await formatSubjectCharacters(subject, visibleCharacters);
+      setSubjectCharacters(characters);
       setSearchResults(formattedCharacters);
       setFailedImages(new Set());
-      setHasMore(false);
+      setHasMore(characters.length > visibleCharacters.length);
     } catch (error) {
       console.error('Failed to fetch characters:', error);
       setSearchResults([]);
     } finally {
       setIsSearching(false);
     }
-  }, []);
+  }, [formatSubjectCharacters]);
+
+  const handleLoadMoreSubjectCharacters = useCallback(async () => {
+    if (!selectedSubject || isLoadingMore) return;
+    const nextCharacters = subjectCharacters.slice(
+      searchResults.length,
+      searchResults.length + SUBJECT_CHARACTER_LIMIT
+    );
+    if (nextCharacters.length === 0) {
+      setHasMore(false);
+      return;
+    }
+
+    setIsLoadingMore(true);
+    try {
+      const formattedCharacters = await formatSubjectCharacters(selectedSubject, nextCharacters);
+      setSearchResults(prev => [...prev, ...formattedCharacters]);
+      setHasMore(searchResults.length + nextCharacters.length < subjectCharacters.length);
+    } catch (error) {
+      console.error('Failed to fetch more subject characters:', error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [formatSubjectCharacters, isLoadingMore, searchResults.length, selectedSubject, subjectCharacters]);
 
   const handleLoadMore = useCallback(() => {
-    if (searchMode === 'character') {
+    if (searchMode === 'subject' && selectedSubject) {
+      handleLoadMoreSubjectCharacters();
+    } else if (searchMode === 'character') {
       handleSearch(false);
     }
-  }, [searchMode, handleSearch]);
+  }, [handleLoadMoreSubjectCharacters, searchMode, selectedSubject, handleSearch]);
 
   const handleCharacterSelect = useCallback((character) => {
     if (!finishInit) return;
@@ -184,6 +215,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     setOffset(0);
     setHasMore(true);
     setSelectedSubject(null);
+    setSubjectCharacters([]);
     setSearchMode('character');
   }, [finishInit, onCharacterSelect]);
 
@@ -196,6 +228,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         setOffset(0);
         setHasMore(true);
         setSelectedSubject(null);
+        setSubjectCharacters([]);
       }
     }
 
@@ -244,7 +277,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         case 'ArrowDown':
           e.preventDefault();
           setSelectedItemIndex(prevIndex => {
-            const maxIndex = searchMode === 'character' && hasMore ? 
+            const maxIndex = hasMore && (searchMode === 'character' || selectedSubject) ?
               searchResults.length : searchResults.length - 1;
             // 不再循环到顶部，如果已经到底部就保持在底部
             return prevIndex < maxIndex ? prevIndex + 1 : maxIndex;
@@ -267,7 +300,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
             if (selectedItemIndex < searchResults.length) {
               handleSubjectSelect(searchResults[selectedItemIndex]);
             }
-          } else if (selectedItemIndex === searchResults.length && hasMore && searchMode === 'character') {
+          } else if (selectedItemIndex === searchResults.length && hasMore) {
             // 如果选择的是"加载更多"
             setIsLoadingNewResults(true); // 标记正在加载更多结果
             handleLoadMore();
@@ -312,6 +345,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     setSearchResults([]);
     setFailedImages(new Set());
     setSelectedSubject(null);
+    setSubjectCharacters([]);
   }, [searchQuery]);
 
   // Force character search mode when subjectSearch is false
@@ -323,6 +357,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       setOffset(0);
       setHasMore(true);
       setSelectedSubject(null);
+      setSubjectCharacters([]);
       setIsSearching(false);
       setIsLoadingMore(false);
       searchRequestSeqRef.current++;
@@ -430,6 +465,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
               className="back-to-subjects"
               onClick={() => {
                 setSelectedSubject(null);
+                setSubjectCharacters([]);
                 handleSubjectSearch();
               }}
             >
@@ -460,13 +496,13 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
                 </div>
               </div>
             ))}
-            {hasMore && searchMode === 'character' && (
+            {hasMore && (searchMode === 'character' || selectedSubject) && (
               <div 
                 className={`search-result-item load-more ${selectedItemIndex === searchResults.length ? 'selected' : ''}`}
                 onClick={handleLoadMore}
                 ref={selectedItemIndex === searchResults.length ? selectedItemRef : null}
               >
-                {isLoadingMore ? '加载中...' : '更多'}
+                {isLoadingMore ? '加载中...' : selectedSubject ? '更多角色' : '更多'}
               </div>
             )}
           </>

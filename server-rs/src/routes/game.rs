@@ -479,7 +479,46 @@ where
     Ok(value_as_usize(&value).unwrap_or_else(default_max_attempts))
 }
 
-fn deserialize_added_subject_ids<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddedSubject {
+    pub id: i64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, rename = "name_cn")]
+    pub name_cn: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<Value>,
+}
+
+fn added_subject_from_value(value: &Value) -> Option<AddedSubject> {
+    if let Some(id) = value.as_i64() {
+        return Some(AddedSubject {
+            id,
+            name: String::new(),
+            name_cn: String::new(),
+            r#type: None,
+        });
+    }
+
+    let id = value.get("id").and_then(|id| id.as_i64())?;
+    Some(AddedSubject {
+        id,
+        name: value
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        name_cn: value
+            .get("name_cn")
+            .or_else(|| value.get("nameCn"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        r#type: value.get("type").cloned(),
+    })
+}
+
+fn deserialize_added_subjects<'de, D>(deserializer: D) -> Result<Vec<AddedSubject>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -487,14 +526,7 @@ where
     let Some(values) = value.as_array() else {
         return Ok(Vec::new());
     };
-    Ok(values
-        .iter()
-        .filter_map(|subject| {
-            subject
-                .as_i64()
-                .or_else(|| subject.get("id").and_then(|id| id.as_i64()))
-        })
-        .collect())
+    Ok(values.iter().filter_map(added_subject_from_value).collect())
 }
 
 fn deserialize_use_hints<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
@@ -551,8 +583,10 @@ pub struct GameSettings {
     #[serde(
         default,
         rename = "addedSubjects",
-        deserialize_with = "deserialize_added_subject_ids"
+        deserialize_with = "deserialize_added_subjects"
     )]
+    pub added_subjects: Vec<AddedSubject>,
+    #[serde(default, skip)]
     pub added_subject_ids: Vec<i64>,
     #[serde(
         default = "default_max_attempts",
@@ -596,6 +630,7 @@ impl Default for GameSettings {
             main_character_only: true,
             character_num: default_character_num(),
             use_subject_per_year: false,
+            added_subjects: Vec::new(),
             added_subject_ids: Vec::new(),
             max_attempts: default_max_attempts(),
             sync_mode: false,
@@ -728,6 +763,11 @@ impl GameSettings {
 
     pub fn from_json(v: &Value) -> Self {
         let mut settings = serde_json::from_value::<Self>(v.clone()).unwrap_or_default();
+        settings.added_subject_ids = settings
+            .added_subjects
+            .iter()
+            .map(|subject| subject.id)
+            .collect();
         if settings.added_subject_ids.is_empty() {
             settings.added_subject_ids = v
                 .get("addedSubjects")

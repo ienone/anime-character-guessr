@@ -183,6 +183,21 @@ async function getCharactersBySubjectId(subjectId) {
   return filteredCharacters;
 }
 
+function normalizeAddedSubjects(addedSubjects) {
+  if (!Array.isArray(addedSubjects)) return []
+  return addedSubjects
+    .map(subject => {
+      if (typeof subject === 'number') return { id: subject }
+      if (typeof subject === 'string' && subject.trim()) {
+        const id = Number(subject)
+        return Number.isFinite(id) ? { id } : null
+      }
+      if (subject && typeof subject === 'object' && subject.id) return subject
+      return null
+    })
+    .filter(Boolean)
+}
+
 async function getRandomCharacter(gameSettings) {
   // No compatibility paths:
   // - Non-index modes: always served by our backend (archive.sqlite)
@@ -197,13 +212,14 @@ async function getRandomCharacter(gameSettings) {
 
   const batchSize = 10
   const indexInfo = await getIndexInfo(gameSettings.indexId)
-  const total = indexInfo.total + gameSettings.addedSubjects.length
+  const addedSubjects = normalizeAddedSubjects(gameSettings.addedSubjects)
+  const total = indexInfo.total + addedSubjects.length
   let randomOffset = Math.floor(Math.random() * total)
   let subject
 
   if (randomOffset >= indexInfo.total) {
     randomOffset = randomOffset - indexInfo.total
-    subject = gameSettings.addedSubjects[randomOffset]
+    subject = addedSubjects[randomOffset]
   } else {
     const batchOffset = Math.floor(randomOffset / batchSize) * batchSize
     const indexInBatch = randomOffset % batchSize

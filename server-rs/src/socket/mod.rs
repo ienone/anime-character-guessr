@@ -2232,25 +2232,41 @@ fn register_room_handlers(
 
                 let settings_value = data.get("settings").cloned().unwrap_or_else(|| json!({}));
                 let game_settings = GameSettings::from_json(&settings_value);
-                let game_settings_for_query = game_settings.clone();
-                let character = match db::with_archive_db_timed(
-                    Arc::clone(&pools),
-                    "socket_game_start_random_character",
-                    Duration::from_secs(2),
-                    move |conn| game::random_character_with_conn(conn, &game_settings_for_query),
-                )
-                .await
-                {
-                    Ok((_, payload)) => match CharacterPayload::from_value(payload) {
+                let character = if let Some(payload) = data.get("character").cloned() {
+                    match CharacterPayload::from_value(payload) {
                         Ok(character) => character,
                         Err(e) => {
-                            emit_error(&socket, "gameStart", &format!("随机角色数据异常: {}", e));
+                            emit_error(&socket, "gameStart", &format!("指定角色数据异常: {}", e));
                             return;
                         }
-                    },
-                    Err(e) => {
-                        emit_error(&socket, "gameStart", &format!("随机角色失败: {}", e));
-                        return;
+                    }
+                } else {
+                    let game_settings_for_query = game_settings.clone();
+                    match db::with_archive_db_timed(
+                        Arc::clone(&pools),
+                        "socket_game_start_random_character",
+                        Duration::from_secs(2),
+                        move |conn| {
+                            game::random_character_with_conn(conn, &game_settings_for_query)
+                        },
+                    )
+                    .await
+                    {
+                        Ok((_, payload)) => match CharacterPayload::from_value(payload) {
+                            Ok(character) => character,
+                            Err(e) => {
+                                emit_error(
+                                    &socket,
+                                    "gameStart",
+                                    &format!("随机角色数据异常: {}", e),
+                                );
+                                return;
+                            }
+                        },
+                        Err(e) => {
+                            emit_error(&socket, "gameStart", &format!("随机角色失败: {}", e));
+                            return;
+                        }
                     }
                 };
 

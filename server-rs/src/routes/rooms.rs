@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use socketioxide::SocketIo;
 use std::sync::Arc;
 
-use crate::socket::state::ServerState;
+use crate::socket::state::{Room, ServerState};
 use crate::socket::{MAX_ROOM_PLAYERS, broadcast_lobby_rooms_updated, emit_to_room};
 
 #[derive(Clone)]
@@ -148,38 +148,41 @@ async fn list_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
         .room_snapshots()
         .await
         .into_iter()
-        .map(|(id, room)| {
-            let host_player = room
-                .players
-                .iter()
-                .find(|p| p.is_host)
-                .or_else(|| room.players.iter().find(|p| p.id == room.host));
-            let host_name = host_player.map(|p| p.username.as_str()).unwrap_or("");
-            let display_room_name = if room.room_name.trim().is_empty() {
-                format!("{}的房间", host_name)
-            } else {
-                room.room_name.clone()
-            };
-            json!({
-                "id": id,
-                "isPublic": room.is_public,
-                "playerCount": active_player_count(&room.players),
-                "maxPlayers": MAX_ROOM_PLAYERS,
-                "players": room.players.iter().filter(|p| !p.disconnected).map(|p| p.username.clone()).collect::<Vec<_>>(),
-                "isGameStarted": room.current_game.is_some(),
-                "roomName": room.room_name,
-                "displayRoomName": display_room_name,
-                "hostName": host_name,
-            })
-        })
+        .map(|(id, room)| public_room_payload(id, &room))
         .collect();
     Json(rooms)
+}
+
+fn public_room_payload(id: String, room: &Room) -> Value {
+    let host_player = room
+        .players
+        .iter()
+        .find(|p| p.is_host)
+        .or_else(|| room.players.iter().find(|p| p.id == room.host));
+    let host_name = host_player.map(|p| p.username.as_str()).unwrap_or("");
+    let display_room_name = if room.room_name.trim().is_empty() {
+        format!("{}的房间", host_name)
+    } else {
+        room.room_name.clone()
+    };
+    json!({
+        "id": id,
+        "isPublic": room.is_public,
+        "playerCount": active_player_count(&room.players),
+        "maxPlayers": MAX_ROOM_PLAYERS,
+        "players": room.players.iter().filter(|p| !p.disconnected).map(|p| p.username.clone()).collect::<Vec<_>>(),
+        "isGameStarted": room.current_game.is_some(),
+        "roomName": room.room_name,
+        "displayRoomName": display_room_name,
+        "hostName": host_name,
+        "waitingForAnswer": room.waiting_for_answer,
+    })
 }
 
 /// GET /room-info/{id}
 async fn room_info(State(rs): State<RoomState>, Path(id): Path<String>) -> impl IntoResponse {
     match rs.state.room_snapshot(&id).await {
-        Some(room) => Json(room).into_response(),
+        Some(room) => Json(public_room_payload(id, &room)).into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "Room not found" })),

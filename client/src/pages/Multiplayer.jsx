@@ -23,6 +23,7 @@ import usePendingGuess from '../hooks/usePendingGuess';
 import useRoomLobby from '../hooks/useRoomLobby';
 import useRoundState from '../hooks/useRoundState';
 import useTimedNotification from '../hooks/useTimedNotification';
+import { getRandomCharacter } from '../utils/bangumi';
 import logCollector from '../utils/logCollector';
 import '../styles/Multiplayer.css';
 import '../styles/game.css';
@@ -124,6 +125,16 @@ function getRoomJoinPayload(roomId, username) {
     username,
     playerSessionId: getPlayerSessionId(),
     ...avatarPayload
+  };
+}
+
+function serializeCharacterForSocket(character) {
+  const rawTags = character.rawTags instanceof Map
+    ? Object.fromEntries(character.rawTags.entries())
+    : character.rawTags || {};
+  return {
+    ...character,
+    rawTags
   };
 }
 
@@ -676,10 +687,15 @@ const Multiplayer = () => {
         } catch (error) {
           console.error('Failed to update subject count:', error);
         }
-        socketRef.current?.emit('gameStart', {
+        const startPayload = {
           roomId,
           settings: gameSettings
-        });
+        };
+        if (gameSettings.useIndex) {
+          const character = await getRandomCharacter(gameSettings);
+          startPayload.character = serializeCharacterForSocket(character);
+        }
+        socketRef.current?.emit('gameStart', startPayload);
       } catch (error) {
         console.error('Failed to start game:', error);
         setIsGameStarting(false);
