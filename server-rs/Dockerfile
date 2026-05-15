@@ -43,8 +43,8 @@ WORKDIR /app
 # Copy the static binary
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/server-rs ./server-rs
 
-# Runtime data directories (SQLite files are mounted via Docker volumes)
-RUN mkdir -p /data/images
+# Runtime data directories (SQLite files and Tantivy index are mounted via Docker volumes)
+RUN mkdir -p /data/images /data/tantivy
 
 # Expose the game server port
 EXPOSE 3001
@@ -53,6 +53,7 @@ EXPOSE 3001
 ENV PORT=3001 \
     ARCHIVE_DB_PATH=/data/archive.sqlite \
     APP_DB_PATH=/data/app.sqlite \
-    IMAGE_CACHE_DIR=/data/images
+    IMAGE_CACHE_DIR=/data/images \
+    TANTIVY_INDEX_DIR=/data/tantivy
 
 ENTRYPOINT ["./server-rs"]

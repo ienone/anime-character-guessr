@@ -45,11 +45,15 @@ services:
       - ARCHIVE_DB_PATH=/data/archive.sqlite
       - APP_DB_PATH=/data/app.sqlite
       - IMAGE_CACHE_DIR=/data/images
+      - TANTIVY_INDEX_DIR=/data/tantivy
+      - ROOM_ADMIN_TOKEN=${ROOM_ADMIN_TOKEN:-}
       # CORS allowed origin (must match the frontend URL)
       - CLIENT_URL=${DOMAIN_NAME:-http://localhost}
     volumes:
       # Mount pre-built archive.sqlite (read-only asset)
       - ./archive.sqlite:/data/archive.sqlite:ro
+      # Mount pre-built Tantivy search index (read-only asset)
+      - ./server-rs/data/tantivy:/data/tantivy:ro
       # Persist app.sqlite (leaderboard, image cache)
       - app_data:/data
     networks:

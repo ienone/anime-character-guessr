@@ -1,8 +1,8 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::Utc;
@@ -40,6 +40,45 @@ pub fn room_routes(state: Arc<ServerState>, io: SocketIo) -> Router {
 #[derive(Deserialize)]
 struct LangQuery {
     lang: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AdminQuery {
+    token: Option<String>,
+}
+
+fn configured_admin_token() -> Option<String> {
+    std::env::var("ROOM_ADMIN_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+fn is_admin_request(headers: &HeaderMap, query_token: Option<&str>) -> bool {
+    let Some(expected) = configured_admin_token() else {
+        return false;
+    };
+
+    let header_token_matches = headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected);
+    let bearer_token_matches = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| value == expected);
+    let query_token_matches = query_token.is_some_and(|value| value == expected);
+
+    header_token_matches || bearer_token_matches || query_token_matches
+}
+
+fn admin_forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "admin token required" })),
+    )
+        .into_response()
 }
 
 /// GET /quick-join?lang=en
@@ -150,7 +189,15 @@ async fn room_info(State(rs): State<RoomState>, Path(id): Path<String>) -> impl 
 }
 
 /// GET /clean-rooms — manual trigger (admin)
-async fn clean_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
+async fn clean_rooms(
+    State(rs): State<RoomState>,
+    Query(q): Query<AdminQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_admin_request(&headers, q.token.as_deref()) {
+        return admin_forbidden();
+    }
+
     let now = Utc::now().timestamp_millis();
     let stale_ms: i64 = 5 * 60 * 1000;
 
@@ -176,7 +223,7 @@ async fn clean_rooms(State(rs): State<RoomState>) -> impl IntoResponse {
     if count > 0 {
         broadcast_lobby_rooms_updated(&rs.io);
     }
-    Json(json!({ "message": format!("已清理{}个房间", count), "cleaned": count }))
+    Json(json!({ "message": format!("已清理{}个房间", count), "cleaned": count })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -188,7 +235,13 @@ struct CloseReason {
 async fn close_room_get(
     State(rs): State<RoomState>,
     Path(room_id): Path<String>,
+    Query(q): Query<AdminQuery>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if !is_admin_request(&headers, q.token.as_deref()) {
+        return admin_forbidden();
+    }
+
     let player_count = match rs.state.room_snapshot(&room_id).await {
         Some(r) => active_player_count(&r.players),
         None => {
@@ -221,8 +274,14 @@ async fn close_room_get(
 async fn close_room_post(
     State(rs): State<RoomState>,
     Path(room_id): Path<String>,
+    Query(q): Query<AdminQuery>,
+    headers: HeaderMap,
     Json(body): Json<CloseReason>,
 ) -> impl IntoResponse {
+    if !is_admin_request(&headers, q.token.as_deref()) {
+        return admin_forbidden();
+    }
+
     let player_count = match rs.state.room_snapshot(&room_id).await {
         Some(r) => active_player_count(&r.players),
         None => {
