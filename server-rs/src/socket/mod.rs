@@ -520,14 +520,13 @@ fn prepare_players_broadcast(room: &mut Room, extra: Option<Value>) -> Value {
         }
     }
 
-    if !force_immediate {
-        if let Some(last) = room._last_players_broadcast_at {
-            if now - last < COOLDOWN_MS {
-                room._pending_player_broadcast_extra =
-                    merge_extra(room._pending_player_broadcast_extra.take(), extra_no_force);
-                extra_no_force = None;
-            }
-        }
+    if !force_immediate
+        && let Some(last) = room._last_players_broadcast_at
+        && now - last < COOLDOWN_MS
+    {
+        room._pending_player_broadcast_extra =
+            merge_extra(room._pending_player_broadcast_extra.take(), extra_no_force);
+        extra_no_force = None;
     }
 
     let merged_extra = merge_extra(room._pending_player_broadcast_extra.take(), extra_no_force);
@@ -560,9 +559,7 @@ fn broadcast_players(io: &SocketIo, room_id: &str, room: &mut Room, extra: Optio
 }
 
 fn prepare_players_flush_if_due(room: &mut Room) -> Option<Value> {
-    let Some(due_at) = room._player_broadcast_due_at else {
-        return None;
-    };
+    let due_at = room._player_broadcast_due_at?;
     let now = Utc::now().timestamp_millis();
     if now < due_at {
         return None;
@@ -702,12 +699,20 @@ fn emit_join_room_success(
     io: &SocketIo,
     state: &ServerState,
     room_id: &str,
-    room: &Room,
-    player_idx: usize,
-    previous_socket_id: Option<String>,
-    notify_lobby: bool,
+    success: JoinRoomSuccess,
 ) {
-    let _ = socket.join(room_id.to_string());
+    let JoinRoomSuccess {
+        room,
+        player_idx,
+        previous_socket_id,
+        notify_lobby,
+        pre_flush,
+    } = success;
+
+    if let Some(payload) = pre_flush {
+        emit_to_room(io, room_id.to_string(), "updatePlayers", payload);
+    }
+    socket.join(room_id.to_string());
     if let Some(previous_socket_id) = previous_socket_id {
         let _ = unbind_socket_from_room(state, &previous_socket_id);
     }
@@ -734,7 +739,7 @@ fn emit_join_room_success(
     }
 
     if let Some(ref game) = room.current_game {
-        emit_game_start_snapshot(socket, room, Some(player_idx));
+        emit_game_start_snapshot(socket, &room, Some(player_idx));
         let _ = socket.emit(
             "guessHistoryUpdate",
             &json!({
@@ -764,12 +769,8 @@ fn emit_player_broadcast_result(
 }
 
 fn answer_reveal_for(room: &Room, player_id: &str) -> Option<CharacterPayload> {
-    let Some(game) = room.current_game.as_ref() else {
-        return None;
-    };
-    let Some(player) = room.players.iter().find(|p| p.id == player_id) else {
-        return None;
-    };
+    let game = room.current_game.as_ref()?;
+    let player = room.players.iter().find(|p| p.id == player_id)?;
     if visible_answer_for(game, Some(player)).is_null() {
         return None;
     }
@@ -812,12 +813,15 @@ impl PublicGuess {
 #[derive(Debug)]
 enum PlayerGuessCommandResult {
     Error(&'static str),
-    Accepted {
-        public_guess: PublicGuess,
-        is_correct: bool,
-        is_partial_correct: bool,
-        answer_reveal: Option<CharacterPayload>,
-    },
+    Accepted(Box<PlayerGuessAccepted>),
+}
+
+#[derive(Debug)]
+struct PlayerGuessAccepted {
+    public_guess: PublicGuess,
+    is_correct: bool,
+    is_partial_correct: bool,
+    answer_reveal: Option<CharacterPayload>,
 }
 
 #[derive(Debug)]
@@ -826,13 +830,16 @@ enum JoinRoomCommandResult {
         message: &'static str,
         pre_flush: Option<Value>,
     },
-    Joined {
-        room: Room,
-        player_idx: usize,
-        previous_socket_id: Option<String>,
-        notify_lobby: bool,
-        pre_flush: Option<Value>,
-    },
+    Joined(Box<JoinRoomSuccess>),
+}
+
+#[derive(Debug)]
+struct JoinRoomSuccess {
+    room: Room,
+    player_idx: usize,
+    previous_socket_id: Option<String>,
+    notify_lobby: bool,
+    pre_flush: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -1000,7 +1007,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                 };
 
                 state.insert_room(room_id.clone(), room.clone());
-                let _ = socket.join(room_id.clone());
+                socket.join(room_id.clone());
                 bind_socket_to_player(&state, &room_id, &room.players[0]);
 
                 // Broadcast
@@ -1083,7 +1090,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                     };
 
                     state.insert_room(room_id.clone(), room.clone());
-                    let _ = socket.join(room_id.clone());
+                    socket.join(room_id.clone());
                     bind_socket_to_player(&state, &room_id, &room.players[0]);
 
                     let payload = json!({
@@ -1135,13 +1142,13 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                         if let Some(idx) = existing_idx {
                             if room.players[idx].id == socket_id {
                                 info!("{} rejoined room {} idempotently", username, room_id);
-                                return JoinRoomCommandResult::Joined {
+                                return JoinRoomCommandResult::Joined(Box::new(JoinRoomSuccess {
                                     room: room.clone(),
                                     player_idx: idx,
                                     previous_socket_id: None,
                                     notify_lobby: false,
                                     pre_flush,
-                                };
+                                }));
                             }
 
                             if room.players[idx].disconnected {
@@ -1196,13 +1203,13 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                                 }
 
                                 info!("{} reconnected to room {}", username, room_id);
-                                return JoinRoomCommandResult::Joined {
+                                return JoinRoomCommandResult::Joined(Box::new(JoinRoomSuccess {
                                     room: room.clone(),
                                     player_idx: idx,
                                     previous_socket_id: Some(previous_socket_id),
                                     notify_lobby: true,
                                     pre_flush,
-                                };
+                                }));
                             }
 
                             let is_stale = !active_socket_ids.contains(&room.players[idx].id);
@@ -1241,13 +1248,13 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                                 }
 
                                 info!("{} rebound to room {} from stale socket", username, room_id);
-                                return JoinRoomCommandResult::Joined {
+                                return JoinRoomCommandResult::Joined(Box::new(JoinRoomSuccess {
                                     room: room.clone(),
                                     player_idx: idx,
                                     previous_socket_id: Some(previous_socket_id),
                                     notify_lobby: true,
                                     pre_flush,
-                                };
+                                }));
                             }
 
                             return JoinRoomCommandResult::Error {
@@ -1307,37 +1314,19 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                         room.players.push(new_player);
                         let new_idx = room.players.len().saturating_sub(1);
                         info!("{} joined room {}", username, room_id);
-                        JoinRoomCommandResult::Joined {
+                        JoinRoomCommandResult::Joined(Box::new(JoinRoomSuccess {
                             room: room.clone(),
                             player_idx: new_idx,
                             previous_socket_id: None,
                             notify_lobby: true,
                             pre_flush,
-                        }
+                        }))
                     })
                     .await;
 
                 match result {
-                    Some(JoinRoomCommandResult::Joined {
-                        room,
-                        player_idx,
-                        previous_socket_id,
-                        notify_lobby,
-                        pre_flush,
-                    }) => {
-                        if let Some(payload) = pre_flush {
-                            emit_to_room(&io_clone, room_id.clone(), "updatePlayers", payload);
-                        }
-                        emit_join_room_success(
-                            &socket,
-                            &io_clone,
-                            &state,
-                            &room_id,
-                            &room,
-                            player_idx,
-                            previous_socket_id,
-                            notify_lobby,
-                        );
+                    Some(JoinRoomCommandResult::Joined(success)) => {
+                        emit_join_room_success(&socket, &io_clone, &state, &room_id, *success);
                     }
                     Some(JoinRoomCommandResult::Error { message, pre_flush }) => {
                         if let Some(payload) = pre_flush {
@@ -1365,9 +1354,7 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
             };
             let result = state
                 .run_room_command(&room_id, RoomCommand::SocketEvent("disconnect"), |room| {
-                    let Some(idx) = room.players.iter().position(|p| p.id == socket_id) else {
-                        return None;
-                    };
+                    let idx = room.players.iter().position(|p| p.id == socket_id)?;
 
                     let mut host_transferred = None;
                     let mut wait_for_answer_canceled = None;
@@ -1418,12 +1405,11 @@ pub fn register_handlers(io: SocketIo, server_state: Arc<ServerState>, _db_pools
                     } else {
                         None
                     };
-                    if let Some(message) = cancel_message {
-                        if gameplay::cancel_waiting_for_answer(room).is_some() {
+                    if let Some(message) = cancel_message
+                        && gameplay::cancel_waiting_for_answer(room).is_some() {
                             wait_for_answer_canceled =
                                 Some(build_wait_for_answer_canceled_payload(message));
                         }
-                    }
 
                     if let Some(ref mut game) = room.current_game {
                         game.sync_players_completed.remove(&socket_id);
@@ -1588,10 +1574,10 @@ fn register_room_handlers(
             let state = Arc::clone(&state_req);
             async move {
                 let room_id = data.get("roomId").and_then(|v| v.as_str()).unwrap_or("");
-                if let Some(room) = state.room_snapshot(room_id).await {
-                    if let Some(ref settings) = room.settings {
-                        let _ = socket.emit("updateGameSettings", &json!({ "settings": settings }));
-                    }
+                if let Some(room) = state.room_snapshot(room_id).await
+                    && let Some(ref settings) = room.settings
+                {
+                    let _ = socket.emit("updateGameSettings", &json!({ "settings": settings }));
                 }
             }
         },
@@ -2131,16 +2117,15 @@ fn register_room_handlers(
                                 .iter()
                                 .find(|p| p.id == setter_id)
                                 .and_then(|p| p.team.clone())
+                                && team_id != "0"
                             {
-                                if team_id != "0" {
-                                    for p in &mut room.players {
-                                        if p.team.as_deref() == Some(team_id.as_str())
-                                            && p.id != setter_id
-                                            && !p.is_answer_setter
-                                            && !p.disconnected
-                                        {
-                                            p.temp_observer = true;
-                                        }
+                                for p in &mut room.players {
+                                    if p.team.as_deref() == Some(team_id.as_str())
+                                        && p.id != setter_id
+                                        && !p.is_answer_setter
+                                        && !p.disconnected
+                                    {
+                                        p.temp_observer = true;
                                     }
                                 }
                             }
@@ -2708,12 +2693,12 @@ fn register_room_handlers(
                             None
                         };
 
-                        PlayerGuessCommandResult::Accepted {
+                        PlayerGuessCommandResult::Accepted(Box::new(PlayerGuessAccepted {
                             public_guess,
                             is_correct: outcome.is_correct,
                             is_partial_correct: outcome.is_partial_correct,
                             answer_reveal,
-                        }
+                        }))
                     })
                     .await
                 else {
@@ -2724,12 +2709,13 @@ fn register_room_handlers(
                     PlayerGuessCommandResult::Error(message) => {
                         emit_error(&socket, "playerGuess", message);
                     }
-                    PlayerGuessCommandResult::Accepted {
-                        public_guess,
-                        is_correct,
-                        is_partial_correct,
-                        answer_reveal,
-                    } => {
+                    PlayerGuessCommandResult::Accepted(accepted) => {
+                        let PlayerGuessAccepted {
+                            public_guess,
+                            is_correct,
+                            is_partial_correct,
+                            answer_reveal,
+                        } = *accepted;
                         let _ = socket.emit(
                             "guessResult",
                             &json!({
@@ -2782,17 +2768,12 @@ fn register_room_handlers(
                         &room_id,
                         RoomCommand::SocketEvent("tagBanSharedMetaTags"),
                         |room| {
-                            let Some(player_id) = room
+                            let player_id = room
                                 .players
                                 .iter()
                                 .find(|p| p.id == actor_id)
-                                .map(|p| p.id.clone())
-                            else {
-                                return None;
-                            };
-                            let Some(ref mut game) = room.current_game else {
-                                return None;
-                            };
+                                .map(|p| p.id.clone())?;
+                            let game = room.current_game.as_mut()?;
                             let tag_ban = game.settings.as_ref().is_some_and(|s| s.tag_ban);
                             if !tag_ban || tags.is_empty() {
                                 return None;
@@ -2824,10 +2805,8 @@ fn register_room_handlers(
                                     changed = true;
                                 }
                                 let i = idx.unwrap();
-                                if target_list[i].revealer.is_empty() {
-                                    target_list[i].revealer.push(player_id.clone());
-                                    changed = true;
-                                } else if sync_mode && !target_list[i].revealer.contains(&player_id)
+                                if target_list[i].revealer.is_empty()
+                                    || (sync_mode && !target_list[i].revealer.contains(&player_id))
                                 {
                                     target_list[i].revealer.push(player_id.clone());
                                     changed = true;
@@ -2891,20 +2870,20 @@ fn register_room_handlers(
                         }
 
                         let team = room.players[player_idx].team.clone();
-                        if let Some(ref t) = team {
-                            if t != "0" {
-                                let teammate_won = room
-                                    .current_game
-                                    .as_ref()
-                                    .map(|g| {
-                                        g.nonstop_winners
-                                            .iter()
-                                            .any(|w| w.team.as_deref() == Some(t.as_str()))
-                                    })
-                                    .unwrap_or(false);
-                                if teammate_won {
-                                    return Err("你的队友已经猜对了，你无法继续猜测");
-                                }
+                        if let Some(ref t) = team
+                            && t != "0"
+                        {
+                            let teammate_won = room
+                                .current_game
+                                .as_ref()
+                                .map(|g| {
+                                    g.nonstop_winners
+                                        .iter()
+                                        .any(|w| w.team.as_deref() == Some(t.as_str()))
+                                })
+                                .unwrap_or(false);
+                            if teammate_won {
+                                return Err("你的队友已经猜对了，你无法继续猜测");
                             }
                         }
 
@@ -3102,18 +3081,17 @@ fn register_room_handlers(
 
                     gameplay::clear_player_result(&mut room.players[player_idx]);
                     let team = room.players[player_idx].team.clone();
-                    if let Some(ref t) = team {
-                        if t != "0" {
-                            if let Some(ref mut game) = room.current_game {
-                                gameplay::clear_team_result(game, t);
-                                for p in &mut room.players {
-                                    if p.team.as_deref() == Some(t.as_str())
-                                        && !p.is_answer_setter
-                                        && !p.disconnected
-                                    {
-                                        p.round_result = None;
-                                    }
-                                }
+                    if let Some(ref t) = team
+                        && t != "0"
+                        && let Some(ref mut game) = room.current_game
+                    {
+                        gameplay::clear_team_result(game, t);
+                        for p in &mut room.players {
+                            if p.team.as_deref() == Some(t.as_str())
+                                && !p.is_answer_setter
+                                && !p.disconnected
+                            {
+                                p.round_result = None;
                             }
                         }
                     }
@@ -3135,23 +3113,18 @@ fn register_room_handlers(
                                 &mut room.players[player_idx],
                                 gameplay::RESULT_SURRENDER,
                             );
-                            if let Some(ref t) = team {
-                                if t != "0" {
-                                    if let Some(ref mut game) = room.current_game {
-                                        gameplay::set_team_result(
-                                            game,
-                                            t,
-                                            gameplay::RESULT_SURRENDER,
-                                        );
-                                        for p in &mut room.players {
-                                            if p.team.as_deref() == Some(t.as_str())
-                                                && !p.is_answer_setter
-                                                && !p.disconnected
-                                            {
-                                                p.round_result =
-                                                    Some(gameplay::RESULT_SURRENDER.to_string());
-                                            }
-                                        }
+                            if let Some(ref t) = team
+                                && t != "0"
+                                && let Some(ref mut game) = room.current_game
+                            {
+                                gameplay::set_team_result(game, t, gameplay::RESULT_SURRENDER);
+                                for p in &mut room.players {
+                                    if p.team.as_deref() == Some(t.as_str())
+                                        && !p.is_answer_setter
+                                        && !p.disconnected
+                                    {
+                                        p.round_result =
+                                            Some(gameplay::RESULT_SURRENDER.to_string());
                                     }
                                 }
                             }
@@ -3162,22 +3135,18 @@ fn register_room_handlers(
                                 gameplay::RESULT_WIN,
                             );
                             let winner_username = room.players[player_idx].username.clone();
-                            if let Some(ref mut game) = room.current_game {
-                                if game.first_winner.is_none() {
-                                    game.first_winner = Some(WinnerMarker {
-                                        id: actor_id.clone(),
-                                        username: winner_username,
-                                        is_big_win: false,
-                                        timestamp: Some(Utc::now().timestamp_millis()),
-                                    });
-                                }
+                            if let Some(ref mut game) = room.current_game
+                                && game.first_winner.is_none()
+                            {
+                                game.first_winner = Some(WinnerMarker {
+                                    id: actor_id.clone(),
+                                    username: winner_username,
+                                    is_big_win: false,
+                                    timestamp: Some(Utc::now().timestamp_millis()),
+                                });
                             }
-                            if !nonstop_mode {
-                                if team.as_deref().is_some_and(|t| t != "0") {
-                                    gameplay::mark_team_victory(
-                                        room, &room_id, &actor_id, &io_clone,
-                                    );
-                                }
+                            if !nonstop_mode && team.as_deref().is_some_and(|t| t != "0") {
+                                gameplay::mark_team_victory(room, &room_id, &actor_id, &io_clone);
                             }
                         }
                         "bigwin" => {
@@ -3201,12 +3170,8 @@ fn register_room_handlers(
                                     });
                                 }
                             }
-                            if !nonstop_mode {
-                                if team.as_deref().is_some_and(|t| t != "0") {
-                                    gameplay::mark_team_victory(
-                                        room, &room_id, &actor_id, &io_clone,
-                                    );
-                                }
+                            if !nonstop_mode && team.as_deref().is_some_and(|t| t != "0") {
+                                gameplay::mark_team_victory(room, &room_id, &actor_id, &io_clone);
                             }
                         }
                         _ => {
@@ -3214,19 +3179,17 @@ fn register_room_handlers(
                                 &mut room.players[player_idx],
                                 gameplay::RESULT_DEAD,
                             );
-                            if let Some(ref t) = team {
-                                if t != "0" {
-                                    if let Some(ref mut game) = room.current_game {
-                                        gameplay::set_team_result(game, t, gameplay::RESULT_DEAD);
-                                        for p in &mut room.players {
-                                            if p.team.as_deref() == Some(t.as_str())
-                                                && !p.is_answer_setter
-                                                && !p.disconnected
-                                            {
-                                                p.round_result =
-                                                    Some(gameplay::RESULT_DEAD.to_string());
-                                            }
-                                        }
+                            if let Some(ref t) = team
+                                && t != "0"
+                                && let Some(ref mut game) = room.current_game
+                            {
+                                gameplay::set_team_result(game, t, gameplay::RESULT_DEAD);
+                                for p in &mut room.players {
+                                    if p.team.as_deref() == Some(t.as_str())
+                                        && !p.is_answer_setter
+                                        && !p.disconnected
+                                    {
+                                        p.round_result = Some(gameplay::RESULT_DEAD.to_string());
                                     }
                                 }
                             }

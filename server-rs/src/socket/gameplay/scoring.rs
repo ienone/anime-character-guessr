@@ -100,12 +100,10 @@ pub fn calculate_nonstop_setter_score(
     }
 
     let win_rate = winners_count as f32 / total_players as f32;
-    let base_score = if win_rate <= 0.25 {
-        1
-    } else if win_rate >= 0.75 {
-        1
-    } else {
+    let base_score = if win_rate > 0.25 && win_rate < 0.75 {
         2
+    } else {
+        1
     };
 
     base_score * player_multiplier

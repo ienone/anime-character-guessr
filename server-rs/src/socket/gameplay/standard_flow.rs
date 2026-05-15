@@ -115,12 +115,12 @@ fn should_skip_sync_waiting(game: &mut CurrentGame, payload: &Value, force: bool
     let last_key = game._last_sync_waiting_key.clone();
     let last_at = game._last_sync_waiting_at;
 
-    if !force {
-        if let Some(k) = last_key {
-            if k == key && now - last_at < SYNC_WAITING_MIN_INTERVAL_MS {
-                return true;
-            }
-        }
+    if !force
+        && let Some(k) = last_key
+        && k == key
+        && now - last_at < SYNC_WAITING_MIN_INTERVAL_MS
+    {
+        return true;
     }
 
     game._last_sync_waiting_key = Some(key);
@@ -348,12 +348,12 @@ pub fn mark_team_victory(room: &mut Room, room_id: &str, winner_id: &str, io: &S
     let nonstop_mode = game.settings.as_ref().is_some_and(|s| s.nonstop_mode);
     let sync_mode = game.settings.as_ref().is_some_and(|s| s.sync_mode);
 
-    if !nonstop_mode && sync_mode {
-        if let Some(winner_mut) = room.players.iter_mut().find(|p| p.id == winner_id) {
-            if winner_mut.team.as_deref() != Some("0") {
-                winner_mut.temp_observer = true;
-            }
-        }
+    if !nonstop_mode
+        && sync_mode
+        && let Some(winner_mut) = room.players.iter_mut().find(|p| p.id == winner_id)
+        && winner_mut.team.as_deref() != Some("0")
+    {
+        winner_mut.temp_observer = true;
     }
 
     emit_to_room(
@@ -444,10 +444,10 @@ pub fn init_game_state_with_temp_observers(
     }
 
     for p in &room.players {
-        if let Some(team) = p.team.as_deref() {
-            if team != "0" {
-                game.team_attempt_marks.entry(team.to_string()).or_default();
-            }
+        if let Some(team) = p.team.as_deref()
+            && team != "0"
+        {
+            game.team_attempt_marks.entry(team.to_string()).or_default();
         }
     }
 
@@ -527,8 +527,8 @@ pub fn update_sync_progress(room: &mut Room, room_id: &str, io: &SocketIo) {
                 let revealer_vec = entry
                     .revealer
                     .iter()
+                    .filter(|&s| uniq.insert(s.clone()))
                     .cloned()
-                    .filter(|s| uniq.insert(s.clone()))
                     .collect::<Vec<_>>();
 
                 pending_new_entries.push(TagBanEntry {
@@ -789,20 +789,11 @@ struct ScoreBreakdown {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 struct ScoreChange {
     score: i32,
     breakdown: ScoreBreakdown,
     result: String,
-}
-
-impl Default for ScoreChange {
-    fn default() -> Self {
-        Self {
-            score: 0,
-            breakdown: ScoreBreakdown::default(),
-            result: String::new(),
-        }
-    }
 }
 
 fn score_change(score: i32, breakdown: ScoreBreakdown, result: impl Into<String>) -> ScoreChange {
@@ -1253,18 +1244,18 @@ pub fn finalize_standard_game(room: &mut Room, room_id: &str, io: &SocketIo, for
                 .cloned()
         };
 
-        if bigwinner.is_none() {
-            if let Some(answer_id) = answer_id {
-                let answer_id_str = answer_id.to_string();
-                if let Some(avatar_big_winner) = active_players.iter().find(|p| {
-                    player_is_winner(p)
-                        && p.avatar_id.as_ref().map(|v| v.as_key_string())
-                            == Some(answer_id_str.clone())
-                }) {
-                    let mut aw = avatar_big_winner.clone();
-                    aw.round_result = Some(RESULT_BIG_WIN.to_string());
-                    bigwinner = Some(aw);
-                }
+        if bigwinner.is_none()
+            && let Some(answer_id) = answer_id
+        {
+            let answer_id_str = answer_id.to_string();
+            if let Some(avatar_big_winner) = active_players.iter().find(|p| {
+                player_is_winner(p)
+                    && p.avatar_id.as_ref().map(|v| v.as_key_string())
+                        == Some(answer_id_str.clone())
+            }) {
+                let mut aw = avatar_big_winner.clone();
+                aw.round_result = Some(RESULT_BIG_WIN.to_string());
+                bigwinner = Some(aw);
             }
         }
 
