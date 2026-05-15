@@ -65,8 +65,19 @@ function SinglePlayer() {
 
     const initializeGame = async () => {
       setInitFailed(false);
+      setGuesses([]);
+      setGuessesLeft(gameSettings.maxAttempts || 10);
+      setIsGuessing(false);
+      setGameEnd(false);
+      setGameEndPopup(null);
+      setAnswerCharacter(null);
+      setShouldResetTimer(true);
+      setFinishInit(false);
+      setHints([]);
+      setImgHint(null);
+      setUseImageHint(0);
       try {
-        if (gameSettings.addedSubjects.length > 0) {
+        if (Array.isArray(gameSettings.addedSubjects) && gameSettings.addedSubjects.length > 0) {
           await axios.post(import.meta.env.VITE_SERVER_URL + '/api/subject-added', {
             addedSubjects: gameSettings.addedSubjects
           });
@@ -79,7 +90,7 @@ function SinglePlayer() {
         setCurrentGameSettings({ ...gameSettings });
         if (isMounted) {
           setAnswerCharacter(character);
-          setGuessesLeft(gameSettings.maxAttempts);
+          setGuessesLeft(gameSettings.maxAttempts || 10);
           // Prepare hints based on settings
           let hintTexts = [];
           if (Array.isArray(gameSettings.useHints) && gameSettings.useHints.length > 0 && character.summary) {
@@ -106,6 +117,7 @@ function SinglePlayer() {
           const message = error?.response?.data?.message || error?.message || '游戏初始化失败，请刷新页面重试，或在设置里清理缓存';
           notify(message, 'error');
           setInitFailed(true);
+          setFinishInit(false);
         }
       }
     };
@@ -245,6 +257,14 @@ function SinglePlayer() {
   };
 
   const handleSettingsChange = (setting, value) => {
+    if (typeof setting === 'object' && setting !== null) {
+      setGameSettings(prev => ({
+        ...prev,
+        ...setting
+      }));
+      return;
+    }
+
     setGameSettings(prev => ({
       ...prev,
       [setting]: value
@@ -269,9 +289,11 @@ function SinglePlayer() {
       setFinishInit(false);
       setInitFailed(false);
       setHints([]);
+      setImgHint(null);
+      setUseImageHint(0);
 
       try {
-        if (gameSettings.addedSubjects.length > 0) {
+        if (Array.isArray(gameSettings.addedSubjects) && gameSettings.addedSubjects.length > 0) {
           await axios.post(import.meta.env.VITE_SERVER_URL + '/api/subject-added', {
             addedSubjects: gameSettings.addedSubjects
           });
@@ -427,7 +449,6 @@ function SinglePlayer() {
             gameSettings={gameSettings}
             onSettingsChange={handleSettingsChange}
             onClose={() => setSettingsPopup(false)}
-            onRestart={handleRestartWithSettings}
           />
         )}
 

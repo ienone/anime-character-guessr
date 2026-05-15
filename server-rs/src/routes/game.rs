@@ -3,7 +3,7 @@
 //! Mirrors the logic in client/src/utils/bangumi.js, but runs server-side
 //! against the pre-built archive.sqlite — no live Bangumi API calls needed.
 
-use crate::db::{DbPools, SubjectRow};
+use crate::db::SubjectRow;
 use anyhow::Result;
 use rand::prelude::IndexedRandom;
 use rusqlite::types::Value as SqlValue;
@@ -105,14 +105,6 @@ pub fn random_character_with_conn(
     let char_id = pick_candidate(conn, settings)?;
     let payload = assemble_character(conn, char_id, settings)?;
     Ok((char_id, payload))
-}
-
-pub fn random_character(pools: &Arc<DbPools>, settings: &GameSettings) -> Result<(i64, Value)> {
-    let conn = pools
-        .archive_db
-        .get()
-        .map_err(|e| anyhow::anyhow!("archive_db pool error: {}", e))?;
-    random_character_with_conn(&conn, settings)
 }
 
 /// Build payload for a specific character by ID.
@@ -420,13 +412,83 @@ fn default_max_attempts() -> usize {
     10
 }
 
+fn value_as_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                trimmed.parse::<i64>().ok()
+            }
+        }
+        _ => None,
+    }
+}
+
+fn value_as_usize(value: &Value) -> Option<usize> {
+    value_as_i64(value).and_then(|n| usize::try_from(n).ok())
+}
+
+fn deserialize_optional_i32<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value_as_i64(&value).and_then(|n| i32::try_from(n).ok()))
+}
+
+fn deserialize_optional_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value_as_i64(&value))
+}
+
+fn deserialize_subject_tag_num<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value_as_usize(&value).unwrap_or_else(default_subject_tag_num))
+}
+
+fn deserialize_character_tag_num<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value_as_usize(&value).unwrap_or_else(default_character_tag_num))
+}
+
+fn deserialize_character_num<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value_as_usize(&value).unwrap_or_else(default_character_num))
+}
+
+fn deserialize_max_attempts<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value_as_usize(&value).unwrap_or_else(default_max_attempts))
+}
+
 fn deserialize_added_subject_ids<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let values = Vec::<Value>::deserialize(deserializer)?;
+    let value = Value::deserialize(deserializer)?;
+    let Some(values) = value.as_array() else {
+        return Ok(Vec::new());
+    };
     Ok(values
-        .into_iter()
+        .iter()
         .filter_map(|subject| {
             subject
                 .as_i64()
@@ -435,30 +497,54 @@ where
         .collect())
 }
 
+fn deserialize_use_hints<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let Some(values) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(values
+        .iter()
+        .filter_map(value_as_i64)
+        .filter(|n| *n > 0)
+        .collect())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)] // Some fields parsed from JSON are reserved for future filtering logic
 pub struct GameSettings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_i32")]
     pub start_year: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_i32")]
     pub end_year: Option<i32>,
     /// e.g. ["动画", "游戏"], maps to subject type filter
     #[serde(default)]
     pub meta_tags: Vec<String>,
     /// top-N subjects by popularity
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_i64")]
     pub top_n_subjects: Option<i64>,
     /// Whether to output rawTags (commonTags mode)
     #[serde(default = "default_common_tags")]
     pub common_tags: bool,
-    #[serde(default = "default_subject_tag_num")]
+    #[serde(
+        default = "default_subject_tag_num",
+        deserialize_with = "deserialize_subject_tag_num"
+    )]
     pub subject_tag_num: usize,
-    #[serde(default = "default_character_tag_num")]
+    #[serde(
+        default = "default_character_tag_num",
+        deserialize_with = "deserialize_character_tag_num"
+    )]
     pub character_tag_num: usize,
     #[serde(default = "default_true")]
     pub main_character_only: bool,
-    #[serde(default = "default_character_num")]
+    #[serde(
+        default = "default_character_num",
+        deserialize_with = "deserialize_character_num"
+    )]
     pub character_num: usize,
     #[serde(default)]
     pub use_subject_per_year: bool,
@@ -468,7 +554,10 @@ pub struct GameSettings {
         deserialize_with = "deserialize_added_subject_ids"
     )]
     pub added_subject_ids: Vec<i64>,
-    #[serde(default = "default_max_attempts")]
+    #[serde(
+        default = "default_max_attempts",
+        deserialize_with = "deserialize_max_attempts"
+    )]
     pub max_attempts: usize,
     #[serde(default)]
     pub sync_mode: bool,
@@ -478,11 +567,11 @@ pub struct GameSettings {
     pub global_pick: bool,
     #[serde(default)]
     pub tag_ban: bool,
-    #[serde(default)]
-    pub use_hints: Vec<String>,
-    #[serde(default)]
-    pub use_image_hint: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_use_hints")]
+    pub use_hints: Vec<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_i64")]
+    pub use_image_hint: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_i64")]
     pub time_limit: Option<i64>,
     #[serde(default)]
     pub subject_search: bool,

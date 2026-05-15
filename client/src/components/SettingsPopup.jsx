@@ -25,7 +25,9 @@ const ToggleSwitch = ({ checked, onChange, disabled }) => (
   </div>
 );
 
-function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hideRestart = false, isMultiplayer = false }) {
+const cloneSettings = (settings) => JSON.parse(JSON.stringify(settings || {}));
+
+function SettingsPopup({ gameSettings: committedSettings, onSettingsChange, onClose, onRestart, hideRestart = false, isMultiplayer = false }) {
   const [indexInputValue, setIndexInputValue] = useState('');
   const [indexInfo, setIndexInfo] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -34,11 +36,24 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
   const searchAbortRef = useRef(null);
   const searchRequestSeqRef = useRef(0);
   const [hintInputs, setHintInputs] = useState(['8','5','3']);
-  const [localSettings, setLocalSettings] = useState(() => JSON.parse(JSON.stringify(gameSettings)));
+  const [localSettings, setLocalSettings] = useState(() => cloneSettings(committedSettings));
   const [isGuessSettingsOpen, setIsGuessSettingsOpen] = useState(false);
   const [isAnswerSettingsOpen, setIsAnswerSettingsOpen] = useState(false);
+  const gameSettings = localSettings;
+  const updateLocalSetting = useCallback((key, value) => {
+    setLocalSettings(prev => ({
+      ...prev,
+      [key]: value
+    }));
+  }, []);
   const exclusiveMetaCategories = ['全部', '游戏', '书籍', '三次元', 'Galgame'];
-  const isExclusiveMetaCategory = exclusiveMetaCategories.includes(gameSettings.metaTags[0]);
+  const isExclusiveMetaCategory = exclusiveMetaCategories.includes((gameSettings.metaTags || [])[0]);
+
+  useEffect(() => {
+    const nextSettings = cloneSettings(committedSettings);
+    setLocalSettings(nextSettings);
+    setIndexInputValue(nextSettings.indexId || '');
+  }, [committedSettings]);
 
   // Handle click outside to close dropdown
   useEffect(() => {
@@ -81,14 +96,17 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
   // Enforce commonTags to be true
   useEffect(() => {
     if (!gameSettings.commonTags) {
-      onSettingsChange('commonTags', true);
+      updateLocalSetting('commonTags', true);
     }
-  }, [gameSettings.commonTags, onSettingsChange]);
+  }, [gameSettings.commonTags, updateLocalSetting]);
 
   const setIndex = async (indexId) => {
     if (!indexId) {
-      onSettingsChange('useIndex', false);
-      onSettingsChange('indexId', null);
+      setLocalSettings(prev => ({
+        ...prev,
+        useIndex: false,
+        indexId: null
+      }));
       setIndexInputValue('');
       setIndexInfo(null);
       return;
@@ -98,8 +116,11 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
       const info = await getIndexInfo(indexId);
       setIndexInputValue(indexId);
       setIndexInfo(info);
-      onSettingsChange('useIndex', true);
-      onSettingsChange('indexId', indexId);
+      setLocalSettings(prev => ({
+        ...prev,
+        useIndex: true,
+        indexId
+      }));
     } catch (error) {
       console.error('Failed to fetch index info:', error);
       if (error.message === 'Index not found') {
@@ -108,8 +129,11 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
         notify('导入失败，请稍后重试', 'error');
       }
       // Reset index settings on error
-      onSettingsChange('useIndex', false);
-      onSettingsChange('indexId', null);
+      setLocalSettings(prev => ({
+        ...prev,
+        useIndex: false,
+        indexId: null
+      }));
       setIndexInputValue('');
       setIndexInfo(null);
     }
@@ -124,8 +148,11 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
       const info = await getIndexInfo(indexInputValue);
       setIndexInputValue(indexInputValue);
       setIndexInfo(info);
-      onSettingsChange('useIndex', true); // 修复：确保useIndex为true
-      onSettingsChange('indexId', indexInputValue);
+      setLocalSettings(prev => ({
+        ...prev,
+        useIndex: true,
+        indexId: indexInputValue
+      }));
     } catch (error) {
       console.error('Failed to fetch index info:', error);
       if (error.message === 'Index not found') {
@@ -134,8 +161,11 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
         notify('导入失败，请稍后重试', 'error');
       }
       // Reset index settings on error
-      onSettingsChange('useIndex', false);
-      onSettingsChange('indexId', null);
+      setLocalSettings(prev => ({
+        ...prev,
+        useIndex: false,
+        indexId: null
+      }));
       setIndexInputValue('');
       setIndexInfo(null);
     }
@@ -177,7 +207,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
   const handleAddSubject = (subject) => {
     const newAddedSubjects = [
-      ...gameSettings.addedSubjects,
+      ...(gameSettings.addedSubjects || []),
       {
         id: subject.id,
         name: subject.name,
@@ -185,7 +215,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
         type: subject.type,
       }
     ];
-    onSettingsChange('addedSubjects', newAddedSubjects);
+    updateLocalSetting('addedSubjects', newAddedSubjects);
     
     // Clear search
     setSearchQuery('');
@@ -194,8 +224,8 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
   const handleRemoveSubject = (id) => {
     // Remove the subject from gameSettings
-    const newAddedSubjects = gameSettings.addedSubjects.filter(subject => subject.id !== id);
-    onSettingsChange('addedSubjects', newAddedSubjects);
+    const newAddedSubjects = (gameSettings.addedSubjects || []).filter(subject => subject.id !== id);
+    updateLocalSetting('addedSubjects', newAddedSubjects);
   };
 
   const handleClearCache = () => {
@@ -208,10 +238,14 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
     if (!presetConfig) return;
     
     // 处理所有普通配置项
-    Object.entries(presetConfig).forEach(([key, value]) => {
-      if (key !== 'indexId') { // 特殊处理indexId
-        onSettingsChange(key, value);
-      }
+    setLocalSettings(prev => {
+      const next = { ...prev };
+      Object.entries(presetConfig).forEach(([key, value]) => {
+        if (key !== 'indexId') {
+          next[key] = value;
+        }
+      });
+      return next;
     });
     
     // 特殊处理indexId，确保使用setIndex函数
@@ -224,20 +258,14 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
   // 关闭时放弃本地更改（恢复到父级传入的 gameSettings）
   const handleClose = () => {
-    setLocalSettings(JSON.parse(JSON.stringify(gameSettings)));
+    setLocalSettings(cloneSettings(committedSettings));
     onClose();
   };
 
-  // 确认时只同步多人模式相关设置到全局（避免覆盖其他即时生效的设置）
+  // 确认时一次性同步草稿设置，避免关闭前触发重开局或多人设置广播
   const handleConfirm = () => {
-    if (isMultiplayer) {
-      const keysToCommit = ['globalPick', 'tagBan', 'syncMode', 'nonstopMode'];
-      keysToCommit.forEach((key) => {
-        if (Object.prototype.hasOwnProperty.call(localSettings, key)) onSettingsChange(key, localSettings[key]);
-      });
-    }
-    // 在确认时触发重启（如果提供），并关闭弹窗
-    if (typeof onRestart === 'function') onRestart();
+    onSettingsChange(localSettings);
+    if (typeof onRestart === 'function') onRestart(localSettings);
     onClose();
   };
 
@@ -344,9 +372,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                         reader.onload = (event) => {
                             try {
                             const imported = JSON.parse(event.target.result);
-                            Object.entries(imported).forEach(([key, value]) => {
-                                onSettingsChange(key, value);
-                            });
+                            setLocalSettings(prev => ({ ...prev, ...imported }));
                             notify('设置已导入！', 'success');
                             } catch (err) {
                             notify('导入失败无效的JSON文件', 'error');
@@ -403,7 +429,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                     <label className="settings-label" title="开启后，猜测时可以搜索一个作品中所有人物并从中选择">搜索作品</label>
                     <ToggleSwitch 
                       checked={gameSettings.subjectSearch}
-                      onChange={(val) => onSettingsChange('subjectSearch', val)}
+                      onChange={(val) => updateLocalSetting('subjectSearch', val)}
                     />
                 </div>
 
@@ -417,14 +443,14 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             onChange={(e) => {
                                 const val = e.target.value;
                                 if (val === '') {
-                                    onSettingsChange('maxAttempts', '');
+                                    updateLocalSetting('maxAttempts', '');
                                     return;
                                 }
                                 const num = parseInt(val);
-                                if (!isNaN(num)) onSettingsChange('maxAttempts', Math.min(15, Math.max(1, num)));
+                                if (!isNaN(num)) updateLocalSetting('maxAttempts', Math.min(15, Math.max(1, num)));
                             }}
                             onBlur={() => {
-                                if (!gameSettings.maxAttempts) onSettingsChange('maxAttempts', 10);
+                                if (!gameSettings.maxAttempts) updateLocalSetting('maxAttempts', 10);
                             }}
                         />
                     </div>
@@ -441,18 +467,18 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             onChange={(e) => {
                                 const val = e.target.value;
                                 if (val === '' || val === '0') {
-                                    onSettingsChange('timeLimit', null);
+                                    updateLocalSetting('timeLimit', null);
                                     return;
                                 }
                                 const num = parseInt(val);
                                 if (!isNaN(num)) {
-                                    onSettingsChange('timeLimit', num);
+                                    updateLocalSetting('timeLimit', num);
                                 }
                             }}
                             onBlur={() => {
                                 if (gameSettings.timeLimit) {
-                                    if (gameSettings.timeLimit < 15) onSettingsChange('timeLimit', 15);
-                                    if (gameSettings.timeLimit > 120) onSettingsChange('timeLimit', 120);
+                                    if (gameSettings.timeLimit < 15) updateLocalSetting('timeLimit', 15);
+                                    if (gameSettings.timeLimit > 120) updateLocalSetting('timeLimit', 120);
                                 }
                             }}
                             onFocus={(e) => e.target.select()}
@@ -502,7 +528,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                       break;
                                     }
                                   }
-                                  onSettingsChange('useHints', arr);
+                                  updateLocalSetting('useHints', arr);
                                 }}
                                 onFocus={(e) => e.target.select()}
                             />
@@ -523,12 +549,12 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                       onChange={(e) => {
                         const val = e.target.value;
                         if (val === '' || val === '0') {
-                          onSettingsChange('useImageHint', 0);
+                          updateLocalSetting('useImageHint', 0);
                           return;
                         }
                         const num = parseInt(val);
                         const max = gameSettings.maxAttempts || 15;
-                        if (!isNaN(num)) onSettingsChange('useImageHint', Math.min(max, Math.max(0, num)));
+                        if (!isNaN(num)) updateLocalSetting('useImageHint', Math.min(max, Math.max(0, num)));
                       }}
                       onFocus={(e) => e.target.select()}
                     />
@@ -573,7 +599,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                               newMetaTags[1] = '';
                               newMetaTags[2] = '';
                             }
-                            onSettingsChange('metaTags', newMetaTags);
+                            updateLocalSetting('metaTags', newMetaTags);
                           }}
                         >
                           <option value="全部">全部分类</option>
@@ -597,7 +623,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                           onChange={(e) => {
                             const newMetaTags = [...gameSettings.metaTags];
                             newMetaTags[1] = e.target.value;
-                            onSettingsChange('metaTags', newMetaTags);
+                            updateLocalSetting('metaTags', newMetaTags);
                           }}
                         >
                           <option value="">全部来源</option>
@@ -614,7 +640,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                           onChange={(e) => {
                             const newMetaTags = [...gameSettings.metaTags];
                             newMetaTags[2] = e.target.value;
-                            onSettingsChange('metaTags', newMetaTags);
+                            updateLocalSetting('metaTags', newMetaTags);
                           }}
                         >
                           <option value="">全部类型</option>
@@ -668,8 +694,8 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                 if (!isNaN(newStart) && newStart > currentEnd) {
                                   newEnd = Math.min(2038, newStart);
                                 }
-                                onSettingsChange('startYear', newStart);
-                                if (newEnd !== currentEnd) onSettingsChange('endYear', newEnd);
+                                updateLocalSetting('startYear', newStart);
+                                if (newEnd !== currentEnd) updateLocalSetting('endYear', newEnd);
                               }}
                               min="1800"
                               max="2038"
@@ -689,8 +715,8 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                 if (!isNaN(newEnd) && newEnd < currentStart) {
                                   newStart = Math.max(1800, newEnd);
                                 }
-                                onSettingsChange('endYear', newEnd);
-                                if (newStart !== currentStart) onSettingsChange('startYear', newStart);
+                                updateLocalSetting('endYear', newEnd);
+                                if (newStart !== currentStart) updateLocalSetting('startYear', newStart);
                               }}
                               min="1900"
                               max="2038"
@@ -706,13 +732,13 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                         <div className="toggle-text-switch">
                             <span 
                                 className={!gameSettings.useSubjectPerYear ? 'active' : ''} 
-                                onClick={() => !gameSettings.useIndex && onSettingsChange('useSubjectPerYear', false)}
+                                onClick={() => !gameSettings.useIndex && updateLocalSetting('useSubjectPerYear', false)}
                                 title={gameSettings.useIndex ? '使用目录时不可切换' : ''}
                                 aria-disabled={gameSettings.useIndex}
                             >总榜</span>
                             <span 
                                 className={gameSettings.useSubjectPerYear ? 'active' : ''} 
-                                onClick={() => !gameSettings.useIndex && onSettingsChange('useSubjectPerYear', true)}
+                                onClick={() => !gameSettings.useIndex && updateLocalSetting('useSubjectPerYear', true)}
                                 title={gameSettings.useIndex ? '使用目录时不可切换' : ''}
                                 aria-disabled={gameSettings.useIndex}
                             >年榜</span>
@@ -725,7 +751,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                     value={gameSettings.topNSubjects === undefined ? '' : gameSettings.topNSubjects}
                                     onChange={(e) => {
                                         const value = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value));
-                                        onSettingsChange('topNSubjects', value);
+                                        updateLocalSetting('topNSubjects', value);
                                     }}
                                     min="0"
                                     max="1000"
@@ -751,9 +777,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             onChange={(e) => {
                                 const val = e.target.value;
                                 if (val === '' || val === '0') {
-                                    onSettingsChange('characterNum', 1);
+                                    updateLocalSetting('characterNum', 1);
                                 } else {
-                                    onSettingsChange('characterNum', Math.max(1, Math.min(99, parseInt(val))));
+                                    updateLocalSetting('characterNum', Math.max(1, Math.min(99, parseInt(val))));
                                 }
                             }}
                         />
@@ -762,7 +788,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                     <ToggleSwitch 
                         checked={gameSettings.mainCharacterOnly}
                         onChange={(val) => {
-                            onSettingsChange('mainCharacterOnly', val);
+                            updateLocalSetting('mainCharacterOnly', val);
                         }}
                     />
                 </div>
@@ -778,7 +804,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                     className="compact-input"
                                     type="number"
                                     value={gameSettings.characterTagNum || ''}
-                                    onChange={(e) => onSettingsChange('characterTagNum', Math.max(0, Math.min(10, parseInt(e.target.value) || 0)))}
+                                    onChange={(e) => updateLocalSetting('characterTagNum', Math.max(0, Math.min(10, parseInt(e.target.value) || 0)))}
                                 />
                             </div>
                         </div>
@@ -789,7 +815,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                     className="compact-input"
                                     type="number"
                                     value={gameSettings.subjectTagNum || ''}
-                                    onChange={(e) => onSettingsChange('subjectTagNum', Math.max(0, Math.min(10, parseInt(e.target.value) || 0)))}
+                                    onChange={(e) => updateLocalSetting('subjectTagNum', Math.max(0, Math.min(10, parseInt(e.target.value) || 0)))}
                                 />
                             </div>
                         </div>
@@ -866,7 +892,11 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             <button
                               className="tag-remove-btn"
                               title="移除目录"
-                              onClick={() => { onSettingsChange('useIndex', false); onSettingsChange('indexId', ''); }}
+                              onClick={() => {
+                                setLocalSettings(prev => ({ ...prev, useIndex: false, indexId: '' }));
+                                setIndexInputValue('');
+                                setIndexInfo(null);
+                              }}
                             >×</button>
                           </div>
                       )}

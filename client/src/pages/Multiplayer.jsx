@@ -501,6 +501,14 @@ const Multiplayer = () => {
   };
 
   const handleSettingsChange = (key, value) => {
+    if (typeof key === 'object' && key !== null) {
+      setGameSettings(prev => ({
+        ...prev,
+        ...key
+      }));
+      return;
+    }
+
     setGameSettings(prev => ({
       ...prev,
       [key]: value
