@@ -140,7 +140,10 @@ fn cancel_waiting_for_answer_with_message(
                 "forceImmediate": true,
             })),
         );
-        (build_wait_for_answer_canceled_payload(message), players_payload)
+        (
+            build_wait_for_answer_canceled_payload(message),
+            players_payload,
+        )
     })
 }
 
@@ -180,7 +183,12 @@ fn schedule_answer_setter_timeout(
 
         if let Some(Some((cancel_payload, players_payload))) = result {
             emit_to_room(&io, room_id.clone(), "updatePlayers", players_payload);
-            emit_to_room(&io, room_id.clone(), "waitForAnswerCanceled", cancel_payload);
+            emit_to_room(
+                &io,
+                room_id.clone(),
+                "waitForAnswerCanceled",
+                cancel_payload,
+            );
             broadcast_lobby_rooms_updated(&io);
         }
     });
@@ -2057,15 +2065,14 @@ fn register_room_handlers(
                     new_host_name,
                     wait_for_answer_canceled,
                     players_payload,
-                ) =
-                    match transfer {
-                        Some(Ok(transfer)) => transfer,
-                        Some(Err(message)) => {
-                            emit_error(&socket, "transferHost", message);
-                            return;
-                        }
-                        None => return,
-                    };
+                ) = match transfer {
+                    Some(Ok(transfer)) => transfer,
+                    Some(Err(message)) => {
+                        emit_error(&socket, "transferHost", message);
+                        return;
+                    }
+                    None => return,
+                };
 
                 emit_to_room(&io_clone, room_id.clone(), "updatePlayers", players_payload);
                 emit_to_room(
@@ -2079,12 +2086,7 @@ fn register_room_handlers(
                     }),
                 );
                 if let Some(payload) = wait_for_answer_canceled {
-                    emit_to_room(
-                        &io_clone,
-                        room_id.clone(),
-                        "waitForAnswerCanceled",
-                        payload,
-                    );
+                    emit_to_room(&io_clone, room_id.clone(), "waitForAnswerCanceled", payload);
                 }
             }
         },
@@ -2230,7 +2232,15 @@ fn register_room_handlers(
 
                 let settings_value = data.get("settings").cloned().unwrap_or_else(|| json!({}));
                 let game_settings = GameSettings::from_json(&settings_value);
-                let character = match game::random_character(&pools, &game_settings) {
+                let game_settings_for_query = game_settings.clone();
+                let character = match db::with_archive_db_timed(
+                    Arc::clone(&pools),
+                    "socket_game_start_random_character",
+                    Duration::from_secs(2),
+                    move |conn| game::random_character_with_conn(conn, &game_settings_for_query),
+                )
+                .await
+                {
                     Ok((_, payload)) => match CharacterPayload::from_value(payload) {
                         Ok(character) => character,
                         Err(e) => {
@@ -2334,13 +2344,12 @@ fn register_room_handlers(
                                 return Err("当前没有等待中的出题请求");
                             }
 
-                            let message = if room.answer_setter_id.as_deref()
-                                == Some(actor_id.as_str())
-                            {
-                                "出题人已取消出题，等待已取消"
-                            } else {
-                                "房主已取消等待出题"
-                            };
+                            let message =
+                                if room.answer_setter_id.as_deref() == Some(actor_id.as_str()) {
+                                    "出题人已取消出题，等待已取消"
+                                } else {
+                                    "房主已取消等待出题"
+                                };
                             cancel_waiting_for_answer_with_message(room, message)
                                 .ok_or("当前没有等待中的出题请求")
                         },

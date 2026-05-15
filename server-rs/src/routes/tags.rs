@@ -264,6 +264,7 @@ pub async fn bug_feedback(
 ) -> impl IntoResponse {
     let bug_type = body
         .get("type")
+        .or_else(|| body.get("bugType"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
