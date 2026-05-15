@@ -17,10 +17,9 @@ const Tooltip = ({ content }) => (
 );
 
 const ToggleSwitch = ({ checked, onChange, disabled }) => (
-  <div 
-    className={`toggle-switch ${checked ? 'active' : ''}`} 
+  <div
+    className={`toggle-switch ${checked ? 'active' : ''} ${disabled ? 'disabled' : ''}`}
     onClick={() => !disabled && onChange(!checked)}
-    style={{ cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.6 : 1 }}
   >
     <div className="toggle-thumb" />
   </div>
@@ -245,10 +244,10 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
   return (
     <div className="popup-overlay">
       <div className="popup-content settings-popup">
-        <div className="popup-header group-header" style={{ justifyContent: 'space-between', borderBottom: '1px solid #e5e7eb' }}>
-          <div style={{ display: 'flex'}}>
-            <h2 style={{ margin: 0 }}>设置</h2>
-            <div className="header-subtitle" style={{ alignSelf: 'flex-end' }}>将鼠标移到各设置的标签上可以看到提示，移到输入框上可以看到数值范围</div>
+        <div className="popup-header group-header settings-popup-header">
+          <div className="settings-header-title">
+            <h2 className="settings-title">设置</h2>
+            <div className="header-subtitle">将鼠标移到各设置的标签上可以看到提示，移到输入框上可以看到数值范围</div>
           </div>
             <div className="header-actions">
             <button className="header-btn clear" onClick={handleClearCache} title="清空缓存">
@@ -382,28 +381,17 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
             {/* Group 2: Game Rules */}
             <div className="settings-group">
-              <div 
-                className="group-header" 
+              <div
+                className={`group-header collapsible-group-header ${isGuessSettingsOpen ? 'expanded' : ''}`}
                 onClick={() => setIsGuessSettingsOpen(!isGuessSettingsOpen)}
-                style={{ 
-                    cursor: 'pointer', 
-                    justifyContent: 'space-between',
-                    marginBottom: isGuessSettingsOpen ? '16px' : '0',
-                    borderBottom: isGuessSettingsOpen ? '1px solid #f0f0f0' : 'none',
-                    paddingBottom: isGuessSettingsOpen ? '12px' : '0',
-                    transition: 'all 0.3s ease'
-                }}
               >
-                <div style={{ display: 'flex', alignItems: 'baseline' }}>
+                <div className="settings-section-title-row">
                     <h3 className="group-title">猜测设置</h3>
                     <div className="group-subtitle">影响和玩家猜测有关的内容</div>
                 </div>
                 <Icon
                     name="chevronDown"
-                    style={{ 
-                        transform: isGuessSettingsOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-                        transition: 'transform 0.3s ease'
-                    }}
+                    className={`settings-chevron ${isGuessSettingsOpen ? 'open' : ''}`}
                 />
               </div>
 
@@ -420,7 +408,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                 </div>
 
                 <div className="setting-item-compact">
-                    <label className="settings-label" title="一名玩家一局游戏能猜测的次数"  style={{ marginLeft: "58.5px" }}>猜测次数（次）</label>
+                    <label className="settings-label settings-label-offset-attempts" title="一名玩家一局游戏能猜测的次数">猜测次数（次）</label>
                     <div className="compact-input-container" title="数值范围 1-15">
                         <input 
                             className="compact-input"
@@ -443,8 +431,8 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                 </div>
 
                 <div className="setting-item-compact">
-                    <label className="settings-label" title="每轮猜测的限制时间，设为0或留空时关闭" style={{ marginLeft: "1px" }}>时间限制（秒/轮）</label>
-                    <div className="compact-input-container" title="数值范围 0, 15-120" style={{ marginLeft: "1px" }}>
+                    <label className="settings-label settings-label-nudge" title="每轮猜测的限制时间，设为0或留空时关闭">时间限制（秒/轮）</label>
+                    <div className="compact-input-container settings-label-nudge" title="数值范围 0, 15-120">
                         <input 
                             className={`compact-input ${!gameSettings.timeLimit ? 'is-disabled' : ''}`}
                             type="text"
@@ -476,7 +464,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
               {/* Row 2: Hints */}
               <div className="settings-row compact-row">
                 <div className="setting-item-compact">
-                    <label className="settings-label" title="剩余x轮时显示一次文本提示，从左到右填入从大到小的数值，留空或为0时关闭" style={{ marginLeft: "1px" }}>文本提示（剩x轮）</label>
+                    <label className="settings-label settings-label-nudge" title="剩余x轮时显示一次文本提示，从左到右填入从大到小的数值，留空或为0时关闭">文本提示（剩x轮）</label>
                     {[0, 1, 2].map((idx) => (
                         <div key={idx} className="compact-input-container" title={`数值范围 1-${gameSettings.maxAttempts || 15}`}>
                             <input
@@ -553,28 +541,17 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
             {/* Group 3: Question Scope */}
             <div className="settings-group">
-              <div 
-                className="group-header" 
+              <div
+                className={`group-header collapsible-group-header ${isAnswerSettingsOpen ? 'expanded' : ''}`}
                 onClick={() => setIsAnswerSettingsOpen(!isAnswerSettingsOpen)}
-                style={{ 
-                    cursor: 'pointer', 
-                    justifyContent: 'space-between',
-                    marginBottom: isAnswerSettingsOpen ? '16px' : '0',
-                    borderBottom: isAnswerSettingsOpen ? '1px solid #f0f0f0' : 'none',
-                    paddingBottom: isAnswerSettingsOpen ? '12px' : '0',
-                    transition: 'all 0.3s ease'
-                }}
               >
-                <div style={{ display: 'flex', alignItems: 'baseline' }}>
+                <div className="settings-section-title-row">
                     <h3 className="group-title">答案设置</h3>
                     <div className="group-subtitle">影响和答案角色有关的内容</div>
                 </div>
                 <Icon
                     name="chevronDown"
-                    style={{ 
-                        transform: isAnswerSettingsOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-                        transition: 'transform 0.3s ease'
-                    }}
+                    className={`settings-chevron ${isAnswerSettingsOpen ? 'open' : ''}`}
                 />
               </div>
 
@@ -582,9 +559,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
               <>
               {/* Row 1: Subject Filter & Related Games */}
               <div className="settings-row compact-row">
-                <div className="setting-item-compact" style={{ gap: '16px' }}>
-                    <label className="settings-label" style={{ marginBottom: 0, whiteSpace: 'nowrap'}} title="这行选项同时会影响登场作品的信息&#10;比如不想让剧场版计入登场数据，可以只勾选'TV'。&#10;当'使用目录'生效时，这行选项不会影响正确答案的抽取，只会影响表格内显示的信息。">作品筛选</label>
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <div className="setting-item-compact gap-16">
+                    <label className="settings-label nowrap-label" title="这行选项同时会影响登场作品的信息&#10;比如不想让剧场版计入登场数据，可以只勾选'TV'。&#10;当'使用目录'生效时，这行选项不会影响正确答案的抽取，只会影响表格内显示的信息。">作品筛选</label>
+                    <div className="settings-inline-wrap">
                         <select 
                           className="settings-select"
                           value={gameSettings.metaTags[0] || ''}
@@ -672,21 +649,14 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                     </div>
                 </div>
 
-                {/* <div className="setting-item-compact" style={{gap: '8px' }}>
-                    <label className="settings-label" title="计算登场作品（年份、分数）时会包括游戏。&#10;但是，答案角色还是只会从动画中选取，因为游戏的热度榜有bug。&#10;如果想要猜游戏角色，可以自创一个目录或者添加额外作品。">包含游戏作品数据</label>
-                    <ToggleSwitch 
-                        checked={gameSettings.includeGame}
-                        onChange={(val) => onSettingsChange('includeGame', val)}
-                    />
-                </div> */}
               </div>
 
               {/* Row 2: Year Range & Popularity Range */}
               <div className="settings-row compact-row">
-                <div className="setting-item-compact" style={{ gap: '16px' }}>
+                <div className="setting-item-compact gap-16">
                     <label className="settings-label" title="开启目录时不可用">年份范围</label>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <div className="compact-input-container" style={{ width: '78px' }} title="数值范围1800-2038">
+                    <div className="settings-inline-tight">
+                        <div className="compact-input-container width-78" title="数值范围1800-2038">
                             <input 
                               className="compact-input"
                               type="number" 
@@ -707,7 +677,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             />
                         </div>
                         <span>-</span>
-                        <div className="compact-input-container" style={{ width: '78px' }} title="数值范围1900-2038">
+                        <div className="compact-input-container width-78" title="数值范围1900-2038">
                             <input 
                               className="compact-input"
                               type="number" 
@@ -730,25 +700,25 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                     </div>
                 </div>
 
-                <div className="setting-item-compact offset-md" style={{ gap: '16px' }}>
+                <div className="setting-item-compact offset-md gap-16">
                     <label className="settings-label" title="使用年榜时会先抽取某一年份，再从中抽取作品。&#10;削弱了新番热度的影响。&#10;利好老二次元！&#10;开启目录时不可用">热度范围</label>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                    <div className="settings-inline-wide">
                         <div className="toggle-text-switch">
                             <span 
                                 className={!gameSettings.useSubjectPerYear ? 'active' : ''} 
                                 onClick={() => !gameSettings.useIndex && onSettingsChange('useSubjectPerYear', false)}
-                                style={gameSettings.useIndex ? { cursor: 'not-allowed', color: '#bdbdbd' } : { cursor: 'pointer' }}
                                 title={gameSettings.useIndex ? '使用目录时不可切换' : ''}
+                                aria-disabled={gameSettings.useIndex}
                             >总榜</span>
                             <span 
                                 className={gameSettings.useSubjectPerYear ? 'active' : ''} 
                                 onClick={() => !gameSettings.useIndex && onSettingsChange('useSubjectPerYear', true)}
-                                style={gameSettings.useIndex ? { cursor: 'not-allowed', color: '#bdbdbd' } : { cursor: 'pointer' }}
                                 title={gameSettings.useIndex ? '使用目录时不可切换' : ''}
+                                aria-disabled={gameSettings.useIndex}
                             >年榜</span>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <div className="compact-input-container" style={{ width: '60px' }} title="前N部；0表示全范围">
+                        <div className="settings-inline">
+                            <div className="compact-input-container width-60" title="前N部；0表示全范围">
                                 <input 
                                     className="compact-input"
                                     type="number" 
@@ -762,7 +732,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                     disabled={gameSettings.useIndex}
                                 />
                             </div>
-                            <span style={{ fontSize: '13px', marginLeft: '8px' }}>{gameSettings.topNSubjects > 0 ? '部' : '全范围'}</span>
+                            <span className="settings-count-text">{gameSettings.topNSubjects > 0 ? '部' : '全范围'}</span>
                         </div>
                     </div>
                 </div>
@@ -770,9 +740,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
 
               {/* Row 3: Character Count, Tag Count */}
               <div className="settings-row compact-row">
-                <div className="setting-item-compact" style={{ gap: '10px', alignItems: 'center' }}>
+                <div className="setting-item-compact gap-10 center-items">
                     <label className="settings-label"  title="作品中至少有多少名角色，设为0或留空时仅包含主角">角色数量</label>
-                    <div className="compact-input-container" title="数值范围 >=0" style={{ minWidth: '90px' }}>
+                    <div className="compact-input-container min-width-90" title="数值范围 >=0">
                         <input 
                             className="compact-input"
                             type="number"
@@ -788,7 +758,7 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                             }}
                         />
                     </div>
-                    <span style={{ fontSize: '13px', color: '#4b5563' }}>仅主角</span>
+                    <span className="settings-help-text">仅主角</span>
                     <ToggleSwitch 
                         checked={gameSettings.mainCharacterOnly}
                         onChange={(val) => {
@@ -798,12 +768,12 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                 </div>
               {/* </div>
               <div className="settings-row compact-row"> */}
-                <div className="setting-item-compact offset-sm" style={{ gap: '16px' }}>
+                <div className="setting-item-compact offset-sm gap-16">
                     <label className="settings-label" title="猜测时显示的来自作品和角色的标签数量">标签数量</label>
-                    <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                            <span style={{ fontSize: '13px', color: '#4b5563' }}>角色</span>
-                            <div className="compact-input-container" style={{ width: '50px' }} title="数值范围1-10">
+                    <div className="settings-inline-wide">
+                        <div className="settings-inline-wide">
+                            <span className="settings-help-text">角色</span>
+                            <div className="compact-input-container width-50" title="数值范围1-10">
                                 <input 
                                     className="compact-input"
                                     type="number"
@@ -812,9 +782,9 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                 />
                             </div>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                            <span style={{ fontSize: '13px', color: '#4b5563' }}>作品</span>
-                            <div className="compact-input-container" style={{ width: '50px' }} title="数值范围1-10">
+                        <div className="settings-inline-wide">
+                            <span className="settings-help-text">作品</span>
+                            <div className="compact-input-container width-50" title="数值范围1-10">
                                 <input 
                                     className="compact-input"
                                     type="number"
@@ -828,10 +798,10 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
               </div>
 
               {/* Row 4: Catalog & Extra Subjects */}
-              <div className="settings-row compact-row" style={{ alignItems: 'center' }}>
-                <div className="setting-item-compact" style={{ gap: '16px' }}>
+              <div className="settings-row compact-row center-items">
+                <div className="setting-item-compact gap-16">
                     <label className="settings-label"  title="勾选时，正确答案只会从目录（+额外作品）中抽取。&#10;目录id为bangumi.tv/index/目录id">使用目录</label>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'left' }}>
+                    <div className="settings-inline-start">
                         <div className="compact-input-container">
                             <input 
                                 className="compact-input"
@@ -841,17 +811,16 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
                                 onChange={(e) => setIndexInputValue(e.target.value)}
                             />
                         </div>
-                        <button className="action-btn" onClick={handleImport} style={{ padding: '6px 12px', height: '32px' }}>导入</button>
+                        <button className="action-btn compact-action-btn" onClick={handleImport}>导入</button>
                     </div>
                 </div>
 
-                <div className="setting-item-compact offset-lg" style={{ flex: 1, gap: '16px' }}>
-                    <label className="settings-label" style={{ whiteSpace: 'nowrap' }}>额外作品</label>
+                <div className="setting-item-compact offset-lg flex-1 gap-16">
+                    <label className="settings-label nowrap-label">额外作品</label>
                     <div className="search-container-compact" ref={searchContainerRef} >
                             <input 
-                                className="large-input"
+                                className="large-input subject-search-input"
                                 type="text"
-                                style={{ width: '214px' }}
                                 placeholder="搜索作品..."
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -885,16 +854,15 @@ function SettingsPopup({ gameSettings, onSettingsChange, onClose, onRestart, hid
               {(gameSettings.useIndex || gameSettings.addedSubjects.length > 0) && (
                   <div className="combined-display-area">
                       {gameSettings.useIndex && indexInfo && (
-                          <div className="catalog-info" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <div className="catalog-info">
                             <a
                               href={`https://bangumi.tv/index/${gameSettings.indexId}`}
                               target='_blank'
                               rel='noopener noreferrer'
-                              style={{ textDecoration: 'none', color: '#2563eb', fontWeight: 500 }}
                             >
                               {indexInfo.title}
                             </a>
-                            <span style={{ color: '#888' }}>共 {indexInfo.total} 部作品</span>
+                            <span className="catalog-count">共 {indexInfo.total} 部作品</span>
                             <button
                               className="tag-remove-btn"
                               title="移除目录"
