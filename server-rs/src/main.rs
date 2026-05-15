@@ -75,7 +75,6 @@ async fn main() -> anyhow::Result<()> {
     // Build the Axum application
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
-        .route("/metrics", get(middleware::metrics::metrics_handler))
         // Room management routes
         .merge(routes::room_routes(Arc::clone(&server_state), io.clone()))
         // REST API routes (game + leaderboard + stats)

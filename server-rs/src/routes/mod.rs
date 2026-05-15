@@ -1,7 +1,6 @@
 use crate::db::{self, DbPools};
 use crate::utils;
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Redirect;
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
@@ -107,9 +106,9 @@ lazy_static::lazy_static! {
     static ref IMAGE_SOURCE_RESOLVE_SEMAPHORE: Semaphore = Semaphore::new(4);
 }
 
-const IMAGE_SOURCE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(4);
 const IMAGE_SOURCE_PERMIT_TIMEOUT: Duration = Duration::from_millis(500);
 const BGM_PROXY_LIMIT_PER_MINUTE: usize = 90;
+const IMAGE_RESOLVE_LIMIT_PER_MINUTE: usize = 180;
 const GAME_RANDOM_LIMIT_PER_MINUTE: usize = 60;
 const GAME_CHARACTER_LIMIT_PER_MINUTE: usize = 120;
 const TTL_CACHE_MAX_ENTRIES: usize = 2048;
@@ -123,11 +122,6 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         // Image resolve helper (JSON): tells client whether /img is cached yet
         .route("/img/resolve/{id}", get(resolve_character_image))
         .route("/img/resolve/subject/{id}", get(resolve_subject_image))
-        .route("/img/source/{id}", get(resolve_character_image_source))
-        .route(
-            "/img/source/subject/{id}",
-            get(resolve_subject_image_source),
-        )
         // Archive-backed local endpoints (reduce BGM API usage)
         .nest("/archive", archive::archive_routes(Arc::clone(&pools)))
         // BGM proxy (for index mode / search — BGM calls go through server)
@@ -159,6 +153,47 @@ pub fn image_routes(pools: Arc<DbPools>) -> Router {
         .with_state(pools)
 }
 
+fn image_resolve_limit_rejection(
+    headers: &HeaderMap,
+    peer_addr: SocketAddr,
+) -> Option<write_guard::GuardRejection> {
+    write_guard::enforce_public_write_limit(
+        headers,
+        Some(peer_addr),
+        "image-resolve",
+        IMAGE_RESOLVE_LIMIT_PER_MINUTE,
+    )
+    .err()
+}
+
+async fn archive_character_exists(pools: &Arc<DbPools>, id: i64) -> bool {
+    db::with_archive_db_timed(
+        Arc::clone(pools),
+        "image_character_exists",
+        Duration::from_millis(500),
+        move |conn| {
+            let mut stmt = conn.prepare("SELECT 1 FROM characters WHERE id = ?1 LIMIT 1")?;
+            Ok(stmt.exists([id])?)
+        },
+    )
+    .await
+    .unwrap_or(false)
+}
+
+async fn archive_subject_exists(pools: &Arc<DbPools>, id: i64) -> bool {
+    db::with_archive_db_timed(
+        Arc::clone(pools),
+        "image_subject_exists",
+        Duration::from_millis(500),
+        move |conn| {
+            let mut stmt = conn.prepare("SELECT 1 FROM subjects WHERE id = ?1 LIMIT 1")?;
+            Ok(stmt.exists([id])?)
+        },
+    )
+    .await
+    .unwrap_or(false)
+}
+
 /// GET /api/img/resolve/:id
 ///
 /// JSON helper used by the client Image component:
@@ -167,6 +202,8 @@ pub fn image_routes(pools: Arc<DbPools>) -> Router {
 ///   202 immediately. External image providers must not hold this request open.
 async fn resolve_character_image(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     AxumQuery(q): AxumQuery<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -218,6 +255,9 @@ async fn resolve_character_image(
         )
             .into_response();
     }
+    if let Some(rejection) = image_resolve_limit_rejection(&headers, peer_addr) {
+        return rejection.into_response();
+    }
 
     let pools_clone = Arc::clone(&pools);
     tokio::spawn(async move {
@@ -240,55 +280,9 @@ async fn resolve_character_image(
             "cached": false,
             "code": "SOURCE_PENDING",
             "imgUrl": img_url,
-            "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
         })),
     )
         .into_response()
-}
-
-async fn resolve_character_image_source(
-    State(pools): State<Arc<DbPools>>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    if id <= 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "id must be positive" })),
-        )
-            .into_response();
-    }
-
-    let (image_medium, image_grid) = match ensure_image_source_cached_bounded(&pools, id).await {
-        Ok(Some(source)) => source,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "code": "NO_SOURCE",
-                    "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
-                })),
-            )
-                .into_response();
-        }
-        Err(()) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({
-                    "code": "SOURCE_TIMEOUT",
-                    "sourceUrl": "https://lain.bgm.tv/pic/user/l/icon.jpg",
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let source_url = if !image_medium.trim().is_empty() {
-        image_medium
-    } else {
-        image_grid
-    };
-
-    Json(json!({ "sourceUrl": source_url })).into_response()
 }
 
 /// GET /api/img/resolve/subject/:id
@@ -296,6 +290,8 @@ async fn resolve_character_image_source(
 /// redirect API and stored under the `s:{id}` image-cache namespace.
 async fn resolve_subject_image(
     State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     AxumQuery(q): AxumQuery<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -344,10 +340,12 @@ async fn resolve_subject_image(
                 "cached": false,
                 "code": "CACHE_MISS",
                 "imgUrl": img_url,
-                "sourceUrl": "",
             })),
         )
             .into_response();
+    }
+    if let Some(rejection) = image_resolve_limit_rejection(&headers, peer_addr) {
+        return rejection.into_response();
     }
 
     let pools_clone = Arc::clone(&pools);
@@ -372,56 +370,9 @@ async fn resolve_subject_image(
             "cached": false,
             "code": "SOURCE_PENDING",
             "imgUrl": img_url,
-            "sourceUrl": "",
         })),
     )
         .into_response()
-}
-
-async fn resolve_subject_image_source(
-    State(pools): State<Arc<DbPools>>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    if id <= 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "id must be positive" })),
-        )
-            .into_response();
-    }
-
-    let (image_medium, image_grid) =
-        match ensure_subject_image_source_cached_bounded(&pools, id).await {
-            Ok(Some(source)) => source,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "code": "NO_SOURCE",
-                        "sourceUrl": "",
-                    })),
-                )
-                    .into_response();
-            }
-            Err(()) => {
-                return (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(json!({
-                        "code": "SOURCE_TIMEOUT",
-                        "sourceUrl": "",
-                    })),
-                )
-                    .into_response();
-            }
-        };
-
-    let source_url = if !image_medium.trim().is_empty() {
-        image_medium
-    } else {
-        image_grid
-    };
-
-    Json(json!({ "sourceUrl": source_url })).into_response()
 }
 
 fn character_name_for_stats(payload: &Value) -> String {
@@ -946,6 +897,15 @@ async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(St
     }
     let _cleanup = CleanupPendingImageSource(id);
 
+    if !archive_character_exists(pools, id).await {
+        warn!(
+            id,
+            "character image source resolution skipped: id not in archive"
+        );
+        let _ = tx.send(true);
+        return None;
+    }
+
     let _permit = match tokio::time::timeout(
         IMAGE_SOURCE_PERMIT_TIMEOUT,
         IMAGE_SOURCE_RESOLVE_SEMAPHORE.acquire(),
@@ -990,24 +950,6 @@ async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(St
     None
 }
 
-async fn ensure_image_source_cached_bounded(
-    pools: &Arc<DbPools>,
-    id: i64,
-) -> Result<Option<(String, String)>, ()> {
-    match tokio::time::timeout(
-        IMAGE_SOURCE_RESOLVE_TIMEOUT,
-        ensure_image_source_cached(pools, id),
-    )
-    .await
-    {
-        Ok(source) => Ok(source),
-        Err(_) => {
-            warn!(id, "character image source resolution timed out");
-            Err(())
-        }
-    }
-}
-
 async fn get_character_image(
     State(pools): State<Arc<DbPools>>,
     Path(id_str): Path<String>,
@@ -1043,22 +985,7 @@ async fn get_character_image(
         return (headers, content).into_response();
     }
 
-    let pools_clone = Arc::clone(&pools);
-    tokio::spawn(async move {
-        if let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools_clone, id).await
-        {
-            let source_url = if !image_grid.trim().is_empty() {
-                image_grid
-            } else {
-                image_medium
-            };
-            if !source_url.trim().is_empty() {
-                utils::download_and_cache_image(id.to_string(), source_url, pools_clone).await;
-            }
-        }
-    });
-
-    Redirect::temporary("https://lain.bgm.tv/pic/user/l/icon.jpg").into_response()
+    StatusCode::NOT_FOUND.into_response()
 }
 
 // ─── Subject image proxy ─────────────────────────────────────────────────────
@@ -1246,6 +1173,15 @@ async fn ensure_subject_image_source_cached(
     }
     let _cleanup = CleanupPendingSubjectImageSource(id);
 
+    if !archive_subject_exists(pools, id).await {
+        warn!(
+            id,
+            "subject image source resolution skipped: id not in archive"
+        );
+        let _ = tx.send(true);
+        return None;
+    }
+
     let _permit = match tokio::time::timeout(
         IMAGE_SOURCE_PERMIT_TIMEOUT,
         IMAGE_SOURCE_RESOLVE_SEMAPHORE.acquire(),
@@ -1289,24 +1225,6 @@ async fn ensure_subject_image_source_cached(
     None
 }
 
-async fn ensure_subject_image_source_cached_bounded(
-    pools: &Arc<DbPools>,
-    id: i64,
-) -> Result<Option<(String, String)>, ()> {
-    match tokio::time::timeout(
-        IMAGE_SOURCE_RESOLVE_TIMEOUT,
-        ensure_subject_image_source_cached(pools, id),
-    )
-    .await
-    {
-        Ok(source) => Ok(source),
-        Err(_) => {
-            warn!(id, "subject image source resolution timed out");
-            Err(())
-        }
-    }
-}
-
 async fn get_subject_image(
     State(pools): State<Arc<DbPools>>,
     Path(id_str): Path<String>,
@@ -1344,23 +1262,6 @@ async fn get_subject_image(
         );
         return (headers, content).into_response();
     }
-
-    let pools_clone = Arc::clone(&pools);
-    let cache_key_for_dl = cache_key.clone();
-    tokio::spawn(async move {
-        if let Some((image_medium, image_grid)) =
-            ensure_subject_image_source_cached(&pools_clone, id).await
-        {
-            let source_url = if !image_grid.trim().is_empty() {
-                image_grid
-            } else {
-                image_medium
-            };
-            if !source_url.trim().is_empty() {
-                utils::download_and_cache_image(cache_key_for_dl, source_url, pools_clone).await;
-            }
-        }
-    });
 
     StatusCode::NOT_FOUND.into_response()
 }

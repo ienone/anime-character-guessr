@@ -46,10 +46,8 @@ function Image({
     };
   }, [src]);
 
-  // If src points to our `/img/:id.webp` or `/img/subject/:id.webp` proxy, resolve it via server first.
-  // This allows the server to attempt caching; if it can't fetch within the
-  // configured time window, we fall back to direct-origin URL so the browser
-  // can try loading it (client shows placeholder meanwhile).
+  // If src points to our `/img/:id.webp` or `/img/subject/:id.webp` proxy, ask
+  // the server to warm the cache before loading the proxy URL.
   useEffect(() => {
     const m = typeof src === 'string' ? src.match(/\/img\/(?:(subject)\/)?(\d+)\.webp(?:\?.*)?$/) : null
     if (!m) return
@@ -65,28 +63,24 @@ function Image({
         if (fallbackSrc) setCurrentSrc(fallbackSrc)
 
         const base = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
-        const url = preferSource
-          ? (isSubject ? `${base}/api/img/source/subject/${id}` : `${base}/api/img/source/${id}`)
-          : (isSubject ? `${base}/api/img/resolve/subject/${id}` : `${base}/api/img/resolve/${id}`)
+        const url = isSubject ? `${base}/api/img/resolve/subject/${id}` : `${base}/api/img/resolve/${id}`
         const res = await axios.get(url, {
           timeout: cachedOnly ? 500 : 1500,
           params: cachedOnly ? { cachedOnly: 1, waitMs: 0 } : undefined,
         })
         if (cancelled || !mountedRef.current) return
 
-        // Server returns JSON; prefer proxy url when cached, otherwise try sourceUrl.
+        // Server returns JSON. It never exposes direct upstream URLs; when a
+        // cache warm-up is pending we retry the local proxy shortly after.
         const data = res.data || {}
-        if (preferSource && data.sourceUrl) {
-          setCurrentSrc(data.sourceUrl)
-        } else if (data.cached) {
+        if (data.cached) {
           setCurrentSrc(data.imgUrl || src)
-        } else if (data.sourceUrl) {
-          // Show placeholder immediately, then try the origin URL directly.
-          // This matches the "server couldn't fetch within time window" UX goal.
+        } else if (!cachedOnly && data.imgUrl) {
+          const retryDelayMs = preferSource ? 400 : 800
           setTimeout(() => {
             if (cancelled || !mountedRef.current) return
-            setCurrentSrc(data.sourceUrl)
-          }, 0)
+            setCurrentSrc(data.imgUrl)
+          }, retryDelayMs)
         }
       } catch {
         // If resolve fails (server down), fall back to trying the original src.

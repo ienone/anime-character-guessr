@@ -23,7 +23,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 socketioxide = { version = "0.18.3", features = ["state"] }
 tokio = { version = "1.52.1", features = ["full"] }
-sysinfo = "0.32.1"
 tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression"] }
 tower-http = { version = "0.6.8", features = ["fs", "cors", "trace"] }
 tracing = "0.1.44"
