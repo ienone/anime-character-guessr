@@ -134,9 +134,9 @@ const SCENARIOS = [
     body: null,
   },
   {
-    name: 'leaderboard',
+    name: 'leaderboard_characters',
     method: 'GET',
-    path: '/api/leaderboard',
+    path: '/api/leaderboard/characters?limit=10',
     body: null,
   },
   {

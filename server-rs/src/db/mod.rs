@@ -221,25 +221,14 @@ fn init_app_schema(conn: &Connection) -> anyhow::Result<()> {
             fetched_at_ms INTEGER NOT NULL DEFAULT 0,
             source TEXT NOT NULL DEFAULT '' -- e.g. 'bgm_image' | 'bgm'
         );
-        -- Persisted mirror cache for character voice actors (animeVAs), stored as JSON array of names.
+        -- Persisted cache for character voice actors (animeVAs), stored as JSON array of names.
         CREATE TABLE IF NOT EXISTS character_vas (
             character_id INTEGER PRIMARY KEY,
             va_names_json TEXT NOT NULL DEFAULT '[]',
             fetched_at_ms INTEGER NOT NULL DEFAULT 0,
-            source TEXT NOT NULL DEFAULT '' -- e.g. 'dump' | 'bgm'
-        );
-        CREATE TABLE IF NOT EXISTS leaderboard (
-            user_id TEXT PRIMARY KEY,
-            username TEXT NOT NULL DEFAULT '',
-            score INTEGER NOT NULL DEFAULT 0,
-            games_played INTEGER NOT NULL DEFAULT 0
+            source TEXT NOT NULL DEFAULT '' -- e.g. 'dump'
         );
         CREATE TABLE IF NOT EXISTS answer_count (
-            id INTEGER PRIMARY KEY,
-            character_name TEXT NOT NULL DEFAULT '',
-            count INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS guess_count (
             id INTEGER PRIMARY KEY,
             character_name TEXT NOT NULL DEFAULT '',
             count INTEGER NOT NULL DEFAULT 0
@@ -250,7 +239,6 @@ fn init_app_schema(conn: &Connection) -> anyhow::Result<()> {
             count INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_answer_count_count ON answer_count(count DESC);
-        CREATE INDEX IF NOT EXISTS idx_guess_count_count ON guess_count(count DESC);
         CREATE INDEX IF NOT EXISTS idx_weekly_count_count ON weekly_count(count DESC);
         CREATE TABLE IF NOT EXISTS app_metadata (
             key TEXT PRIMARY KEY,

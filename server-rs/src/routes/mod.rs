@@ -17,7 +17,6 @@ use tracing::warn;
 
 pub mod archive;
 pub mod game;
-pub mod leaderboard;
 pub mod rooms;
 pub mod roulette;
 pub mod stats;
@@ -98,11 +97,6 @@ fn prune_ttl_cache(cache: &DashMap<String, CacheEntry>, protected_key: &str) {
 lazy_static::lazy_static! {
     static ref INDEX_INFO_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = indexId
     static ref INDEX_SUBJECTS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = indexId:offset:limit
-    static ref BGM_CHARACTER_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = characterId
-    // Cache for archive fallbacks (when archive.sqlite doesn't contain the requested item)
-    static ref SUBJECT_DETAILS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = subjectId
-    static ref SUBJECT_CHARACTERS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = subjectId
-    static ref CHARACTER_DETAILS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = characterId
     // In-flight de-duplication for BGM image source resolution (per character_id).
     // Prevents bursty concurrent requests all hitting BGM for the same character.
     static ref PENDING_IMAGE_SOURCE: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
@@ -138,19 +132,15 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         // BGM proxy (for index mode / search — BGM calls go through server)
         .route("/bgm/index-info", get(bgm_proxy_index_info))
         .route("/bgm/index-subjects", get(bgm_proxy_index_subjects))
-        .route("/bgm/character", get(bgm_proxy_character))
         // Roulette
         .route("/roulette", get(roulette::roulette))
         // Redeem codes
         .route("/redeem", get(stats::redeem))
-        // Player leaderboard
-        .route("/leaderboard", get(leaderboard::get_leaderboard))
         // Character leaderboards
         .route(
             "/leaderboard/characters",
             get(stats::leaderboard_characters),
         )
-        .route("/leaderboard/guesses", get(stats::leaderboard_guesses))
         .route("/leaderboard/weekly", get(stats::leaderboard_weekly))
         // Stats write endpoints
         .route(
@@ -158,8 +148,6 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
             post(stats::answer_character_count),
         )
         .route("/guess-character-count", post(stats::guess_character_count))
-        .route("/character-usage/{id}", get(stats::character_usage))
-        .route("/subject-added", post(stats::subject_added))
         // Bug feedback.
         .route("/bug-feedback", post(tags::bug_feedback))
         .layer(DefaultBodyLimit::max(256 * 1024))
@@ -470,8 +458,7 @@ async fn get_random_character(
 
     match result {
         Ok((char_id, mut payload)) => {
-            // Fill animeVAs via persisted mirror cache; BGM is used only as fallback and then stored in app.sqlite.
-            if let Some(vas) = ensure_vas_cached(&pools, char_id).await
+            if let Some(vas) = load_cached_vas(&pools, char_id).await
                 && let Value::Object(ref mut obj) = payload
             {
                 obj.insert(
@@ -535,7 +522,7 @@ async fn get_character_by_id(
 
     match result {
         Ok(mut payload) => {
-            if let Some(vas) = ensure_vas_cached(&pools, char_id).await
+            if let Some(vas) = load_cached_vas(&pools, char_id).await
                 && let Value::Object(ref mut obj) = payload
             {
                 obj.insert(
@@ -654,38 +641,6 @@ async fn bgm_proxy_index_subjects(
                 10 * 60 * 1000,
                 data.clone(),
             );
-            Json(data).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /api/bgm/character?id=xxx — proxy single character details from BGM
-async fn bgm_proxy_character(
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    AxumQuery(q): AxumQuery<HashMap<String, String>>,
-) -> Response {
-    if let Some(rejection) = bgm_proxy_limit_rejection(&headers, peer_addr) {
-        return rejection.into_response();
-    }
-    let id = match positive_query_id(&q, "id") {
-        Ok(id) => id.to_string(),
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
-        }
-    };
-    if let Some(v) = cache_get_ttl(&BGM_CHARACTER_CACHE, &id) {
-        return Json(v).into_response();
-    }
-    let url = format!("https://api.bgm.tv/v0/characters/{}", id);
-    match bgm_get(&url).await {
-        Ok(data) => {
-            cache_put_ttl(&BGM_CHARACTER_CACHE, id, 10 * 60 * 1000, data.clone());
             Json(data).into_response()
         }
         Err(e) => (
@@ -992,14 +947,6 @@ async fn ensure_image_source_cached_bounded(
             Err(())
         }
     }
-}
-
-async fn ensure_vas_cached(pools: &Arc<DbPools>, id: i64) -> Option<Vec<String>> {
-    if let Some(v) = load_cached_vas(pools, id).await {
-        return Some(v);
-    }
-
-    None
 }
 
 async fn get_character_image(

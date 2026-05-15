@@ -78,15 +78,6 @@ function SinglePlayer() {
       setImgHint(null);
       setUseImageHint(0);
       try {
-        if (Array.isArray(gameSettings.addedSubjects) && gameSettings.addedSubjects.length > 0) {
-          await axios.post(`${SERVER_URL}/api/subject-added`, {
-            addedSubjects: gameSettings.addedSubjects
-          });
-        }
-      } catch (error) {
-        console.error('Failed to update subject count:', error);
-      }
-      try {
         const character = await getRandomCharacter(gameSettings);
         setCurrentGameSettings({ ...gameSettings });
         if (isMounted) {
@@ -291,15 +282,6 @@ function SinglePlayer() {
       setImgHint(null);
       setUseImageHint(0);
 
-      try {
-        if (Array.isArray(gameSettings.addedSubjects) && gameSettings.addedSubjects.length > 0) {
-          await axios.post(`${SERVER_URL}/api/subject-added`, {
-            addedSubjects: gameSettings.addedSubjects
-          });
-        }
-      } catch (error) {
-        console.error('Failed to update subject count:', error);
-      }
       try {
         setCurrentGameSettings({ ...gameSettings });
         const character = await getRandomCharacter(gameSettings);

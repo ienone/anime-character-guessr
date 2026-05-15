@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import '../styles/Leaderboard.css';
 import { fetchLeaderboardCharacters } from '../data/leaderboard_characters';
-import { fetchLeaderboardWeekly } from '../data/leaderboard_guesses';
+import { fetchLeaderboardWeekly } from '../data/leaderboard_weekly';
 import Image from './Image';
 
 const Leaderboard = ({ defaultExpanded = false }) => {

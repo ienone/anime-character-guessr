@@ -676,15 +676,6 @@ const Multiplayer = () => {
         try {
           localStorage.setItem('latestMultiplayerSettings', JSON.stringify(gameSettings));
         } catch (e) { /* ignore */ }
-        try {
-          if (gameSettings.addedSubjects.length > 0) {
-            await axios.post(SOCKET_URL + '/api/subject-added', {
-              addedSubjects: gameSettings.addedSubjects
-            });
-          }
-        } catch (error) {
-          console.error('Failed to update subject count:', error);
-        }
         const startPayload = {
           roomId,
           settings: gameSettings

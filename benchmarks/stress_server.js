@@ -73,7 +73,7 @@ function requestFor(scenario, i) {
       jsonRequest('/api/game/random', GAME_SETTINGS),
       { method: 'GET', path: `/api/archive/search/characters?keyword=${term}&limit=10` },
       { method: 'GET', path: `/api/archive/search/subjects?keyword=${term}&limit=10` },
-      { method: 'GET', path: '/api/leaderboard' },
+      { method: 'GET', path: '/api/leaderboard/characters?limit=10' },
     ]
     return pick(choices, i)
   }
@@ -88,7 +88,6 @@ function requestFor(scenario, i) {
         characterId: id,
         characterName: `stress-${id}`,
       }),
-      { method: 'GET', path: `/api/character-usage/${id}` },
     ]
     return pick(choices, i)
   }

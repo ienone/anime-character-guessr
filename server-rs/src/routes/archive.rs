@@ -1,14 +1,13 @@
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
 use rusqlite::{params, params_from_iter};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -120,12 +119,7 @@ pub fn archive_routes(pools: Arc<DbPools>) -> Router<Arc<DbPools>> {
 
 /// GET /api/archive/subjects/:id
 /// Returns a subset of BGM subject JSON from local archive.sqlite.
-async fn get_subject(
-    State(pools): State<Arc<DbPools>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
+async fn get_subject(State(pools): State<Arc<DbPools>>, Path(id): Path<i64>) -> impl IntoResponse {
     if id <= 0 {
         return (
             StatusCode::BAD_REQUEST,
@@ -174,37 +168,11 @@ async fn get_subject(
 
     match result {
         Ok(Some(v)) => Json(v).into_response(),
-        Ok(None) => {
-            // Fallback to live BGM API for subjects not present in archive.sqlite.
-            // This still goes through the server (and is cached in-memory) so the client
-            // never directly depends on BGM reachability.
-            let cache_key = id.to_string();
-            if let Some(v) = super::cache_get_ttl(&super::SUBJECT_DETAILS_CACHE, &cache_key) {
-                return Json(v).into_response();
-            }
-
-            if let Some(rejection) = super::bgm_proxy_limit_rejection(&headers, peer_addr) {
-                return rejection.into_response();
-            }
-
-            let url = format!("https://api.bgm.tv/v0/subjects/{}", id);
-            match super::bgm_get(&url).await {
-                Ok(v) => {
-                    super::cache_put_ttl(
-                        &super::SUBJECT_DETAILS_CACHE,
-                        cache_key,
-                        10 * 60 * 1000,
-                        v.clone(),
-                    );
-                    Json(v).into_response()
-                }
-                Err(e) => (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response(),
-            }
-        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "subject not found in archive" })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -217,8 +185,6 @@ async fn get_subject(
 /// Local replacement for `GET /v0/subjects/:id/characters`.
 async fn get_subject_characters(
     State(pools): State<Arc<DbPools>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(subject_id): Path<i64>,
 ) -> impl IntoResponse {
     if subject_id <= 0 {
@@ -281,40 +247,7 @@ async fn get_subject_characters(
     .await;
 
     match result {
-        Ok(v) => {
-            if !v.is_empty() {
-                return Json(v).into_response();
-            }
-
-            // Fallback to BGM for subjects not present in archive.sqlite (or empty joins).
-            let cache_key = subject_id.to_string();
-            if let Some(v) = super::cache_get_ttl(&super::SUBJECT_CHARACTERS_CACHE, &cache_key) {
-                return Json(v).into_response();
-            }
-
-            if let Some(rejection) = super::bgm_proxy_limit_rejection(&headers, peer_addr) {
-                return rejection.into_response();
-            }
-
-            let url = format!("https://api.bgm.tv/v0/subjects/{}/characters", subject_id);
-            match super::bgm_get(&url).await {
-                Ok(raw) => {
-                    let out = Value::Array(raw.as_array().cloned().unwrap_or_default());
-                    super::cache_put_ttl(
-                        &super::SUBJECT_CHARACTERS_CACHE,
-                        cache_key,
-                        10 * 60 * 1000,
-                        out.clone(),
-                    );
-                    Json(out).into_response()
-                }
-                Err(e) => (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response(),
-            }
-        }
+        Ok(v) => Json(v).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -327,8 +260,6 @@ async fn get_subject_characters(
 /// Local replacement for `GET /v0/characters/:id` (subset used by frontend).
 async fn get_character_basic(
     State(pools): State<Arc<DbPools>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     if id <= 0 {
@@ -367,131 +298,11 @@ async fn get_character_basic(
     let char_val = match local_result {
         Ok(Some(v)) => v,
         Ok(None) => {
-            // Fallback to BGM for characters not present in archive.sqlite
-            let cache_key = id.to_string();
-            if let Some(v) = super::cache_get_ttl(&super::CHARACTER_DETAILS_CACHE, &cache_key) {
-                return Json(v).into_response();
-            }
-
-            if let Some(rejection) = super::bgm_proxy_limit_rejection(&headers, peer_addr) {
-                return rejection.into_response();
-            }
-
-            let url = format!("https://api.bgm.tv/v0/characters/{}", id);
-            match super::bgm_get(&url).await {
-                Ok(raw) => {
-                    let name = raw
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let gender = raw.get("gender").and_then(|v| v.as_str()).unwrap_or("?");
-                    let gender = match gender {
-                        "male" | "female" => gender,
-                        _ => "?",
-                    };
-                    let image = raw
-                        .get("images")
-                        .and_then(|imgs| {
-                            imgs.get("medium")
-                                .or_else(|| imgs.get("large"))
-                                .or_else(|| imgs.get("grid"))
-                        })
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "https://lain.bgm.tv/pic/user/l/icon.jpg".to_string());
-                    let image_grid = raw
-                        .get("images")
-                        .and_then(|imgs| {
-                            imgs.get("grid")
-                                .or_else(|| imgs.get("medium"))
-                                .or_else(|| imgs.get("large"))
-                        })
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| image.clone());
-
-                    let stat_collects = raw
-                        .get("stat")
-                        .and_then(|s| s.get("collects"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    let stat_comments = raw
-                        .get("stat")
-                        .and_then(|s| s.get("comments"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    let popularity = stat_collects + stat_comments;
-                    let summary = raw
-                        .get("summary")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let name_cn = raw
-                        .get("name_cn")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            raw.get("infobox")
-                                .and_then(|v| v.as_array())
-                                .and_then(|arr| {
-                                    arr.iter().find(|it| {
-                                        it.get("key").and_then(|k| k.as_str()) == Some("简体中文名")
-                                    })
-                                })
-                                .and_then(|it| it.get("value"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        });
-
-                    let name_en = raw
-                        .get("infobox")
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| {
-                            arr.iter()
-                                .find(|it| it.get("key").and_then(|k| k.as_str()) == Some("别名"))
-                        })
-                        .and_then(|it| it.get("value"))
-                        .and_then(|v| v.as_array())
-                        .and_then(|aliases| {
-                            let find_alias = |k: &str| {
-                                aliases
-                                    .iter()
-                                    .find(|a| a.get("k").and_then(|v| v.as_str()) == Some(k))
-                                    .and_then(|a| a.get("v").and_then(|v| v.as_str()))
-                                    .map(|s| s.to_string())
-                            };
-                            find_alias("英文名").or_else(|| find_alias("罗马字"))
-                        });
-
-                    let out = json!({
-                        "id": id,
-                        "name": name,
-                        "nameCn": name_cn,
-                        "nameEn": name_en,
-                        "gender": gender,
-                        "image": image,
-                        "imageGrid": image_grid,
-                        "summary": summary,
-                        "popularity": popularity,
-                    });
-                    super::cache_put_ttl(
-                        &super::CHARACTER_DETAILS_CACHE,
-                        cache_key,
-                        10 * 60 * 1000,
-                        out.clone(),
-                    );
-                    return Json(out).into_response();
-                }
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e.to_string() })),
-                    )
-                        .into_response();
-                }
-            }
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "character not found in archive" })),
+            )
+                .into_response();
         }
         Err(e) => {
             return (

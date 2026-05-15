@@ -1,7 +1,7 @@
 use crate::db::{self, DbPools};
 use axum::{
     Json,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -115,7 +115,7 @@ pub async fn answer_character_count(
 }
 
 /// POST /api/guess-character-count
-/// Increments guess_count and weekly_count for a character.
+/// Increments the weekly guess counter for a character.
 pub async fn guess_character_count(
     State(pools): State<Arc<DbPools>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -153,13 +153,6 @@ pub async fn guess_character_count(
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
         reset_weekly_count_if_needed(conn)?;
         conn.execute(
-            "INSERT INTO guess_count (id, character_name, count) VALUES (?1, ?2, 1)
-             ON CONFLICT(id) DO UPDATE SET
-                 character_name = excluded.character_name,
-                 count = guess_count.count + 1",
-            rusqlite::params![char_id, &char_name],
-        )?;
-        conn.execute(
             "INSERT INTO weekly_count (id, character_name, count) VALUES (?1, ?2, 1)
              ON CONFLICT(id) DO UPDATE SET
                  character_name = excluded.character_name,
@@ -171,51 +164,9 @@ pub async fn guess_character_count(
     .await;
 
     match result {
-        Ok(()) => Json(json!({ "message": "Character guess count updated successfully", "characterId": char_id })).into_response(),
+        Ok(()) => Json(json!({ "message": "Character weekly guess count updated successfully", "characterId": char_id })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
-}
-
-/// GET /api/character-usage/:id
-pub async fn character_usage(
-    State(pools): State<Arc<DbPools>>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    let result = db::with_app_db(Arc::clone(&pools), move |conn| {
-        let row = conn.query_row(
-            "SELECT id, character_name, count FROM answer_count WHERE id = ?1",
-            [id],
-            |row| Ok(json!({ "_id": row.get::<_, i64>(0)?, "characterName": row.get::<_, String>(1)?, "count": row.get::<_, i64>(2)? })),
-        );
-        match row {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!(e)),
-        }
-    }).await;
-
-    match result {
-        Ok(Some(v)) => Json(v).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Character usage not found" })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /api/subject-added  — POST body: { addedSubjects: [{id, name, name_cn, type}] }
-/// Simplified: just acknowledge (subject data lives in archive.sqlite, no write needed).
-pub async fn subject_added(Json(_body): Json<Value>) -> impl IntoResponse {
-    // In the Rust architecture, subject data is in the read-only archive.sqlite.
-    // This endpoint is called by the client to report which subjects appeared in a game;
-    // we acknowledge it without persisting (stats can be computed from archive.sqlite).
-    Json(json!({ "message": "acknowledged" }))
 }
 
 /// GET /api/leaderboard/characters?limit=30
@@ -227,38 +178,6 @@ pub async fn leaderboard_characters(
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
         let mut stmt = conn.prepare(
             "SELECT id, character_name, count FROM answer_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
-        )?;
-        let rows: Vec<Value> = stmt.query_map([limit], |row| {
-            let id = row.get::<_, i64>(0)?;
-            Ok(json!({
-                "_id": id,
-                "characterName": row.get::<_, String>(1)?,
-                "count": row.get::<_, i64>(2)?,
-                "image": format!("/img/{}.webp", id),
-            }))
-        })?.filter_map(Result::ok).collect();
-        Ok(rows)
-    }).await;
-
-    match result {
-        Ok(rows) => Json(rows).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /api/leaderboard/guesses?limit=30
-pub async fn leaderboard_guesses(
-    State(pools): State<Arc<DbPools>>,
-    Query(q): Query<LimitQuery>,
-) -> impl IntoResponse {
-    let limit = normalize_limit(q.limit);
-    let result = db::with_app_db(Arc::clone(&pools), move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, character_name, count FROM guess_count WHERE count > 0 ORDER BY count DESC LIMIT ?1",
         )?;
         let rows: Vec<Value> = stmt.query_map([limit], |row| {
             let id = row.get::<_, i64>(0)?;

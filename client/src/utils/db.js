@@ -18,16 +18,6 @@ export async function submitAnswerCharacterCount(characterId, characterName) {
   }
 }
 
-export async function getCharacterUsage(characterId) {
-  try {
-    const response = await axios.get(`${DB_SERVER_URL}/api/character-usage/${characterId}`);
-    return response.data.count;
-  } catch (error) {
-    console.error('Error fetching character usage:', error);
-    return 0;
-  }
-}
-
 export async function submitGuessCharacterCount(characterId, characterName) {
   try {
     const response = await axios.post(`${DB_SERVER_URL}/api/guess-character-count`, {
