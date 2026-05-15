@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Image from './Image';
+import Icon from './Icon';
 
 const attemptDisplay = {
   timeout: '⏱️',
@@ -56,7 +57,7 @@ const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnony
   };
 
   const getStatusDisplay = (player) => {
-    const host = <span><i className={`fas fa-crown`}></i>房主</span>
+    const host = <span><Icon name="crown" className="app-icon-inline" />房主</span>
     if (player.disconnected) {
       return renderStyledSpan('已断开','red');
     }
@@ -102,8 +103,18 @@ const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnony
     <span style={{ color }}>{text}</span>
   );
 
+  const canSelectAnswerSetter = (player) => (
+    isHost &&
+    isManualMode &&
+    !isGameStarted &&
+    !waitingForAnswer &&
+    !player.disconnected &&
+    player.team !== '0' &&
+    (player.isHost || player.ready)
+  );
+
   const handlePlayerClick = (player) => {
-    if (isHost && isManualMode && !isGameStarted && !waitingForAnswer) {
+    if (canSelectAnswerSetter(player)) {
       onSetAnswerSetter(player.id);
     }
   };
@@ -153,7 +164,7 @@ const PlayerList = ({ players, socket, isGameStarted, handleReadyToggle, onAnony
               key={player.id}
               onClick={() => handlePlayerClick(player)}
               style={{
-                cursor: isHost && isManualMode && !isGameStarted && !waitingForAnswer ? 'pointer' : 'default'
+                cursor: canSelectAnswerSetter(player) ? 'pointer' : 'default'
               }}
             >
               <td>

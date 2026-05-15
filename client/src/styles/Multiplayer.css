@@ -264,6 +264,25 @@
   background-color: #219a52;
 }
 
+.waiting-answer-controls {
+  flex-direction: row;
+  justify-content: center;
+  flex-wrap: wrap;
+  color: #475569;
+}
+
+.waiting-answer-message {
+  font-size: 0.95rem;
+}
+
+.cancel-wait-button {
+  background-color: #dc3545;
+}
+
+.cancel-wait-button:hover {
+  background-color: #bb2d3b;
+}
+
 .score-table {
   width: 100%;
   border-collapse: collapse;
@@ -830,6 +849,75 @@
   font-size: 0.8rem;
 }
 
+.answer-view-toolbar {
+  margin: 10px 0;
+  text-align: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.answer-view-button {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  background: #fff;
+  cursor: pointer;
+  color: inherit;
+}
+
+.answer-view-button.active {
+  background: #e0e0e0;
+}
+
+.guess-collapse-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.guess-collapse-toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  background-color: #e5e7eb;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.guess-collapse-toggle.active {
+  background-color: #3b82f6;
+}
+
+.guess-collapse-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background-color: white;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.guess-collapse-toggle.active .guess-collapse-thumb {
+  transform: translateX(20px);
+}
+
+.guess-collapse-label {
+  font-size: 14px;
+  color: #475569;
+}
+
+.detailed-guesses-panel {
+  margin-top: 12px;
+}
+
 .game-end-container {
   display: flex;
   gap: 2rem;
@@ -956,35 +1044,6 @@
 }
 
 .visibility-button:hover {
-  background-color: #e67e22;
-}
-
-.fa-angle-left {
-  width:30px;
-  height: 30px;
-  font-size: 24px;  /* 调大图标大小 */
-  color: white;
-  background: linear-gradient(135deg, #6e8efb, #a777e3);
-  padding: 16px 18px 16px 16px;  /* 调大内边距，使按钮更大 */
-  border-radius: 50%;
-  transition: all 0.3s ease;
-  cursor: pointer;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-
-  /* 固定在左上角 */
-  position: fixed;
-  top: 20px;
-  left: 20px;
-  z-index: 1000;  /* 确保按钮在最上层 */
-}
-
-.fa-angle-left:hover {
-  transform: scale(1.1);
-  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
-  background: linear-gradient(135deg, #a777e3, #6e8efb);
   background-color: #e67e22;
 }
 
@@ -1116,7 +1175,7 @@
   font-weight: 500;
 }
 
-.kick-notification i {
+.kick-notification .app-icon {
   font-size: 20px;
 }
 
@@ -1171,13 +1230,9 @@
   font-weight: 500;
 }
 
-.connection-status i {
+.connection-status .app-icon {
   /* 与 kick-notification 图标尺寸保持一致 */
   font-size: 20px;
-}
-
-.connection-status .fa-spin {
-  animation: fa-spin 1s infinite linear;
 }
 
 .confirm-dialog-backdrop {
@@ -1219,15 +1274,6 @@
 
 .danger-btn:hover {
   background-color: #bb2d3b;
-}
-
-@keyframes fa-spin {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
 }
 
 .player-avatar {
@@ -1294,7 +1340,7 @@
   color: #333;
 }
 
-.room-list-wrapper .room-players-count i {
+.room-list-wrapper .room-players-count .app-icon {
   margin-right: 0.5rem;
   color: #4a90e2;
 }

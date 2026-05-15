@@ -14,10 +14,17 @@ import GameSettingsDisplay from '../components/GameSettingsDisplay';
 import Leaderboard from '../components/Leaderboard';
 import Roulette from '../components/Roulette';
 import Image from '../components/Image';
+import Icon from '../components/Icon';
+import ConfirmDialog from '../components/multiplayer/ConfirmDialog';
+import ConnectionStatusBanner from '../components/multiplayer/ConnectionStatusBanner';
+import HostWaitingControls from '../components/multiplayer/HostWaitingControls';
+import MultiplayerLobby from '../components/multiplayer/MultiplayerLobby';
+import MultiplayerNotification from '../components/multiplayer/MultiplayerNotification';
 import useMultiplayerSocket from '../hooks/useMultiplayerSocket';
 import usePendingGuess from '../hooks/usePendingGuess';
 import useRoomLobby from '../hooks/useRoomLobby';
 import useRoundState from '../hooks/useRoundState';
+import useTimedNotification from '../hooks/useTimedNotification';
 import logCollector from '../utils/logCollector';
 import '../styles/Multiplayer.css';
 import '../styles/game.css';
@@ -139,7 +146,7 @@ const Multiplayer = () => {
   };
   const [username, setUsername] = useState(getSavedUsername);
   const [isJoined, setIsJoined] = useState(false);
-  const { socket, socketRef } = useMultiplayerSocket(SOCKET_URL);
+  const { socket, socketRef, maxReconnectAttempts } = useMultiplayerSocket(SOCKET_URL);
   const roomIdRef = useRef(roomId);
   const usernameRef = useRef(username);
   const isJoinedRef = useRef(isJoined);
@@ -227,7 +234,10 @@ const Multiplayer = () => {
   // 是否允许在本局游戏中显示 selected-answer（答案卡片）。
   // 该状态必须：每局开始时默认 false；仅在收到服务端“本客户端应显示答案”的信号后置为 true（出题人/旁观者/临时旁观者）；每局结束时重置。
   const [canShowSelectedAnswer, setCanShowSelectedAnswer] = useState(false);
-  const [kickNotification, setKickNotification] = useState(null);
+  const {
+    notification: kickNotification,
+    showNotification: showKickNotification
+  } = useTimedNotification(5000);
   const [answerViewMode, setAnswerViewMode] = useState('simple'); // 'simple' or 'detailed'
   const [isGuessTableCollapsed, setIsGuessTableCollapsed] = useState(false); // 折叠猜测表格（只显示最新3个）
   const [waitingForSync, setWaitingForSync] = useState(false); // 同步模式：等待其他玩家
@@ -237,8 +247,6 @@ const Multiplayer = () => {
   const [bannedSharedTags, setBannedSharedTags] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState('connected');
   const reconnectAttemptsRef = useRef(0);
-  const maxReconnectAttempts = 5;
-  const reconnectTimerRef = useRef(null);
   const isManualDisconnectRef = useRef(false);
   const isAutoReconnectingRef = useRef(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -484,11 +492,6 @@ const Multiplayer = () => {
       isAutoReconnectingRef.current = false;
       reconnectAttemptsRef.current = 0;
       
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-      
       if (isJoinedRef.current && roomIdRef.current && usernameRef.current) {
         newSocket.emit('joinRoom', getRoomJoinPayload(roomIdRef.current, usernameRef.current));
         newSocket.emit('requestGameSettings', { roomId: roomIdRef.current });
@@ -511,32 +514,33 @@ const Multiplayer = () => {
       isAutoReconnectingRef.current = true;
       
       if (reason === 'io server disconnect') {
-        newSocket.connect();
-      }
-      
-      if (!newSocket.connected && reconnectAttemptsRef.current < maxReconnectAttempts) {
-        reconnectAttemptsRef.current += 1;
-        const attempt = reconnectAttemptsRef.current;
-        
-        console.log(`[WebSocket] 尝试重连 (${attempt}/${maxReconnectAttempts})...`);
-        
-        reconnectTimerRef.current = setTimeout(() => {
-          if (!newSocket.connected && reconnectAttemptsRef.current <= maxReconnectAttempts) {
-            newSocket.connect();
-          }
-        }, 3000);
-      } else if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
         setConnectionStatus('failed');
         setIsGameStarting(false);
-        showKickNotification('连接已断开，多次重试失败，请刷新页面或稍后再试', 'error');
+        showKickNotification('连接被服务器断开，请刷新页面或稍后再试', 'error');
         setError('连接失败，请刷新页面重试');
       }
+    });
+
+    newSocket.io.on('reconnect_attempt', (attempt) => {
+      reconnectAttemptsRef.current = attempt;
+      isAutoReconnectingRef.current = true;
+      setConnectionStatus('reconnecting');
+      console.log(`[WebSocket] 尝试重连 (${attempt}/${maxReconnectAttempts})...`);
+    });
+
+    newSocket.io.on('reconnect_failed', () => {
+      reconnectAttemptsRef.current = maxReconnectAttempts;
+      isAutoReconnectingRef.current = false;
+      setConnectionStatus('failed');
+      setIsGameStarting(false);
+      showKickNotification('连接已断开，多次重试失败，请刷新页面或稍后再试', 'error');
+      setError('连接失败，请刷新页面重试');
     });
 
     newSocket.on('connect_error', (error) => {
       console.error('[WebSocket] 连接错误:', error);
       
-      if (!isManualDisconnectRef.current && reconnectAttemptsRef.current < maxReconnectAttempts) {
+      if (!isManualDisconnectRef.current) {
         setConnectionStatus('reconnecting');
       }
     });
@@ -867,11 +871,8 @@ const Multiplayer = () => {
     return () => {
       isManualDisconnectRef.current = true;
       
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-      
+      newSocket.io.off('reconnect_attempt');
+      newSocket.io.off('reconnect_failed');
       newSocket.off('playerKicked');
       newSocket.off('hostTransferred');
       newSocket.off('updatePlayers');
@@ -914,11 +915,13 @@ const Multiplayer = () => {
     gameSettingsRef,
     hasPendingGuess,
     latestPlayersRef,
+    maxReconnectAttempts,
     navigate,
     refreshRoomListIfVisible,
     rejectGuess,
     resolveGuess,
     setLatestPlayers,
+    showKickNotification,
     socket,
     socketRef
   ]);
@@ -1224,6 +1227,10 @@ const Multiplayer = () => {
     socketRef.current?.emit('setAnswerSetter', { roomId, setterId });
   };
 
+  const handleCancelWaitForAnswer = () => {
+    socketRef.current?.emit('cancelWaitForAnswer', { roomId });
+  };
+
   const handleVisibilityToggle = () => {
     socketRef.current?.emit('toggleRoomVisibility', { roomId });
   };
@@ -1338,14 +1345,6 @@ const Multiplayer = () => {
     navigate(`/multiplayer/${targetRoomId}`);
   };
 
-  // 创建一个函数显示踢出通知
-  const showKickNotification = (message, type = 'kick') => {
-    setKickNotification({ message, type });
-    setTimeout(() => {
-      setKickNotification(null);
-    }, 5000); // 5秒后自动关闭通知
-  };
-
   const requestConfirm = (message, onConfirm) => {
     setConfirmDialog({ message, onConfirm });
   };
@@ -1382,133 +1381,42 @@ const Multiplayer = () => {
 
   if (!roomId) {
     return (
-      <div className="multiplayer-container">
-        <div className="top-row">
-          <div className="room-info">
-            <h2>多人游戏大厅</h2>
-            <p>选择一个公开房间加入，或创建新房间。</p>
-          </div>
-        </div>
-
-        <div className="settings-and-players">
-          <div className="settings-panel">
-            <div className="settings-header">
-              <h3>加入或创建</h3>
-            </div>
-            <div className="form-row">
-              <label htmlFor="username">用户名</label>
-              <input
-                id="username"
-                type="text"
-                value={username}
-                onChange={e => setUsername(e.target.value)}
-                placeholder="请输入用户名"
-              />
-            </div>
-            <div className="button-group">
-              <button className="primary-btn" onClick={() => navigate('/multiplayer', { replace: true, state: { autoCreate: true } })}>
-                创建新房间
-              </button>
-              <button className="secondary-btn" onClick={handleQuickJoin}>
-                快速加入公开房间
-              </button>
-            </div>
-          </div>
-
-          <div className="player-list">
-            <div className="player-list-header">
-              <div>
-                <h3>公开房间 {roomList.length > 0 && `(${roomList.length})`}</h3>
-                <small>展开列表以刷新（每 5 秒自动刷新）</small>
-              </div>
-              <div className="button-group">
-                <button className="secondary-btn" onClick={() => { fetchRoomList(); setRoomListExpanded(true); }}>
-                  刷新
-                </button>
-              </div>
-            </div>
-
-            <RoomList
-              rooms={roomList}
-              loading={loadingRooms}
-              page={roomListPage}
-              roomsPerPage={ROOMS_PER_PAGE}
-              onPageChange={setRoomListPage}
-              onJoinRoom={handleJoinSpecificRoom}
-              variant="lobby"
-            />
-          </div>
-        </div>
-      </div>
+      <MultiplayerLobby
+        username={username}
+        onUsernameChange={setUsername}
+        onCreateRoom={() => navigate('/multiplayer', { replace: true, state: { autoCreate: true } })}
+        onQuickJoin={handleQuickJoin}
+        roomList={roomList}
+        loadingRooms={loadingRooms}
+        roomListPage={roomListPage}
+        roomsPerPage={ROOMS_PER_PAGE}
+        onRoomListPageChange={setRoomListPage}
+        onJoinRoom={handleJoinSpecificRoom}
+        onRefreshRooms={() => {
+          fetchRoomList();
+          setRoomListExpanded(true);
+        }}
+      />
     );
   }
 
   return (
     <div className="multiplayer-container">
-      {/* 连接状态指示器 */}
-      {isJoined && connectionStatus !== 'connected' && (
-        <div className={`connection-status ${connectionStatus}`}>
-          <div className="connection-status-content">
-            {connectionStatus === 'reconnecting' && (
-              <>
-                <i className="fas fa-sync fa-spin"></i>
-                <span>连接断开，正在重连... ({reconnectAttemptsRef.current}/{maxReconnectAttempts})</span>
-              </>
-            )}
-            {connectionStatus === 'failed' && (
-              <>
-                <i className="fas fa-exclamation-triangle"></i>
-                <span>连接失败，请刷新页面重试</span>
-              </>
-            )}
-            {connectionStatus === 'disconnected' && (
-              <>
-                {/* 与其它同类型提醒保持一致的图标样式 */}
-                <i className="fas fa-exclamation-circle"></i>
-                <span>连接已断开</span>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-      {/* 添加踢出通知 */}
-      {kickNotification && (
-        <div className={`kick-notification ${kickNotification.type ? `${kickNotification.type}-notification` : ''}`}>
-          <div className="kick-notification-content">
-            <i className={`fas ${kickNotification.type === 'host' ? 'fa-crown' : kickNotification.type === 'reconnect' ? 'fa-wifi' : kickNotification.type === 'warning' ? 'fa-exclamation-triangle' : 'fa-exclamation-circle'}`}></i>
-            <span>{kickNotification.message}</span>
-          </div>
-        </div>
-      )}
-      {confirmDialog && (
-        <div className="confirm-dialog-backdrop" role="presentation" onMouseDown={() => setConfirmDialog(null)}>
-          <div className="confirm-dialog" role="dialog" aria-modal="true" onMouseDown={event => event.stopPropagation()}>
-            <div className="confirm-dialog-message">{confirmDialog.message}</div>
-            <div className="confirm-dialog-actions">
-              <button className="secondary-btn" onClick={() => setConfirmDialog(null)}>
-                取消
-              </button>
-              <button
-                className="primary-btn danger-btn"
-                onClick={() => {
-                  const onConfirm = confirmDialog.onConfirm;
-                  setConfirmDialog(null);
-                  onConfirm?.();
-                }}
-              >
-                确定
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConnectionStatusBanner
+        isJoined={isJoined}
+        connectionStatus={connectionStatus}
+        reconnectAttempts={reconnectAttemptsRef.current}
+        maxReconnectAttempts={maxReconnectAttempts}
+      />
+      <MultiplayerNotification notification={kickNotification} />
+      <ConfirmDialog dialog={confirmDialog} onCancel={() => setConfirmDialog(null)} />
       <button
         type="button"
         className="social-link floating-back-button"
         title="Back"
         onClick={() => navigate('/')}
       >
-        &larr;
+        <Icon name="home" />
       </button>
       <button
         type="button"
@@ -1516,7 +1424,7 @@ const Multiplayer = () => {
         title="Bug/标签反馈"
         onClick={() => setShowFeedbackPopup(true)}
       >
-        📝
+        <Icon name="exclamationCircle" />
       </button>
       {!isJoined ? (
         <>
@@ -1650,6 +1558,9 @@ const Multiplayer = () => {
                     </div>
                   </div>
                 </div>
+              )}
+              {isHost && waitingForAnswer && (
+                <HostWaitingControls onCancel={handleCancelWaitForAnswer} />
               )}
               {!isHost && (
                 <>
@@ -1800,52 +1711,27 @@ const Multiplayer = () => {
                     </div>
                   )}
                   {/* Switch for 简单/详细 */}
-                  <div style={{ margin: '10px 0', textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
+                  <div className="answer-view-toolbar">
                     <button
-                      className={answerViewMode === 'simple' ? 'active' : ''}
-                      style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #ccc', background: answerViewMode === 'simple' ? '#e0e0e0' : '#fff', cursor: 'pointer', color: 'inherit' }}
+                      className={`answer-view-button ${answerViewMode === 'simple' ? 'active' : ''}`}
                       onClick={() => setAnswerViewMode('simple')}
                     >
                       {(isObserver && !isTeamObserver && !isAnswerSetter) ? '旁观' : '简单'}
                     </button>
                     <button
-                      className={answerViewMode === 'detailed' ? 'active' : ''}
-                      style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #ccc', background: answerViewMode === 'detailed' ? '#e0e0e0' : '#fff', cursor: 'pointer', color: 'inherit'}}
+                      className={`answer-view-button ${answerViewMode === 'detailed' ? 'active' : ''}`}
                       onClick={() => setAnswerViewMode('detailed')}
                     >
                       {(isObserver && !isTeamObserver && !isAnswerSetter) ? '我的' : '详细'}
                     </button>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px' }}>
+                    <div className="guess-collapse-control">
                       <div 
-                        className={`toggle-switch ${isGuessTableCollapsed ? 'active' : ''}`}
-                        style={{
-                          position: 'relative',
-                          width: '44px',
-                          height: '24px',
-                          borderRadius: '12px',
-                          backgroundColor: isGuessTableCollapsed ? '#3b82f6' : '#e5e7eb',
-                          cursor: 'pointer',
-                          transition: 'background-color 0.2s'
-                        }}
+                        className={`guess-collapse-toggle ${isGuessTableCollapsed ? 'active' : ''}`}
                         onClick={() => setIsGuessTableCollapsed(!isGuessTableCollapsed)}
                       >
-                        <div 
-                          className="toggle-thumb"
-                          style={{
-                            position: 'absolute',
-                            top: '2px',
-                            left: '2px',
-                            width: '20px',
-                            height: '20px',
-                            borderRadius: '50%',
-                            backgroundColor: 'white',
-                            transition: 'transform 0.2s',
-                            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-                            transform: isGuessTableCollapsed ? 'translateX(20px)' : 'translateX(0)'
-                          }}
-                        />
+                        <div className="guess-collapse-thumb" />
                       </div>
-                      <span style={{ fontSize: '14px', color: '#475569' }}>
+                      <span className="guess-collapse-label">
                         只显示最新3条
                       </span>
                     </div>
@@ -1895,7 +1781,7 @@ const Multiplayer = () => {
                       </table>
                     </div>
                   ) : (
-                    <div style={{ marginTop: 12 }}>
+                    <div className="detailed-guesses-panel">
                       <GuessesTable
                         guesses={guesses}
                         gameSettings={gameSettings}
@@ -2188,6 +2074,7 @@ const Multiplayer = () => {
           {showSetAnswerPopup && (
             <SetAnswerPopup
               onSetAnswer={handleSetAnswer}
+              onCancel={handleCancelWaitForAnswer}
               gameSettings={gameSettings}
             />
           )}

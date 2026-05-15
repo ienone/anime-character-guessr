@@ -1,3 +1,5 @@
+import Icon from './Icon';
+
 function getRoomTitle(room) {
   if (room.displayRoomName) return room.displayRoomName;
   if (room.roomName) return room.roomName;
@@ -79,7 +81,7 @@ function RoomList({
             <div key={room.id} className="leaderboard-list-item room-item">
               <div className="room-info">
                 <span className="room-players-count">
-                  <i className="fas fa-users"></i> {getRoomTitle(room)} {room.playerCount}人
+                  <Icon name="users" className="app-icon-inline" />{getRoomTitle(room)} {room.playerCount}人
                   {room.isGameStarted && <span className="room-status-badge">游戏中</span>}
                 </span>
                 <span className="room-players-names">

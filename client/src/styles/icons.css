@@ -1,0 +1,29 @@
+.app-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  vertical-align: -0.15em;
+}
+
+.app-icon-inline {
+  margin-right: 8px;
+}
+
+.app-icon-spin {
+  animation: app-icon-spin 1s infinite linear;
+}
+
+.app-icon-text {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+@keyframes app-icon-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}

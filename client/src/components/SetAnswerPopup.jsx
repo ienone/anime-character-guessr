@@ -4,8 +4,9 @@ import Image from './Image';
 import '../styles/SetAnswerPopup.css';
 import { designateCharacter } from '../utils/bangumi';
 import { submitAnswerCharacterCount } from '../utils/db';
+import { notify } from '../utils/notifications';
 
-const SetAnswerPopup = ({ onSetAnswer, gameSettings }) => {
+const SetAnswerPopup = ({ onSetAnswer, onCancel, gameSettings }) => {
   const [selectedCharacter, setSelectedCharacter] = useState(null);
   const [hints, setHints] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -38,7 +39,7 @@ const SetAnswerPopup = ({ onSetAnswer, gameSettings }) => {
         });
       } catch (error) {
         console.error('Failed to get character details:', error);
-        alert('获取角色详情失败，请重试');
+        notify('获取角色详情失败，请重试', 'error');
       } finally {
         setIsSubmitting(false);
       }
@@ -81,13 +82,24 @@ const SetAnswerPopup = ({ onSetAnswer, gameSettings }) => {
             </div>
           ))}
         </div>
-        <button
-          onClick={handleSubmit}
-          className="submit-button"
-          disabled={!selectedCharacter || isSubmitting}
-        >
-          {isSubmitting ? '提交中...' : '确认'}
-        </button>
+        <div className="set-answer-actions">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="cancel-button"
+            disabled={isSubmitting}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={handleSubmit}
+            className="submit-button"
+            disabled={!selectedCharacter || isSubmitting}
+          >
+            {isSubmitting ? '提交中...' : '确认'}
+          </button>
+        </div>
       </div>
     </div>
   );
