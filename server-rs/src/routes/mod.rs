@@ -4,7 +4,7 @@ use axum::http::{StatusCode, header};
 use axum::response::Redirect;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -22,6 +22,7 @@ pub mod rooms;
 pub mod roulette;
 pub mod stats;
 pub mod tags;
+pub mod write_guard;
 
 // ─── Route Builders ───────────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ pub fn api_routes(pools: Arc<DbPools>) -> Router {
         .route("/propose-tags", post(tags::propose_tags))
         .route("/feedback-tags", post(tags::feedback_tags))
         .route("/bug-feedback", post(tags::bug_feedback))
+        .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state(pools)
 }
 

@@ -1,7 +1,6 @@
 import '../styles/popups.css';
 import subaruIcon from '/assets/subaru.jpg';
 import { useEffect, useState } from 'react';
-import TagContributionPopup from './TagContributionPopup';
 import { loadIdToTags } from '../utils/idTagsLoader';
 import Image from './Image';
 import Icon from './Icon';
@@ -102,7 +101,6 @@ function renderSummaryWithTags(summary) {
 }
 
 function GameEndPopup({ result, answer, onClose }) {
-  const [showTagPopup, setShowTagPopup] = useState(false);
   const [answerTags, setAnswerTags] = useState([]);
 
   useEffect(() => {
@@ -126,18 +124,6 @@ function GameEndPopup({ result, answer, onClose }) {
       active = false;
     };
   }, [answer?.id]);
-
-  if (showTagPopup) {
-    return (
-      <TagContributionPopup
-        character={answer}
-        onClose={() => {
-          setShowTagPopup(false);
-          onClose();
-        }}
-      />
-    );
-  }
 
   return (
     <div className="popup-overlay">
@@ -168,12 +154,6 @@ function GameEndPopup({ result, answer, onClose }) {
                 </a>
                 <div className="button-container">
                   <div className="button-group-vertical">
-                    <button
-                      className="contribute-tag-btn"
-                      onClick={() => setShowTagPopup(true)}
-                    >
-                      贡献标签
-                    </button>
                     <button
                       className="contribute-tag-btn"
                       onClick={() => window.open('https://github.com/kennylimz/anime-character-guessr/issues/new', '_blank', 'noopener,noreferrer')}

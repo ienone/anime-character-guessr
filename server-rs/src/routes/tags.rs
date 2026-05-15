@@ -2,12 +2,23 @@ use crate::db::{self, DbPools};
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+use super::write_guard::{
+    enforce_public_write_limit, reject, truncate_chars, validate_chars, validate_json_object,
+};
+
+const TAG_WRITE_LIMIT_PER_MINUTE: usize = 30;
+const BUG_FEEDBACK_LIMIT_PER_MINUTE: usize = 6;
+const MAX_TAG_KEYS: usize = 128;
+const MAX_TAG_CHARS: usize = 48;
+const MAX_BUG_DESCRIPTION_CHARS: usize = 4_000;
+const MAX_BUG_BLOB_CHARS: usize = 60_000;
 
 /// GET /api/character-tags/:id
 pub async fn get_character_tags(
@@ -45,8 +56,15 @@ pub async fn get_character_tags(
 /// POST /api/character-tags
 pub async fn update_character_tags(
     State(pools): State<Arc<DbPools>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) =
+        enforce_public_write_limit(&headers, "character-tags", TAG_WRITE_LIMIT_PER_MINUTE)
+    {
+        return response.into_response();
+    }
+
     let id = match body.get("_id").and_then(|v| v.as_i64()) {
         Some(i) => i,
         None => {
@@ -58,6 +76,9 @@ pub async fn update_character_tags(
         }
     };
     let tags = body.get("tagCounts").cloned().unwrap_or(json!({}));
+    if let Err(response) = validate_json_object(&tags, "tagCounts", MAX_TAG_KEYS, MAX_TAG_CHARS) {
+        return response.into_response();
+    }
     let tags_str = tags.to_string();
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -116,8 +137,15 @@ pub async fn get_game_character_tags(
 /// POST /api/game-character-tags
 pub async fn update_game_character_tags(
     State(pools): State<Arc<DbPools>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) =
+        enforce_public_write_limit(&headers, "game-character-tags", TAG_WRITE_LIMIT_PER_MINUTE)
+    {
+        return response.into_response();
+    }
+
     let subject_id = match body.get("subjectId").and_then(|v| v.as_i64()) {
         Some(i) => i,
         None => {
@@ -129,6 +157,11 @@ pub async fn update_game_character_tags(
         }
     };
     let characters = body.get("characters").cloned().unwrap_or(json!({}));
+    if let Err(response) =
+        validate_json_object(&characters, "characters", MAX_TAG_KEYS, MAX_TAG_CHARS)
+    {
+        return response.into_response();
+    }
     let characters_str = characters.to_string();
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -154,8 +187,15 @@ pub async fn update_game_character_tags(
 /// POST /api/propose-tags
 pub async fn propose_tags(
     State(pools): State<Arc<DbPools>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) =
+        enforce_public_write_limit(&headers, "propose-tags", TAG_WRITE_LIMIT_PER_MINUTE)
+    {
+        return response.into_response();
+    }
+
     let id = match body.get("_id").and_then(|v| v.as_i64()) {
         Some(i) => i,
         None => {
@@ -167,6 +207,9 @@ pub async fn propose_tags(
         }
     };
     let tags = body.get("tagCounts").cloned().unwrap_or(json!({}));
+    if let Err(response) = validate_json_object(&tags, "tagCounts", MAX_TAG_KEYS, MAX_TAG_CHARS) {
+        return response.into_response();
+    }
     let tags_str = tags.to_string();
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -194,8 +237,15 @@ pub async fn propose_tags(
 /// POST /api/feedback-tags
 pub async fn feedback_tags(
     State(pools): State<Arc<DbPools>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) =
+        enforce_public_write_limit(&headers, "feedback-tags", TAG_WRITE_LIMIT_PER_MINUTE)
+    {
+        return response.into_response();
+    }
+
     let id = match body.get("characterId").and_then(|v| v.as_i64()) {
         Some(i) => i,
         None => {
@@ -207,6 +257,11 @@ pub async fn feedback_tags(
         }
     };
     let update_action = body.get("update").cloned().unwrap_or(json!({}));
+    if let Err(response) =
+        validate_json_object(&update_action, "update", MAX_TAG_KEYS, MAX_TAG_CHARS)
+    {
+        return response.into_response();
+    }
     // We would need to update specific tag counts in JSON here.
     // For MVP, we fetch existing, modify in Rust, and save back.
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
@@ -260,28 +315,57 @@ pub async fn feedback_tags(
 /// POST /api/bug-feedback
 pub async fn bug_feedback(
     State(pools): State<Arc<DbPools>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) =
+        enforce_public_write_limit(&headers, "bug-feedback", BUG_FEEDBACK_LIMIT_PER_MINUTE)
+    {
+        return response.into_response();
+    }
+
     let bug_type = body
         .get("type")
         .or_else(|| body.get("bugType"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
-        .to_string();
+        .trim();
+    if let Err(response) = validate_chars(bug_type, "bugType", 64) {
+        return response.into_response();
+    }
+    let bug_type = bug_type.to_string();
+
     let description = body
         .get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string();
-    let logs = body.get("logs").map(|v| v.to_string()).unwrap_or_default();
-    let errors = body
-        .get("errors")
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let diagnostic_data = body
-        .get("diagnosticData")
-        .map(|v| v.to_string())
-        .unwrap_or_default();
+        .trim();
+    if description.is_empty() {
+        return reject(StatusCode::BAD_REQUEST, "description is required");
+    }
+    if let Err(response) = validate_chars(description, "description", MAX_BUG_DESCRIPTION_CHARS) {
+        return response.into_response();
+    }
+    let description = description.to_string();
+
+    let logs = truncate_chars(
+        &body.get("logs").map(|v| v.to_string()).unwrap_or_default(),
+        MAX_BUG_BLOB_CHARS,
+    );
+    let errors = truncate_chars(
+        &body
+            .get("errors")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        MAX_BUG_BLOB_CHARS,
+    );
+    let diagnostic_data = truncate_chars(
+        &body
+            .get("diagnosticData")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        MAX_BUG_BLOB_CHARS,
+    );
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
         conn.execute(

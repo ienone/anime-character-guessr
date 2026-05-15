@@ -18,6 +18,7 @@ const SettingsPopup = lazy(() => import('../components/SettingsPopup'));
 const HelpPopup = lazy(() => import('../components/HelpPopup'));
 const GameEndPopup = lazy(() => import('../components/GameEndPopup'));
 const FeedbackPopup = lazy(() => import('../components/FeedbackPopup'));
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '');
 
 function SinglePlayer() {
   const [guesses, setGuesses] = useState([]);
@@ -78,7 +79,7 @@ function SinglePlayer() {
       setUseImageHint(0);
       try {
         if (Array.isArray(gameSettings.addedSubjects) && gameSettings.addedSubjects.length > 0) {
-          await axios.post(import.meta.env.VITE_SERVER_URL + '/api/subject-added', {
+          await axios.post(`${SERVER_URL}/api/subject-added`, {
             addedSubjects: gameSettings.addedSubjects
           });
         }
@@ -180,7 +181,6 @@ function SinglePlayer() {
         }]);
 
         setGameEnd(true);
-        notify('熟悉这个角色吗？欢迎贡献标签', 'success');
         setGameEndPopup({
           result: 'win',
           answer: answerCharacter
@@ -214,7 +214,6 @@ function SinglePlayer() {
         }]);
 
         setGameEnd(true);
-        notify('认识这个角色吗？欢迎贡献标签');
         setGameEndPopup({
           result: 'lose',
           answer: answerCharacter
@@ -294,7 +293,7 @@ function SinglePlayer() {
 
       try {
         if (Array.isArray(gameSettings.addedSubjects) && gameSettings.addedSubjects.length > 0) {
-          await axios.post(import.meta.env.VITE_SERVER_URL + '/api/subject-added', {
+          await axios.post(`${SERVER_URL}/api/subject-added`, {
             addedSubjects: gameSettings.addedSubjects
           });
         }
@@ -381,8 +380,7 @@ function SinglePlayer() {
       payload.diagnosticData = logCollector.getDiagnosticData();
     }
 
-    const serverUrl = import.meta.env.VITE_SERVER_URL || '';
-    await axios.post(`${serverUrl}/api/bug-feedback`, payload);
+    await axios.post(`${SERVER_URL}/api/bug-feedback`, payload);
   };
 
   return (

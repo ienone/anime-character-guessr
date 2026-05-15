@@ -2,12 +2,17 @@ use crate::db::{self, DbPools};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+use super::write_guard::{enforce_public_write_limit, reject, truncate_chars};
+
+const STATS_WRITE_LIMIT_PER_MINUTE: usize = 120;
+const MAX_CHARACTER_NAME_CHARS: usize = 128;
 
 #[derive(Deserialize)]
 pub struct LimitQuery {
@@ -18,10 +23,19 @@ pub struct LimitQuery {
 /// Increments the count of times a character has been used as an answer.
 pub async fn answer_character_count(
     State(pools): State<Arc<DbPools>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) = enforce_public_write_limit(
+        &headers,
+        "answer-character-count",
+        STATS_WRITE_LIMIT_PER_MINUTE,
+    ) {
+        return response.into_response();
+    }
+
     let char_id = match body.get("characterId").and_then(|v| v.as_i64()) {
-        Some(id) => id,
+        Some(id) if id > 0 => id,
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -29,6 +43,7 @@ pub async fn answer_character_count(
             )
                 .into_response();
         }
+        _ => return reject(StatusCode::BAD_REQUEST, "characterId must be positive"),
     };
     let char_name = body
         .get("characterName")
@@ -36,6 +51,7 @@ pub async fn answer_character_count(
         .unwrap_or("")
         .trim()
         .to_string();
+    let char_name = truncate_chars(&char_name, MAX_CHARACTER_NAME_CHARS);
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
         conn.execute(
@@ -59,10 +75,19 @@ pub async fn answer_character_count(
 /// Increments guess_count and weekly_count for a character.
 pub async fn guess_character_count(
     State(pools): State<Arc<DbPools>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(response) = enforce_public_write_limit(
+        &headers,
+        "guess-character-count",
+        STATS_WRITE_LIMIT_PER_MINUTE,
+    ) {
+        return response.into_response();
+    }
+
     let char_id = match body.get("characterId").and_then(|v| v.as_i64()) {
-        Some(id) => id,
+        Some(id) if id > 0 => id,
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -70,6 +95,7 @@ pub async fn guess_character_count(
             )
                 .into_response();
         }
+        _ => return reject(StatusCode::BAD_REQUEST, "characterId must be positive"),
     };
     let char_name = body
         .get("characterName")
@@ -77,6 +103,7 @@ pub async fn guess_character_count(
         .unwrap_or("")
         .trim()
         .to_string();
+    let char_name = truncate_chars(&char_name, MAX_CHARACTER_NAME_CHARS);
 
     let result = db::with_app_db(Arc::clone(&pools), move |conn| {
         conn.execute(
