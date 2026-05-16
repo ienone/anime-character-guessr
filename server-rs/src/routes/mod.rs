@@ -384,6 +384,10 @@ fn spawn_image_cache_fill(
     cache_key: String,
 ) {
     tokio::spawn(async move {
+        if cached_image_exists(&pools, &cache_key).await {
+            return;
+        }
+
         let Some((image_medium, image_grid)) =
             ensure_image_source_cached_for_kind(&pools, kind, id).await
         else {
@@ -396,6 +400,25 @@ fn spawn_image_cache_fill(
 
         utils::download_and_cache_image(cache_key, source_url, pools).await;
     });
+}
+
+/// Fire-and-forget warmup for answer reveal / image-hint medium images.
+///
+/// This runs entirely server-side so multiplayer clients do not learn the
+/// answer id before the normal reveal path.
+pub fn warm_character_medium_image_cache(pools: Arc<DbPools>, id: i64) {
+    if id <= 0 {
+        return;
+    }
+
+    let cache_key = image_cache_key(ImageKind::Character, ImageVariant::Medium, id);
+    spawn_image_cache_fill(
+        pools,
+        ImageKind::Character,
+        ImageVariant::Medium,
+        id,
+        cache_key,
+    );
 }
 
 async fn serve_cached_image(
@@ -595,6 +618,8 @@ async fn get_random_character(
 
     match result {
         Ok((char_id, mut payload)) => {
+            warm_character_medium_image_cache(Arc::clone(&pools), char_id);
+
             if let Some(vas) = load_cached_vas(&pools, char_id).await
                 && let Value::Object(ref mut obj) = payload
             {
@@ -670,6 +695,10 @@ async fn get_character_by_id(
 
     match result {
         Ok(mut payload) => {
+            if stats_purpose == "answer" {
+                warm_character_medium_image_cache(Arc::clone(&pools), char_id);
+            }
+
             if let Some(vas) = load_cached_vas(&pools, char_id).await
                 && let Value::Object(ref mut obj) = payload
             {

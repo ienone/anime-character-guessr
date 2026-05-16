@@ -2326,6 +2326,10 @@ fn register_room_handlers(
                         broadcast_lobby_rooms_updated(&io_clone);
                         let stats_pools = Arc::clone(&pools);
                         let (char_id, char_name) = answer_stats;
+                        crate::routes::warm_character_medium_image_cache(
+                            Arc::clone(&pools),
+                            char_id,
+                        );
                         tokio::spawn(async move {
                             stats::record_answer_character_count(stats_pools, char_id, char_name)
                                 .await;
@@ -2514,6 +2518,10 @@ fn register_room_handlers(
                     Some(Ok(())) => {
                         let stats_pools = Arc::clone(&pools);
                         let (char_id, char_name) = answer_stats;
+                        crate::routes::warm_character_medium_image_cache(
+                            Arc::clone(&pools),
+                            char_id,
+                        );
                         tokio::spawn(async move {
                             stats::record_answer_character_count(stats_pools, char_id, char_name)
                                 .await;
