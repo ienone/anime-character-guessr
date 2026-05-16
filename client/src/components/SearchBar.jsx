@@ -436,7 +436,6 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         alt={alt}
         className="result-character-icon"
         fallbackSrc=""
-        cachedOnly
         maxRetries={3}
         retryDelay={700}
         onLoadError={() => markImageFailed(key)}

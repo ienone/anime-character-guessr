@@ -54,7 +54,7 @@ const SetAnswerPopup = ({ onSetAnswer, onCancel, gameSettings }) => {
         </div>
         {selectedCharacter && (
           <div className="selected-character">
-            <Image src={selectedCharacter.image} preferSource alt={selectedCharacter.name} />
+            <Image src={selectedCharacter.image} alt={selectedCharacter.name} />
             <div className="character-info">
               <div>{selectedCharacter.name}</div>
               <div>{selectedCharacter.nameCn}</div>

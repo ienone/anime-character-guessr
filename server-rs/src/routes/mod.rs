@@ -10,7 +10,7 @@ use axum::{
 use dashmap::DashMap;
 use serde_json::{Value, json};
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{Semaphore, broadcast};
 use tracing::warn;
@@ -107,6 +107,9 @@ lazy_static::lazy_static! {
 }
 
 const IMAGE_SOURCE_PERMIT_TIMEOUT: Duration = Duration::from_millis(500);
+const IMAGE_RESOLVE_DEFAULT_WAIT_MS: u64 = 900;
+const IMAGE_RESOLVE_MAX_WAIT_MS: u64 = 5_000;
+const IMAGE_SOURCE_FALLBACK_WAIT_MS: u64 = 500;
 const BGM_PROXY_LIMIT_PER_MINUTE: usize = 90;
 const IMAGE_RESOLVE_LIMIT_PER_MINUTE: usize = 180;
 const GAME_RANDOM_LIMIT_PER_MINUTE: usize = 60;
@@ -148,7 +151,9 @@ pub fn image_routes(pools: Arc<DbPools>) -> Router {
     Router::new()
         // Subject route MUST be registered before the character catch-all so
         // `/img/subject/{id}` is not swallowed by `/img/{id}`.
+        .route("/subject/medium/{id}", get(get_subject_medium_image))
         .route("/subject/{id}", get(get_subject_image))
+        .route("/medium/{id}", get(get_character_medium_image))
         .route("/{id}", get(get_character_image))
         .with_state(pools)
 }
@@ -194,19 +199,243 @@ async fn archive_subject_exists(pools: &Arc<DbPools>, id: i64) -> bool {
     .unwrap_or(false)
 }
 
-/// GET /api/img/resolve/:id
-///
-/// JSON helper used by the client Image component:
-/// - If cached: returns `{ cached: true, imgUrl: "/img/{id}.webp" }`
-/// - If not cached: starts source resolution in the background and returns HTTP
-///   202 immediately. External image providers must not hold this request open.
-async fn resolve_character_image(
-    State(pools): State<Arc<DbPools>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+#[derive(Clone, Copy)]
+enum ImageKind {
+    Character,
+    Subject,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImageVariant {
+    Grid,
+    Medium,
+}
+
+impl ImageVariant {
+    fn from_query(q: &HashMap<String, String>) -> Self {
+        match q.get("variant").map(|v| v.as_str()) {
+            Some("medium") => Self::Medium,
+            _ => Self::Grid,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::Medium => "medium",
+        }
+    }
+}
+
+fn image_cache_key(kind: ImageKind, variant: ImageVariant, id: i64) -> String {
+    match (kind, variant) {
+        (ImageKind::Character, ImageVariant::Grid) => id.to_string(),
+        (ImageKind::Character, ImageVariant::Medium) => format!("m:{id}"),
+        (ImageKind::Subject, ImageVariant::Grid) => format!("s:{id}"),
+        (ImageKind::Subject, ImageVariant::Medium) => format!("sm:{id}"),
+    }
+}
+
+fn image_proxy_url(kind: ImageKind, variant: ImageVariant, id: i64) -> String {
+    match (kind, variant) {
+        (ImageKind::Character, ImageVariant::Grid) => format!("/img/{id}.webp"),
+        (ImageKind::Character, ImageVariant::Medium) => format!("/img/medium/{id}.webp"),
+        (ImageKind::Subject, ImageVariant::Grid) => format!("/img/subject/{id}.webp"),
+        (ImageKind::Subject, ImageVariant::Medium) => format!("/img/subject/medium/{id}.webp"),
+    }
+}
+
+fn choose_image_source(
+    image_medium: String,
+    image_grid: String,
+    variant: ImageVariant,
+) -> Option<String> {
+    let medium = image_medium.trim();
+    let grid = image_grid.trim();
+    match variant {
+        ImageVariant::Grid => {
+            if !grid.is_empty() {
+                Some(grid.to_string())
+            } else if !medium.is_empty() {
+                Some(medium.to_string())
+            } else {
+                None
+            }
+        }
+        ImageVariant::Medium => {
+            if !medium.is_empty() {
+                Some(medium.to_string())
+            } else if !grid.is_empty() {
+                Some(grid.to_string())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+async fn load_cached_image_path(pools: &Arc<DbPools>, cache_key: String) -> Option<String> {
+    db::with_app_db(Arc::clone(pools), move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT local_path FROM image_cache WHERE id = ?1",
+                [cache_key],
+                |row| row.get::<_, String>(0),
+            )
+            .ok())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn cached_image_exists(pools: &Arc<DbPools>, cache_key: &str) -> bool {
+    match load_cached_image_path(pools, cache_key.to_string()).await {
+        Some(path) => tokio::fs::metadata(path).await.is_ok(),
+        None => false,
+    }
+}
+
+async fn wait_for_cached_image(pools: &Arc<DbPools>, cache_key: &str, wait_ms: u64) -> bool {
+    if wait_ms == 0 {
+        return cached_image_exists(pools, cache_key).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        if cached_image_exists(pools, cache_key).await {
+            return true;
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
+    }
+}
+
+async fn load_cached_image_source_for_kind(
+    pools: &Arc<DbPools>,
+    kind: ImageKind,
+    id: i64,
+) -> Option<(String, String)> {
+    match kind {
+        ImageKind::Character => load_cached_image_source(pools, id).await,
+        ImageKind::Subject => load_cached_subject_image_source(pools, id).await,
+    }
+}
+
+async fn ensure_image_source_cached_for_kind(
+    pools: &Arc<DbPools>,
+    kind: ImageKind,
+    id: i64,
+) -> Option<(String, String)> {
+    match kind {
+        ImageKind::Character => ensure_image_source_cached(pools, id).await,
+        ImageKind::Subject => ensure_subject_image_source_cached(pools, id).await,
+    }
+}
+
+async fn load_cached_source_url(
+    pools: &Arc<DbPools>,
+    kind: ImageKind,
+    variant: ImageVariant,
+    id: i64,
+) -> Option<String> {
+    let (medium, grid) = load_cached_image_source_for_kind(pools, kind, id).await?;
+    choose_image_source(medium, grid, variant)
+}
+
+async fn wait_for_cached_source_url(
+    pools: &Arc<DbPools>,
+    kind: ImageKind,
+    variant: ImageVariant,
+    id: i64,
+    wait_ms: u64,
+) -> Option<String> {
+    if wait_ms == 0 {
+        return load_cached_source_url(pools, kind, variant, id).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        if let Some(url) = load_cached_source_url(pools, kind, variant, id).await {
+            return Some(url);
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
+    }
+}
+
+fn spawn_image_cache_fill(
+    pools: Arc<DbPools>,
+    kind: ImageKind,
+    variant: ImageVariant,
+    id: i64,
+    cache_key: String,
+) {
+    tokio::spawn(async move {
+        let Some((image_medium, image_grid)) =
+            ensure_image_source_cached_for_kind(&pools, kind, id).await
+        else {
+            return;
+        };
+
+        let Some(source_url) = choose_image_source(image_medium, image_grid, variant) else {
+            return;
+        };
+
+        utils::download_and_cache_image(cache_key, source_url, pools).await;
+    });
+}
+
+async fn serve_cached_image(
+    pools: Arc<DbPools>,
+    id_str: String,
+    kind: ImageKind,
+    variant: ImageVariant,
+) -> Response {
+    let id: i64 = id_str.split('.').next().unwrap_or("0").parse().unwrap_or(0);
+
+    if id == 0 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let cache_key = image_cache_key(kind, variant, id);
+    let local_path = load_cached_image_path(&pools, cache_key).await;
+
+    if let Some(path) = local_path
+        && let Ok(content) = tokio::fs::read(&path).await
+    {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+        headers.insert(
+            header::CACHE_CONTROL,
+            "public, max-age=31536000".parse().unwrap(),
+        );
+        return (headers, content).into_response();
+    }
+
+    StatusCode::NOT_FOUND.into_response()
+}
+
+async fn resolve_image(
+    pools: Arc<DbPools>,
+    peer_addr: SocketAddr,
     headers: HeaderMap,
-    Path(id): Path<i64>,
-    AxumQuery(q): AxumQuery<HashMap<String, String>>,
-) -> impl IntoResponse {
+    id: i64,
+    q: HashMap<String, String>,
+    kind: ImageKind,
+) -> Response {
     if id <= 0 {
         return (
             StatusCode::BAD_REQUEST,
@@ -215,74 +444,96 @@ async fn resolve_character_image(
             .into_response();
     }
 
-    let cached_only = q
-        .get("cachedOnly")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
+    let variant = ImageVariant::from_query(&q);
+    let cache_key = image_cache_key(kind, variant, id);
+    let img_url = image_proxy_url(kind, variant, id);
 
-    // 1) If cached already, answer immediately.
-    let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT local_path FROM image_cache WHERE id = ?1",
-                [id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .ok())
-    })
-    .await
-    {
-        Ok(Some(path)) => tokio::fs::metadata(path).await.is_ok(),
-        _ => false,
-    };
-
-    let img_url = format!("/img/{}.webp", id);
-    if cached {
+    if cached_image_exists(&pools, &cache_key).await {
         return Json(json!({
             "cached": true,
+            "variant": variant.as_str(),
             "imgUrl": img_url,
         }))
         .into_response();
     }
+
+    let cached_only = q
+        .get("cachedOnly")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
     if cached_only {
         return (
             StatusCode::ACCEPTED,
             Json(json!({
                 "cached": false,
                 "code": "CACHE_MISS",
+                "variant": variant.as_str(),
                 "imgUrl": img_url,
             })),
         )
             .into_response();
     }
+
     if let Some(rejection) = image_resolve_limit_rejection(&headers, peer_addr) {
         return rejection.into_response();
     }
 
-    let pools_clone = Arc::clone(&pools);
-    tokio::spawn(async move {
-        if let Some((image_medium, image_grid)) = ensure_image_source_cached(&pools_clone, id).await
-        {
-            let source_url = if !image_grid.trim().is_empty() {
-                image_grid
-            } else {
-                image_medium
-            };
-            if !source_url.trim().is_empty() {
-                utils::download_and_cache_image(id.to_string(), source_url, pools_clone).await;
-            }
-        }
-    });
+    let wait_ms = q
+        .get("waitMs")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(IMAGE_RESOLVE_DEFAULT_WAIT_MS)
+        .min(IMAGE_RESOLVE_MAX_WAIT_MS);
+    let allow_source_fallback = q
+        .get("fallback")
+        .map(|v| v != "none" && v != "local")
+        .unwrap_or(true);
 
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "cached": false,
-            "code": "SOURCE_PENDING",
+    spawn_image_cache_fill(Arc::clone(&pools), kind, variant, id, cache_key.clone());
+
+    if wait_for_cached_image(&pools, &cache_key, wait_ms).await {
+        return Json(json!({
+            "cached": true,
+            "variant": variant.as_str(),
             "imgUrl": img_url,
-        })),
-    )
-        .into_response()
+        }))
+        .into_response();
+    }
+
+    let source_url = if allow_source_fallback {
+        wait_for_cached_source_url(&pools, kind, variant, id, IMAGE_SOURCE_FALLBACK_WAIT_MS).await
+    } else {
+        None
+    };
+
+    let mut body = json!({
+        "cached": false,
+        "code": if source_url.is_some() { "TIMEOUT" } else { "SOURCE_PENDING" },
+        "variant": variant.as_str(),
+        "imgUrl": img_url,
+    });
+    if let Some(url) = source_url
+        && let Value::Object(ref mut obj) = body
+    {
+        obj.insert("sourceUrl".to_string(), Value::String(url));
+    }
+
+    (StatusCode::ACCEPTED, Json(body)).into_response()
+}
+
+/// GET /api/img/resolve/:id
+///
+/// JSON helper used by the client Image component:
+/// - If cached: returns `{ cached: true, imgUrl: "/img/{id}.webp" }`
+/// - If not cached: starts/joins source resolution and local WebP fill, waits
+///   briefly, then returns either the warmed proxy URL or an upstream fallback.
+async fn resolve_character_image(
+    State(pools): State<Arc<DbPools>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    AxumQuery(q): AxumQuery<HashMap<String, String>>,
+) -> impl IntoResponse {
+    resolve_image(pools, peer_addr, headers, id, q, ImageKind::Character).await
 }
 
 /// GET /api/img/resolve/subject/:id
@@ -295,84 +546,7 @@ async fn resolve_subject_image(
     Path(id): Path<i64>,
     AxumQuery(q): AxumQuery<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if id <= 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "id must be positive" })),
-        )
-            .into_response();
-    }
-
-    let cached_only = q
-        .get("cachedOnly")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
-
-    let cache_key = format!("s:{}", id);
-    let cached_key = cache_key.clone();
-    let cached = match db::with_app_db(Arc::clone(&pools), move |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT local_path FROM image_cache WHERE id = ?1",
-                [cached_key],
-                |row| row.get::<_, String>(0),
-            )
-            .ok())
-    })
-    .await
-    {
-        Ok(Some(path)) => tokio::fs::metadata(path).await.is_ok(),
-        _ => false,
-    };
-
-    let img_url = format!("/img/subject/{}.webp", id);
-    if cached {
-        return Json(json!({
-            "cached": true,
-            "imgUrl": img_url,
-        }))
-        .into_response();
-    }
-    if cached_only {
-        return (
-            StatusCode::ACCEPTED,
-            Json(json!({
-                "cached": false,
-                "code": "CACHE_MISS",
-                "imgUrl": img_url,
-            })),
-        )
-            .into_response();
-    }
-    if let Some(rejection) = image_resolve_limit_rejection(&headers, peer_addr) {
-        return rejection.into_response();
-    }
-
-    let pools_clone = Arc::clone(&pools);
-    tokio::spawn(async move {
-        if let Some((image_medium, image_grid)) =
-            ensure_subject_image_source_cached(&pools_clone, id).await
-        {
-            let source_url = if !image_grid.trim().is_empty() {
-                image_grid
-            } else {
-                image_medium
-            };
-            if !source_url.trim().is_empty() {
-                utils::download_and_cache_image(cache_key, source_url, pools_clone).await;
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "cached": false,
-            "code": "SOURCE_PENDING",
-            "imgUrl": img_url,
-        })),
-    )
-        .into_response()
+    resolve_image(pools, peer_addr, headers, id, q, ImageKind::Subject).await
 }
 
 fn character_name_for_stats(payload: &Value) -> String {
@@ -953,39 +1127,15 @@ async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(St
 async fn get_character_image(
     State(pools): State<Arc<DbPools>>,
     Path(id_str): Path<String>,
-) -> impl IntoResponse {
-    let id: i64 = id_str.split('.').next().unwrap_or("0").parse().unwrap_or(0);
+) -> Response {
+    serve_cached_image(pools, id_str, ImageKind::Character, ImageVariant::Grid).await
+}
 
-    if id == 0 {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-
-    // 1. Check local cache
-    let local_path: Option<String> = db::with_app_db(Arc::clone(&pools), move |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT local_path FROM image_cache WHERE id = ?1",
-                [id.to_string()],
-                |row| row.get(0),
-            )
-            .ok())
-    })
-    .await
-    .unwrap_or_default();
-
-    if let Some(path) = local_path
-        && let Ok(content) = tokio::fs::read(&path).await
-    {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
-        headers.insert(
-            header::CACHE_CONTROL,
-            "public, max-age=31536000".parse().unwrap(),
-        );
-        return (headers, content).into_response();
-    }
-
-    StatusCode::NOT_FOUND.into_response()
+async fn get_character_medium_image(
+    State(pools): State<Arc<DbPools>>,
+    Path(id_str): Path<String>,
+) -> Response {
+    serve_cached_image(pools, id_str, ImageKind::Character, ImageVariant::Medium).await
 }
 
 // ─── Subject image proxy ─────────────────────────────────────────────────────
@@ -1228,40 +1378,13 @@ async fn ensure_subject_image_source_cached(
 async fn get_subject_image(
     State(pools): State<Arc<DbPools>>,
     Path(id_str): Path<String>,
-) -> impl IntoResponse {
-    let id: i64 = id_str.split('.').next().unwrap_or("0").parse().unwrap_or(0);
+) -> Response {
+    serve_cached_image(pools, id_str, ImageKind::Subject, ImageVariant::Grid).await
+}
 
-    if id == 0 {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-
-    let cache_key = format!("s:{}", id);
-
-    // 1. Check local cache
-    let key_lookup = cache_key.clone();
-    let local_path: Option<String> = db::with_app_db(Arc::clone(&pools), move |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT local_path FROM image_cache WHERE id = ?1",
-                [key_lookup],
-                |row| row.get(0),
-            )
-            .ok())
-    })
-    .await
-    .unwrap_or_default();
-
-    if let Some(path) = local_path
-        && let Ok(content) = tokio::fs::read(&path).await
-    {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
-        headers.insert(
-            header::CACHE_CONTROL,
-            "public, max-age=31536000".parse().unwrap(),
-        );
-        return (headers, content).into_response();
-    }
-
-    StatusCode::NOT_FOUND.into_response()
+async fn get_subject_medium_image(
+    State(pools): State<Arc<DbPools>>,
+    Path(id_str): Path<String>,
+) -> Response {
+    serve_cached_image(pools, id_str, ImageKind::Subject, ImageVariant::Medium).await
 }

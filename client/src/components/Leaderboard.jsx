@@ -59,7 +59,6 @@ const Leaderboard = ({ defaultExpanded = false }) => {
                       <Image
                         src={char.image}
                         alt={char.name}
-                        preferSource
                         className={`podium-image${char.rank === 1 ? ' podium-image-center' : ''}`}
                       />
                       <div className="podium-rank">#{char.rank}</div>
@@ -123,7 +122,6 @@ const Leaderboard = ({ defaultExpanded = false }) => {
                       <Image
                         src={char.image}
                         alt={char.name}
-                        preferSource
                         className={`podium-image${char.rank === 1 ? ' podium-image-center' : ''}`}
                       />
                       <div className="podium-rank">#{char.rank}</div>

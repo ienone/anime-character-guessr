@@ -198,7 +198,7 @@ function AnswerSetterRoundView({
     <div className="answer-setter-view">
       {canShowSelectedAnswer && answerCharacter && (isAnswerSetter || isTeamObserver) && (
         <div className="selected-answer">
-          <Image src={answerCharacter.imageGrid} preferSource alt={answerCharacter.name} className="answer-image" />
+          <Image src={answerCharacter.imageGrid} alt={answerCharacter.name} className="answer-image" />
           <div className="answer-info">
             <div>{answerCharacter.name}</div>
             <div>{answerCharacter.nameCn}</div>

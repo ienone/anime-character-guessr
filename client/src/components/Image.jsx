@@ -1,6 +1,23 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import axios from 'axios'
 
+const IMAGE_PROXY_RE = /\/img\/(?:(subject)\/)?(?:(medium)\/)?(\d+)\.webp(?:\?.*)?$/
+
+function parseImageProxySrc(src) {
+  const match = typeof src === 'string' ? src.match(IMAGE_PROXY_RE) : null
+  if (!match) return null
+
+  return {
+    isSubject: match[1] === 'subject',
+    isMedium: match[2] === 'medium',
+    id: match[3],
+  }
+}
+
+function initialImageSrc(src, fallbackSrc) {
+  return parseImageProxySrc(src) ? (fallbackSrc || undefined) : src
+}
+
 /**
  * 带重试功能的图片组件
  * @param {string} src - 图片源地址
@@ -18,12 +35,15 @@ function Image({
   fallbackSrc = '/assets/icon.jpg',
   preferSource = false,
   cachedOnly = false,
+  variant,
+  waitMs,
+  sourceFallback = true,
   onLoadSuccess,
   onLoadError,
   className = '',
   ...props 
 }) {
-  const [currentSrc, setCurrentSrc] = useState(src);
+  const [currentSrc, setCurrentSrc] = useState(() => initialImageSrc(src, fallbackSrc));
   const [retryCount, setRetryCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [hasFailed, setHasFailed] = useState(false);
@@ -33,7 +53,7 @@ function Image({
   // 当src改变时重置状态
   useEffect(() => {
     mountedRef.current = true;
-    setCurrentSrc(src);
+    setCurrentSrc(initialImageSrc(src, fallbackSrc));
     setRetryCount(0);
     setIsLoading(true);
     setHasFailed(false);
@@ -44,40 +64,44 @@ function Image({
         clearTimeout(retryTimeoutRef.current);
       }
     };
-  }, [src]);
+  }, [src, fallbackSrc]);
 
-  // If src points to our `/img/:id.webp` or `/img/subject/:id.webp` proxy, ask
-  // the server to warm the cache before loading the proxy URL.
+  // If src points to our image proxy, ask the server to resolve/warm the cache
+  // before loading it. The server may return an upstream fallback while the
+  // background cache fill continues.
   useEffect(() => {
-    const m = typeof src === 'string' ? src.match(/\/img\/(?:(subject)\/)?(\d+)\.webp(?:\?.*)?$/) : null
-    if (!m) return
+    const parsed = parseImageProxySrc(src)
+    if (!parsed) return
 
-    const isSubject = m[1] === 'subject'
-    const id = m[2]
+    const resolvedVariant = variant || (parsed.isMedium || preferSource ? 'medium' : 'grid')
+    const resolvedWaitMs = cachedOnly ? 0 : (waitMs ?? (resolvedVariant === 'medium' ? 1200 : 900))
     let cancelled = false
+    let resolveDelayId = null
 
     async function resolve() {
       try {
-        // Avoid immediately hitting `/img/:id.webp` before the server has a chance
-        // to resolve/cache; show placeholder while we ask the server.
-        if (fallbackSrc) setCurrentSrc(fallbackSrc)
-
         const base = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
-        const url = isSubject ? `${base}/api/img/resolve/subject/${id}` : `${base}/api/img/resolve/${id}`
+        const apiBase = base.replace(/\/$/, '')
+        const url = parsed.isSubject ? `${apiBase}/api/img/resolve/subject/${parsed.id}` : `${apiBase}/api/img/resolve/${parsed.id}`
         const res = await axios.get(url, {
-          timeout: cachedOnly ? 500 : 1500,
-          params: cachedOnly ? { cachedOnly: 1, waitMs: 0 } : undefined,
+          timeout: cachedOnly ? 500 : Math.max(1500, Number(resolvedWaitMs) + 800),
+          params: {
+            variant: resolvedVariant,
+            waitMs: resolvedWaitMs,
+            fallback: sourceFallback ? 'source' : 'none',
+            ...(cachedOnly ? { cachedOnly: 1 } : {}),
+          },
         })
         if (cancelled || !mountedRef.current) return
 
-        // Server returns JSON. It never exposes direct upstream URLs; when a
-        // cache warm-up is pending we retry the local proxy shortly after.
         const data = res.data || {}
         if (data.cached) {
           setCurrentSrc(data.imgUrl || src)
+        } else if (!cachedOnly && data.sourceUrl) {
+          setCurrentSrc(data.sourceUrl)
         } else if (!cachedOnly && data.imgUrl) {
           const retryDelayMs = preferSource ? 400 : 800
-          setTimeout(() => {
+          resolveDelayId = setTimeout(() => {
             if (cancelled || !mountedRef.current) return
             setCurrentSrc(data.imgUrl)
           }, retryDelayMs)
@@ -91,8 +115,11 @@ function Image({
     }
 
     resolve()
-    return () => { cancelled = true }
-  }, [src, fallbackSrc, preferSource, cachedOnly]);
+    return () => {
+      cancelled = true
+      if (resolveDelayId) clearTimeout(resolveDelayId)
+    }
+  }, [src, preferSource, cachedOnly, variant, waitMs, sourceFallback]);
 
   const handleError = useCallback(() => {
     if (!mountedRef.current) return;

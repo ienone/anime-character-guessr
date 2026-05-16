@@ -17,6 +17,8 @@ lazy_static! {
     static ref IMAGE_DOWNLOAD_SEMAPHORE: Semaphore = Semaphore::new(8);
 }
 
+const MEDIUM_IMAGE_CACHE_TTL_DAYS: i64 = 7;
+
 struct CleanupPending(String, broadcast::Sender<bool>);
 impl Drop for CleanupPending {
     fn drop(&mut self) {
@@ -148,16 +150,25 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
     PENDING_DOWNLOADS.insert(cache_key.clone(), tx.clone());
     let _cleanup = CleanupPending(cache_key.clone(), tx);
 
-    // Check if another task already cached it to avoid duplicate work
+    // Check if another task already cached it to avoid duplicate work. A stale
+    // DB row without the file must not block a fresh download.
     let key_lookup = cache_key.clone();
-    let already_cached = db::with_app_db(Arc::clone(&pools), move |conn| {
-        let mut stmt = conn.prepare("SELECT 1 FROM image_cache WHERE id = ?1")?;
-        Ok(stmt.exists([key_lookup]).unwrap_or(false))
+    let cached_path = db::with_app_db(Arc::clone(&pools), move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT local_path FROM image_cache WHERE id = ?1",
+                [key_lookup],
+                |row| row.get::<_, String>(0),
+            )
+            .ok())
     })
     .await
-    .unwrap_or(false);
+    .ok()
+    .flatten();
 
-    if already_cached {
+    if let Some(path) = cached_path
+        && tokio::fs::metadata(path).await.is_ok()
+    {
         return;
     }
 
@@ -245,7 +256,11 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
     let path_clone = path.clone();
     let write_result = db::with_app_db(Arc::clone(&pools), move |conn| {
         conn.execute(
-            "INSERT OR IGNORE INTO image_cache (id, local_path) VALUES (?1, ?2)",
+            "INSERT INTO image_cache (id, local_path)
+             VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET
+                local_path = excluded.local_path,
+                created_at = CURRENT_TIMESTAMP",
             [key_for_write, path_clone],
         )?;
         Ok(())
@@ -258,27 +273,59 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
     }
 }
 
-/// Periodically checks the image cache size and removes the oldest entries.
+/// Periodically removes short-lived medium image cache entries.
 ///
-/// Disabled for now: cached files are intentionally tiny 50x50 WebP thumbnails,
-/// so keeping all generated thumbnails is cheaper than repeatedly refetching
-/// them from BGM.
+/// Grid thumbnails are intentionally retained: they are tiny and used across
+/// most views. Medium images are only opportunistic warmups for larger display
+/// contexts, so stale `m:*` / `sm:*` rows and files are allowed to expire.
 pub fn start_image_cache_cleanup(pools: Arc<DbPools>) {
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(60 * 60); // every 1 hour
         loop {
             tokio::time::sleep(interval).await;
-            let count = db::with_app_db(Arc::clone(&pools), move |conn| {
-                let mut stmt = conn.prepare("SELECT count(*) FROM image_cache")?;
-                let count: i64 = stmt.query_row([], |row| row.get(0))?;
-                Ok(count)
+
+            let expired_paths = db::with_app_db(Arc::clone(&pools), move |conn| {
+                let ttl = format!("-{} days", MEDIUM_IMAGE_CACHE_TTL_DAYS);
+                let mut stmt = conn.prepare(
+                    "SELECT local_path
+                     FROM image_cache
+                     WHERE (id LIKE 'm:%' OR id LIKE 'sm:%')
+                       AND created_at < datetime('now', ?1)",
+                )?;
+                let rows = stmt.query_map([ttl.as_str()], |row| row.get::<_, String>(0))?;
+                let mut paths = Vec::new();
+                for path in rows.flatten() {
+                    paths.push(path);
+                }
+
+                conn.execute(
+                    "DELETE FROM image_cache
+                     WHERE (id LIKE 'm:%' OR id LIKE 'sm:%')
+                       AND created_at < datetime('now', ?1)",
+                    [ttl.as_str()],
+                )?;
+                Ok(paths)
             })
-            .await
-            .unwrap_or_default();
-            info!(
-                "Image thumbnail cache cleanup skipped; {} thumbnails retained",
-                count
-            );
+            .await;
+
+            match expired_paths {
+                Ok(paths) => {
+                    let count = paths.len();
+                    for path in paths {
+                        match tokio::fs::remove_file(&path).await {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => {
+                                warn!("Failed to remove expired medium image {}: {}", path, e)
+                            }
+                        }
+                    }
+                    if count > 0 {
+                        info!("Removed {} expired medium image cache entries", count);
+                    }
+                }
+                Err(e) => warn!("Image cache cleanup failed: {}", e),
+            }
         }
     });
 }
