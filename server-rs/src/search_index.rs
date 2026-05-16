@@ -44,7 +44,7 @@ impl TantivySearch {
             .context("open character Tantivy index")?,
             subjects: TantivyIndex::open(
                 &root.join("subjects"),
-                &["name", "name_cn", "search_terms"],
+                &["name", "name_cn", "aliases", "search_terms"],
             )
             .context("open subject Tantivy index")?,
         })
@@ -109,18 +109,20 @@ impl TantivySearch {
         keyword: &str,
         types: &[i64],
         limit: usize,
+        offset: usize,
     ) -> anyhow::Result<Vec<Value>> {
         if limit == 0 || types.is_empty() {
             return Ok(Vec::new());
         }
 
+        let wanted = limit.saturating_add(offset);
         let docs = if self.subjects.fields.type_filter_field.is_some() {
-            let candidate_limit = subject_candidate_window(limit);
+            let candidate_limit = subject_candidate_window(wanted);
             self.subjects
                 .search_with_u64_filter(keyword, types, candidate_limit, 0)?
         } else {
             self.subjects
-                .search_progressively_filtered(keyword, types, limit)?
+                .search_progressively_filtered(keyword, types, wanted)?
         };
 
         let mut ranked = rank_subject_docs(docs, keyword, types);
@@ -131,7 +133,7 @@ impl TantivySearch {
         });
 
         let mut out = Vec::new();
-        for (_, _, _, doc) in ranked.into_iter().take(limit) {
+        for (_, _, _, doc) in ranked.into_iter().skip(offset).take(limit) {
             let id = first_u64(&doc, "id").unwrap_or(0);
             let subject_type = first_u64(&doc, "type").unwrap_or(0) as i64;
             let img_url = format!("/img/subject/{}.webp", id);
@@ -347,14 +349,19 @@ fn subject_relevance_bucket(doc: &Value, keyword: &str) -> u8 {
     }
     let name = first_str(doc, "name");
     let name_cn = first_str(doc, "name_cn");
+    let aliases = first_str(doc, "aliases");
     if name == keyword || name_cn == keyword {
         0
     } else if name.starts_with(keyword) || name_cn.starts_with(keyword) {
         1
-    } else if name.contains(keyword) || name_cn.contains(keyword) {
+    } else if aliases.split_whitespace().any(|alias| alias == keyword) {
         2
-    } else {
+    } else if aliases.contains(keyword) {
         3
+    } else if name.contains(keyword) || name_cn.contains(keyword) {
+        4
+    } else {
+        5
     }
 }
 

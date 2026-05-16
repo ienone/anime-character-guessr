@@ -438,13 +438,14 @@ async function getIndexInfo(indexId) {
 async function searchSubjects(keyword, config = {}) {
   try {
     const trimmed = keyword.trim()
-    const cacheKey = `2,4|10|${trimmed}`
+    const params = { keyword: trimmed, type: '2,4', limit: 10, offset: 0, ...(config.params || {}) }
+    const cacheKey = `${params.type}|${params.limit}|${params.offset}|${trimmed}`
     const cached = getCachedSubjectSearch(cacheKey)
     if (cached) return cached
 
     const response = await perfAxios.get(`${SERVER_URL}/api/archive/search/subjects`, {
       ...config,
-      params: { keyword: trimmed, type: '2,4', limit: 10, ...(config.params || {}) }
+      params
     })
 
     if (!response.data || !response.data.data) {

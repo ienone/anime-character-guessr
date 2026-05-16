@@ -120,26 +120,49 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     await performCharacterSearch(query, reset, offset);
   }, [searchQuery, finishInit, offset, performCharacterSearch]);
 
-  const performSubjectSearch = useCallback(async (query) => {
+  const performSubjectSearch = useCallback(async (query, reset = false, requestedOffset = 0) => {
     if (!query || !finishInit) return;
     const requestSeq = ++searchRequestSeqRef.current;
-    subjectSearchAbortRef.current?.abort();
+    const currentLimit = reset ? INITIAL_LIMIT : MORE_LIMIT;
+    const currentOffset = reset ? 0 : requestedOffset;
+    const loadingState = reset ? setIsSearching : setIsLoadingMore;
+
+    if (reset) {
+      subjectSearchAbortRef.current?.abort();
+    }
     const controller = new AbortController();
     subjectSearchAbortRef.current = controller;
-    setIsSearching(true);
+    loadingState(true);
     try {
-      const results = await searchSubjects(query, { signal: controller.signal });
+      const results = await searchSubjects(query, {
+        signal: controller.signal,
+        params: {
+          limit: currentLimit,
+          offset: currentOffset
+        }
+      });
       if (requestSeq !== searchRequestSeqRef.current) return;
-      setSearchResults(results);
+      if (reset) {
+        setSearchResults(results);
+        setOffset(INITIAL_LIMIT);
+      } else {
+        setSearchResults(prev => {
+          const seen = new Set(prev.map(item => item.id));
+          return [...prev, ...results.filter(item => !seen.has(item.id))];
+        });
+        setOffset(currentOffset + MORE_LIMIT);
+      }
       setFailedImages(new Set());
-      setHasMore(false);
+      setHasMore(results.length === currentLimit && currentOffset + currentLimit <= 100);
     } catch (error) {
       if (error.code === 'ERR_CANCELED') return;
       console.error('Subject search failed:', error);
-      setSearchResults([]);
+      if (reset) {
+        setSearchResults([]);
+      }
     } finally {
       if (requestSeq === searchRequestSeqRef.current) {
-        setIsSearching(false);
+        loadingState(false);
       }
     }
   }, [finishInit]);
@@ -150,7 +173,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     subjectSelectRequestSeqRef.current++;
     setSelectedSubject(null);
     setSubjectCharacters([]);
-    await performSubjectSearch(query);
+    await performSubjectSearch(query, true, 0);
   }, [searchQuery, finishInit, performSubjectSearch]);
 
   const handleSubjectSelect = useCallback(async (subject) => {
@@ -215,6 +238,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         loadMoreInFlightRef.current = false;
       });
       return true;
+    } else if (searchMode === 'subject') {
+      performSubjectSearch(searchQuery.trim(), false, offset).finally(() => {
+        loadMoreInFlightRef.current = false;
+      });
+      return true;
     } else if (searchMode === 'character') {
       handleSearch(false).finally(() => {
         loadMoreInFlightRef.current = false;
@@ -223,7 +251,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     }
     loadMoreInFlightRef.current = false;
     return false;
-  }, [handleLoadMoreSubjectCharacters, hasMore, isLoadingMore, isSearching, searchMode, selectedSubject, handleSearch]);
+  }, [handleLoadMoreSubjectCharacters, hasMore, isLoadingMore, isSearching, searchMode, selectedSubject, performSubjectSearch, searchQuery, offset, handleSearch]);
 
   const handleCharacterSelect = useCallback((character) => {
     if (!finishInit) return;
@@ -298,7 +326,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         case 'ArrowDown':
           e.preventDefault();
           setSelectedItemIndex(prevIndex => {
-            const maxIndex = hasMore && (searchMode === 'character' || selectedSubject) ?
+            const maxIndex = hasMore && (searchMode === 'character' || searchMode === 'subject' || selectedSubject) ?
               searchResults.length : searchResults.length - 1;
             // 不再循环到顶部，如果已经到底部就保持在底部
             return prevIndex < maxIndex ? prevIndex + 1 : maxIndex;
@@ -522,7 +550,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
                 </div>
               </div>
             ))}
-            {hasMore && (searchMode === 'character' || selectedSubject) && (
+            {hasMore && (searchMode === 'character' || searchMode === 'subject' || selectedSubject) && (
               <div 
                 className={`search-result-item load-more ${selectedItemIndex === searchResults.length ? 'selected' : ''} ${isLoadingMore ? 'disabled' : ''}`}
                 onClick={() => {
@@ -531,7 +559,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
                 aria-disabled={isLoadingMore || isSearching}
                 ref={selectedItemIndex === searchResults.length ? selectedItemRef : null}
               >
-                {isLoadingMore ? '加载中...' : selectedSubject ? '更多角色' : '更多'}
+                {isLoadingMore ? '加载中...' : selectedSubject ? '更多角色' : searchMode === 'subject' ? '更多作品' : '更多'}
               </div>
             )}
           </>

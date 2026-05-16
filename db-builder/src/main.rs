@@ -142,7 +142,7 @@ fn main() -> Result<()> {
             build_search_indexes(&mut db, &args.dump_dir)?;
 
             println!("\nStep 6: 构建 Tantivy 搜索索引...");
-            build_tantivy_indexes(&args.out_db, &args.tantivy_index_dir)?;
+            build_tantivy_indexes(&args.out_db, &args.dump_dir, &args.tantivy_index_dir)?;
 
             // ==========================================
             // 清理与优化
@@ -166,9 +166,10 @@ fn main() -> Result<()> {
         }
         "build-tantivy" => {
             println!("开始构建 Tantivy 搜索索引...");
+            println!("dump_dir: {}", args.dump_dir.display());
             println!("archive_db: {}", args.out_db.display());
             println!("tantivy_dir: {}", args.tantivy_index_dir.display());
-            build_tantivy_indexes(&args.out_db, &args.tantivy_index_dir)?;
+            build_tantivy_indexes(&args.out_db, &args.dump_dir, &args.tantivy_index_dir)?;
             println!("Tantivy 索引构建完成！耗时: {:.2?}", start_time.elapsed());
         }
         "migrate-app" => {
@@ -393,12 +394,12 @@ fn migrate_app_db(
     Ok(())
 }
 
-fn build_tantivy_indexes(archive_db_path: &Path, index_dir: &Path) -> Result<()> {
+fn build_tantivy_indexes(archive_db_path: &Path, dump_dir: &Path, index_dir: &Path) -> Result<()> {
     let archive = Connection::open(archive_db_path)?;
     ensure_archive_search_schema(&archive)?;
     fs::create_dir_all(index_dir)?;
     build_tantivy_character_index(&archive, &index_dir.join("characters"))?;
-    build_tantivy_subject_index(&archive, &index_dir.join("subjects"))?;
+    build_tantivy_subject_index(&archive, dump_dir, &index_dir.join("subjects"))?;
     Ok(())
 }
 
@@ -498,8 +499,9 @@ fn build_tantivy_character_index(db: &Connection, index_dir: &Path) -> Result<()
     Ok(())
 }
 
-fn build_tantivy_subject_index(db: &Connection, index_dir: &Path) -> Result<()> {
+fn build_tantivy_subject_index(db: &Connection, dump_dir: &Path, index_dir: &Path) -> Result<()> {
     recreate_dir(index_dir)?;
+    let subject_aliases = load_subject_aliases(dump_dir)?;
 
     let mut schema_builder = Schema::builder();
     let id = schema_builder.add_u64_field("id", STORED | FAST);
@@ -508,6 +510,7 @@ fn build_tantivy_subject_index(db: &Connection, index_dir: &Path) -> Result<()> 
     let popularity = schema_builder.add_u64_field("popularity", STORED | FAST);
     let name = schema_builder.add_text_field("name", TEXT | STORED);
     let name_cn = schema_builder.add_text_field("name_cn", TEXT | STORED);
+    let aliases = schema_builder.add_text_field("aliases", TEXT | STORED);
     let search_terms = schema_builder.add_text_field("search_terms", TEXT);
     let schema = schema_builder.build();
 
@@ -532,7 +535,9 @@ fn build_tantivy_subject_index(db: &Connection, index_dir: &Path) -> Result<()> 
     let mut count = 0usize;
     for row in rows {
         let (sid, subject_type, sdate, spopularity, sname, sname_cn) = row?;
-        let terms = expanded_tantivy_search_terms(&[sname.as_str(), sname_cn.as_str()]);
+        let subject_aliases = subject_aliases.get(&sid).map(String::as_str).unwrap_or("");
+        let terms =
+            expanded_tantivy_search_terms(&[sname.as_str(), sname_cn.as_str(), subject_aliases]);
         writer.add_document(doc!(
             id => sid as u64,
             stype => subject_type.max(0) as u64,
@@ -540,6 +545,7 @@ fn build_tantivy_subject_index(db: &Connection, index_dir: &Path) -> Result<()> 
             popularity => spopularity.max(0) as u64,
             name => sname,
             name_cn => sname_cn,
+            aliases => subject_aliases,
             search_terms => terms,
         ))?;
         count += 1;

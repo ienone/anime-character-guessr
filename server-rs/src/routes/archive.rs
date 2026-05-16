@@ -383,6 +383,15 @@ async fn search_subjects(
         .unwrap_or(10)
         .min(50) as usize;
 
+    let offset_raw = q
+        .get("offset")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    if offset_raw > 100 {
+        return Json(json!({ "data": [] })).into_response();
+    }
+    let offset = offset_raw as usize;
+
     // Types: allow a comma-separated list in `type`, default to [2,4]
     let mut types: Vec<i64> = q
         .get("type")
@@ -404,14 +413,15 @@ async fn search_subjects(
     let keyword_log = keyword.clone();
     let keyword_for_db = keyword.clone();
     let cache_key = format!(
-        "subjects|{}|{}|{}",
+        "subjects|{}|{}|{}|{}",
         keyword,
         types
             .iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(","),
-        limit
+        limit,
+        offset
     );
     if let Some(cached) = search_cache_get(&cache_key) {
         return Json(json!({ "data": cached })).into_response();
@@ -421,7 +431,7 @@ async fn search_subjects(
         let types_for_search = types.clone();
         let cache_key_for_search = cache_key.clone();
         match tokio::task::spawn_blocking(move || {
-            search.search_subjects(&keyword_for_search, &types_for_search, limit)
+            search.search_subjects(&keyword_for_search, &types_for_search, limit, offset)
         })
         .await
         {
@@ -444,6 +454,7 @@ async fn search_subjects(
         Duration::from_millis(800),
         move |conn| {
             let started = Instant::now();
+            let wanted = limit.saturating_add(offset).min(150);
             let sql = if types == [2, 4] {
                 DEFAULT_SUBJECT_SEARCH_SQL.to_string()
             } else {
@@ -483,17 +494,17 @@ async fn search_subjects(
             let mut rows = if fts_query.is_empty() {
                 Vec::new()
             } else {
-                query_subject_search(conn, &sql, &types, &keyword_for_db, &fts_query, limit)?
+                query_subject_search(conn, &sql, &types, &keyword_for_db, &fts_query, wanted)?
             };
-            if rows.len() < limit {
+            if rows.len() < wanted {
                 merge_subject_rows(
                     &mut rows,
-                    query_subject_like_search(conn, &types, &keyword_for_db, limit)?,
-                    limit,
+                    query_subject_like_search(conn, &types, &keyword_for_db, wanted)?,
+                    wanted,
                 );
             }
             let mut out = Vec::new();
-            for row in rows {
+            for row in rows.into_iter().skip(offset).take(limit) {
                 let (id, stype, date, name, name_cn) = row;
                 let img_url = format!("/img/subject/{}.webp", id);
                 out.push(json!({
