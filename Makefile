@@ -1,3 +1,5 @@
+MAKE := make
+
 .PHONY: help install dev dev-client dev-server preview build build-client build-server check check-server check-db-builder lint lint-client clippy clippy-server clippy-db-builder test test-server fmt docker-up docker-down docker-logs
 
 help:
