@@ -45,6 +45,22 @@ const iconPaths = {
       <path d="M12 17h.01" />
     </>
   ),
+  bilibili: (
+    <>
+      <path d="m7.5 4 3 3" />
+      <path d="m16.5 4-3 3" />
+      <rect x="3" y="7" width="18" height="13" rx="3" />
+      <path d="M9 12.5v2" />
+      <path d="M15 12.5v2" />
+    </>
+  ),
+  github: (
+    <path
+      d="M12 2C6.5 2 2 6.6 2 12.2c0 4.5 2.9 8.3 6.8 9.6.5.1.7-.2.7-.5v-1.8c-2.8.6-3.4-1.2-3.4-1.2-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 2.9.9.1-.7.4-1.1.7-1.4-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1-2.8-.1-.3-.4-1.3.1-2.8 0 0 .8-.3 2.8 1.1.8-.2 1.6-.3 2.5-.3s1.7.1 2.5.3c1.9-1.3 2.8-1.1 2.8-1.1.5 1.4.2 2.5.1 2.8.6.8 1 1.7 1 2.8 0 3.9-2.4 4.8-4.6 5 .4.4.7 1.1.7 2.1v3.1c0 .3.2.6.7.5 4-1.3 6.8-5.1 6.8-9.6C22 6.6 17.5 2 12 2Z"
+      fill="currentColor"
+      stroke="none"
+    />
+  ),
   home: (
     <>
       <path d="m3 11 9-8 9 8" />
@@ -57,6 +73,14 @@ const iconPaths = {
       <circle cx="12" cy="12" r="9" />
       <path d="M9.5 9a2.7 2.7 0 1 1 4.4 2.1c-1 .8-1.9 1.4-1.9 2.9" />
       <path d="M12 17h.01" />
+    </>
+  ),
+  qq: (
+    <>
+      <path d="M8.2 17.6c-1.4.6-2.8.9-4.2.9.6-.9 1-1.9 1.4-3A7.5 7.5 0 0 1 4 11.1C4 6.8 7.6 3.3 12 3.3s8 3.5 8 7.8-3.6 7.8-8 7.8c-1.4 0-2.7-.4-3.8-1.3Z" />
+      <path d="M8.7 11.4h.01" />
+      <path d="M12 11.4h.01" />
+      <path d="M15.3 11.4h.01" />
     </>
   ),
   server: (
@@ -105,14 +129,7 @@ const iconPaths = {
   )
 };
 
-const textIcons = {
-  bilibili: 'B',
-  github: 'GH',
-  qq: 'QQ'
-};
-
 function Icon({ name, size = 18, className = '', style, title }) {
-  const text = textIcons[name];
   return (
     <svg
       className={`app-icon app-icon-${name}${className ? ` ${className}` : ''}`}
@@ -129,18 +146,7 @@ function Icon({ name, size = 18, className = '', style, title }) {
       role={title ? 'img' : undefined}
     >
       {title && <title>{title}</title>}
-      {text ? (
-        <text
-          x="12"
-          y="15"
-          textAnchor="middle"
-          fill="currentColor"
-          stroke="none"
-          className="app-icon-text"
-        >
-          {text}
-        </text>
-      ) : iconPaths[name] || null}
+      {iconPaths[name] || null}
     </svg>
   );
 }
