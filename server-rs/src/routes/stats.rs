@@ -10,12 +10,18 @@ use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use super::write_guard::truncate_chars;
 
 const MAX_CHARACTER_NAME_CHARS: usize = 128;
 const WEEKLY_RESET_HOUR: i64 = 4;
 const WEEKLY_RESET_TZ_OFFSET_SECONDS: i32 = 8 * 60 * 60;
+const STATS_WRITE_CONCURRENCY: usize = 16;
+
+lazy_static::lazy_static! {
+    static ref STATS_WRITE_SEMAPHORE: Semaphore = Semaphore::new(STATS_WRITE_CONCURRENCY);
+}
 
 #[derive(Deserialize)]
 pub struct LimitQuery {
@@ -109,6 +115,13 @@ pub async fn record_answer_character_count(
     if char_id <= 0 {
         return;
     }
+    let Ok(_permit) = STATS_WRITE_SEMAPHORE.try_acquire() else {
+        tracing::debug!(
+            char_id,
+            "dropping answer count update because stats writer is busy"
+        );
+        return;
+    };
     let char_name = normalize_character_name(char_name);
     if let Err(e) = increment_answer_character_count(pools, char_id, char_name).await {
         tracing::warn!(char_id, error = %e, "failed to record answer character count");
@@ -123,6 +136,13 @@ pub async fn record_guess_character_count(
     if char_id <= 0 {
         return;
     }
+    let Ok(_permit) = STATS_WRITE_SEMAPHORE.try_acquire() else {
+        tracing::debug!(
+            char_id,
+            "dropping weekly count update because stats writer is busy"
+        );
+        return;
+    };
     let char_name = normalize_character_name(char_name);
     if let Err(e) = increment_guess_character_count(pools, char_id, char_name).await {
         tracing::warn!(char_id, error = %e, "failed to record weekly guess count");

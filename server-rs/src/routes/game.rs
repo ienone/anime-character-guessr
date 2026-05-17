@@ -208,6 +208,8 @@ fn get_or_build_candidate_pool(
         .entry(key.clone())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone();
+    // Candidate pools are built per settings key and then cached for hours; waiting here
+    // avoids transient cold-cache failures while still deduplicating duplicate builds.
     let _guard = build_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("Candidate cache build lock poisoned"))?;

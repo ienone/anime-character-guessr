@@ -10,11 +10,15 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::db::{self, DbPools};
 
 const SEARCH_CACHE_TTL_MS: i64 = 60_000;
 const SEARCH_CACHE_MAX_ENTRIES: usize = 256;
+const ARCHIVE_SEARCH_CONCURRENCY: usize = 12;
+const ARCHIVE_SEARCH_ADMISSION_TIMEOUT: Duration = Duration::from_millis(100);
+const TANTIVY_SEARCH_TIMEOUT: Duration = Duration::from_millis(800);
 
 const DEFAULT_SUBJECT_SEARCH_SQL: &str = "WITH matched AS (
                     SELECT rowid, bm25(subject_fts) AS rank
@@ -95,6 +99,7 @@ fn now_ms() -> i64 {
 
 lazy_static::lazy_static! {
     static ref ARCHIVE_SEARCH_CACHE: Mutex<SearchCache> = Mutex::new(SearchCache::new());
+    static ref ARCHIVE_SEARCH_SEMAPHORE: Arc<Semaphore> = Arc::new(Semaphore::new(ARCHIVE_SEARCH_CONCURRENCY));
 }
 
 fn search_cache_get(key: &str) -> Option<Value> {
@@ -105,6 +110,27 @@ fn search_cache_put(key: String, value: Value) {
     if let Ok(mut cache) = ARCHIVE_SEARCH_CACHE.lock() {
         cache.put(key, value);
     }
+}
+
+async fn acquire_search_permit() -> Option<OwnedSemaphorePermit> {
+    tokio::time::timeout(
+        ARCHIVE_SEARCH_ADMISSION_TIMEOUT,
+        Arc::clone(&ARCHIVE_SEARCH_SEMAPHORE).acquire_owned(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
+fn search_busy_response(kind: &'static str) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "code": "SEARCH_BUSY",
+            "error": format!("{kind} search is busy, please retry")
+        })),
+    )
+        .into_response()
 }
 
 pub fn archive_routes(pools: Arc<DbPools>) -> Router<Arc<DbPools>> {
@@ -205,7 +231,9 @@ async fn get_subject_characters(
              JOIN characters c ON sc.character_id = c.id
              LEFT JOIN character_profile p ON p.character_id = c.id
              WHERE sc.subject_id = ?1
-             ORDER BY sc.order_num ASC, c.popularity DESC",
+             ORDER BY CASE WHEN sc.type = 1 THEN 0 ELSE 1 END,
+                      c.popularity DESC,
+                      sc.order_num ASC",
         )?;
         let rows = stmt.query_map([subject_id], |row| {
             Ok((
@@ -426,26 +454,45 @@ async fn search_subjects(
     if let Some(cached) = search_cache_get(&cache_key) {
         return Json(json!({ "data": cached })).into_response();
     }
+    let Some(search_permit) = acquire_search_permit().await else {
+        return search_busy_response("subjects");
+    };
     if let Some(search) = pools.tantivy_search.clone() {
         let keyword_for_search = keyword.clone();
         let types_for_search = types.clone();
         let cache_key_for_search = cache_key.clone();
-        match tokio::task::spawn_blocking(move || {
-            search.search_subjects(&keyword_for_search, &types_for_search, limit, offset)
-        })
+        let search_permit = search_permit;
+        match tokio::time::timeout(
+            TANTIVY_SEARCH_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let _permit = search_permit;
+                search.search_subjects(&keyword_for_search, &types_for_search, limit, offset)
+            }),
+        )
         .await
         {
-            Ok(Ok(list)) => {
-                search_cache_put(cache_key_for_search, Value::Array(list.clone()));
-                return Json(json!({ "data": list })).into_response();
+            Ok(Ok(Ok(list))) => {
+                if !list.is_empty() {
+                    search_cache_put(cache_key_for_search, Value::Array(list.clone()));
+                    return Json(json!({ "data": list })).into_response();
+                }
+                tracing::debug!(
+                    keyword = %keyword,
+                    "Tantivy subject search returned no results; falling back to SQLite"
+                );
             }
-            Ok(Err(e)) => {
+            Ok(Ok(Err(e))) => {
                 tracing::warn!(keyword = %keyword, error = %e, "Tantivy subject search failed; falling back to SQLite");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(keyword = %keyword, error = %e, "Tantivy subject search task failed; falling back to SQLite");
             }
+            Err(_) => {
+                tracing::warn!(keyword = %keyword, "Tantivy subject search timed out; falling back to SQLite");
+            }
         }
+    } else {
+        drop(search_permit);
     }
     let cache_key_for_db = cache_key.clone();
     let result = db::with_archive_db_timed(
@@ -578,25 +625,38 @@ async fn search_characters(
     if let Some(cached) = search_cache_get(&cache_key) {
         return Json(json!({ "data": cached })).into_response();
     }
+    let Some(search_permit) = acquire_search_permit().await else {
+        return search_busy_response("characters");
+    };
     if let Some(search) = pools.tantivy_search.clone() {
         let keyword_for_search = keyword.clone();
         let cache_key_for_search = cache_key.clone();
-        match tokio::task::spawn_blocking(move || {
-            search.search_characters(&keyword_for_search, limit, offset)
-        })
+        let search_permit = search_permit;
+        match tokio::time::timeout(
+            TANTIVY_SEARCH_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let _permit = search_permit;
+                search.search_characters(&keyword_for_search, limit, offset)
+            }),
+        )
         .await
         {
-            Ok(Ok(list)) => {
+            Ok(Ok(Ok(list))) => {
                 search_cache_put(cache_key_for_search, Value::Array(list.clone()));
                 return Json(json!({ "data": list })).into_response();
             }
-            Ok(Err(e)) => {
+            Ok(Ok(Err(e))) => {
                 tracing::warn!(keyword = %keyword, error = %e, "Tantivy character search failed; falling back to SQLite");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(keyword = %keyword, error = %e, "Tantivy character search task failed; falling back to SQLite");
             }
+            Err(_) => {
+                tracing::warn!(keyword = %keyword, "Tantivy character search timed out; falling back to SQLite");
+            }
         }
+    } else {
+        drop(search_permit);
     }
     let cache_key_for_db = cache_key.clone();
     let result = db::with_archive_db_timed(
@@ -713,13 +773,7 @@ async fn search_characters(
 }
 
 fn subject_fts_query(keyword: &str) -> String {
-    keyword
-        .split_whitespace()
-        .flat_map(|part| part.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')))
-        .filter(|part| !part.is_empty())
-        .map(|part| format!("{}*", part))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+    fts_query_with_char_fallback(keyword)
 }
 
 type SubjectSearchRow = (i64, i64, String, String, String);
@@ -869,4 +923,22 @@ fn fts_query_with_char_fallback(keyword: &str) -> String {
         .map(|part| format!("{}*", part))
         .collect::<Vec<_>>()
         .join(" AND ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{character_fts_query, subject_fts_query};
+
+    #[test]
+    fn subject_fts_query_keeps_cjk_prefix_terms() {
+        assert_eq!(subject_fts_query("凉宫春日"), "凉宫春日*");
+        assert_eq!(subject_fts_query("更衣人偶"), "更衣人偶*");
+    }
+
+    #[test]
+    fn subject_and_character_fts_queries_share_unicode_tokenization() {
+        let keyword = "凉宫 春日";
+        assert_eq!(subject_fts_query(keyword), "凉宫* AND 春日*");
+        assert_eq!(subject_fts_query(keyword), character_fts_query(keyword));
+    }
 }

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +264,8 @@ fn default_true() -> bool {
 use dashmap::DashMap;
 
 const ROOM_COMMAND_CAPACITY: usize = 256;
+const ROOM_SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(250);
+const ROOM_COMMAND_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn canonical_username(username: &str) -> String {
     username.trim().to_lowercase()
@@ -364,8 +366,14 @@ impl RoomActor {
         }
     }
 
-    pub async fn snapshot(&self) -> Room {
-        self.room.lock().await.clone()
+    pub async fn snapshot(&self) -> Option<Room> {
+        match tokio::time::timeout(ROOM_SNAPSHOT_TIMEOUT, self.room.lock()).await {
+            Ok(room) => Some(room.clone()),
+            Err(_) => {
+                tracing::warn!("room snapshot timed out");
+                None
+            }
+        }
     }
 
     pub async fn snapshot_after_removal(&self) -> Room {
@@ -402,6 +410,15 @@ impl RoomActor {
                 Err(observed) => current_max = observed,
             }
         }
+    }
+
+    pub fn abort_command(&self, elapsed_micros: u64) {
+        self.queued_commands.fetch_sub(1, Ordering::Relaxed);
+        self.rejected_commands.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(
+            elapsed_micros,
+            "room command aborted before acquiring room lock"
+        );
     }
 
     pub fn command_stats(&self) -> RoomCommandStats {
@@ -511,7 +528,7 @@ impl ServerState {
 
     pub async fn room_snapshot(&self, room_id: &str) -> Option<Room> {
         let actor = self.rooms.get(room_id)?.value().clone();
-        Some(actor.snapshot().await)
+        actor.snapshot().await
     }
 
     pub async fn room_snapshots(&self) -> Vec<(String, Room)> {
@@ -529,7 +546,8 @@ impl ServerState {
 
         while let Some(result) = tasks.join_next().await {
             match result {
-                Ok(snapshot) => snapshots.push(snapshot),
+                Ok((room_id, Some(snapshot))) => snapshots.push((room_id, snapshot)),
+                Ok((_, None)) => {}
                 Err(error) => tracing::warn!(%error, "room snapshot task failed"),
             }
         }
@@ -545,7 +563,16 @@ impl ServerState {
         let permit = actor.begin_command()?;
         let _label = command.label();
         let started_at = Instant::now();
-        let inner = actor.lock_room().await;
+        let inner = match tokio::time::timeout(ROOM_COMMAND_LOCK_TIMEOUT, actor.lock_room()).await {
+            Ok(inner) => inner,
+            Err(_) => {
+                actor.abort_command(
+                    started_at.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+                );
+                drop(permit);
+                return None;
+            }
+        };
         Some(RoomCommandGuard {
             actor,
             _permit: permit,

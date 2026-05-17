@@ -6,11 +6,12 @@ use dashmap::DashMap;
 use lazy_static::lazy_static;
 use serde_json::json;
 use socketioxide::SocketIo;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 lazy_static! {
     static ref PENDING_DOWNLOADS: DashMap<String, broadcast::Sender<bool>> = DashMap::new();
@@ -19,11 +20,16 @@ lazy_static! {
 
 const MEDIUM_IMAGE_CACHE_TTL_DAYS: i64 = 7;
 
-struct CleanupPending(String, broadcast::Sender<bool>);
+struct CleanupPending {
+    cache_key: String,
+    tx: broadcast::Sender<bool>,
+    cached: bool,
+}
+
 impl Drop for CleanupPending {
     fn drop(&mut self) {
-        PENDING_DOWNLOADS.remove(&self.0);
-        let _ = self.1.send(true);
+        PENDING_DOWNLOADS.remove(&self.cache_key);
+        let _ = self.tx.send(self.cached);
     }
 }
 
@@ -31,6 +37,14 @@ impl Drop for CleanupPending {
 pub fn ensure_directories(image_cache_dir: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(image_cache_dir)?;
     Ok(())
+}
+
+pub fn image_cache_file_path(image_cache_dir: &str, cache_key: &str) -> String {
+    let file_basename = cache_key.replace(':', "_");
+    Path::new(image_cache_dir)
+        .join(format!("{file_basename}.webp"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Spawns a background Tokio task that periodically removes stale rooms.
@@ -121,39 +135,29 @@ pub fn start_runtime_watchdog(state: Arc<ServerState>) {
 /// `cache_key` is the row id used in `image_cache` (e.g. `"123"` for a
 /// character, `"s:123"` for a subject). It is also used to derive the
 /// on-disk filename (colons replaced with underscores).
-pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc<DbPools>) {
-    if let Err(e) = tokio::time::timeout(
+pub async fn download_and_cache_image(cache_key: String, url: String, pools: Arc<DbPools>) -> bool {
+    match tokio::time::timeout(
         Duration::from_secs(12),
         download_and_cache_image_inner(cache_key.clone(), url, pools),
     )
     .await
     {
-        warn!("Image download hard-timeout for {}: {}", cache_key, e);
+        Ok(cached) => cached,
+        Err(e) => {
+            warn!("Image download hard-timeout for {}: {}", cache_key, e);
+            false
+        }
     }
 }
 
-async fn download_and_cache_image_inner(cache_key: String, url: String, pools: Arc<DbPools>) {
-    // Coalesce duplicate requests
-    let rx_opt = {
-        PENDING_DOWNLOADS
-            .get(&cache_key)
-            .map(|entry| entry.value().subscribe())
-    };
-
-    if let Some(mut rx) = rx_opt {
-        // A task is already downloading this image, wait for it
-        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
-        return;
+async fn cached_image_file_exists(pools: &Arc<DbPools>, cache_key: &str) -> bool {
+    let deterministic_path = image_cache_file_path(&pools.image_cache_dir, cache_key);
+    if tokio::fs::metadata(&deterministic_path).await.is_ok() {
+        return true;
     }
 
-    let (tx, _rx) = broadcast::channel(1);
-    PENDING_DOWNLOADS.insert(cache_key.clone(), tx.clone());
-    let _cleanup = CleanupPending(cache_key.clone(), tx);
-
-    // Check if another task already cached it to avoid duplicate work. A stale
-    // DB row without the file must not block a fresh download.
-    let key_lookup = cache_key.clone();
-    let cached_path = db::with_app_db(Arc::clone(&pools), move |conn| {
+    let key_lookup = cache_key.to_string();
+    let cached_path = db::with_app_db(Arc::clone(pools), move |conn| {
         Ok(conn
             .query_row(
                 "SELECT local_path FROM image_cache WHERE id = ?1",
@@ -166,15 +170,58 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
     .ok()
     .flatten();
 
-    if let Some(path) = cached_path
-        && tokio::fs::metadata(path).await.is_ok()
-    {
-        return;
+    match cached_path {
+        Some(path) => tokio::fs::metadata(path).await.is_ok(),
+        None => false,
+    }
+}
+
+async fn download_and_cache_image_inner(
+    cache_key: String,
+    url: String,
+    pools: Arc<DbPools>,
+) -> bool {
+    // Coalesce duplicate requests
+    let rx_opt = {
+        PENDING_DOWNLOADS
+            .get(&cache_key)
+            .map(|entry| entry.value().subscribe())
+    };
+
+    if let Some(mut rx) = rx_opt {
+        // A task is already downloading this image, wait for it
+        return match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Ok(cached)) => cached,
+            _ => cached_image_file_exists(&pools, &cache_key).await,
+        };
     }
 
-    let Ok(_permit) = IMAGE_DOWNLOAD_SEMAPHORE.acquire().await else {
-        warn!("Image download semaphore closed for {}", cache_key);
-        return;
+    let (tx, _rx) = broadcast::channel(1);
+    PENDING_DOWNLOADS.insert(cache_key.clone(), tx.clone());
+    let mut cleanup = CleanupPending {
+        cache_key: cache_key.clone(),
+        tx,
+        cached: false,
+    };
+
+    // Check if another task already cached it to avoid duplicate work. A stale
+    // DB row without the file must not block a fresh download.
+    if cached_image_file_exists(&pools, &cache_key).await {
+        cleanup.cached = true;
+        return true;
+    }
+
+    let _permit = match tokio::time::timeout(
+        Duration::from_millis(500),
+        IMAGE_DOWNLOAD_SEMAPHORE.acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            debug!("Image download semaphore busy for {}", cache_key);
+            return false;
+        }
     };
 
     info!("Downloading image for {}: {}", cache_key, url);
@@ -193,7 +240,7 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
                 "Failed to build reqwest client for image {}: {}",
                 cache_key, e
             );
-            return;
+            return false;
         }
     };
 
@@ -202,12 +249,12 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
             Ok(ok) => ok,
             Err(e) => {
                 error!("Failed to fetch image for {}: {}", cache_key, e);
-                return;
+                return false;
             }
         },
         Err(e) => {
             error!("Failed to fetch image for {}: {}", cache_key, e);
-            return;
+            return false;
         }
     };
 
@@ -215,11 +262,11 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {
             error!("Failed to read image bytes for {}: {}", cache_key, e);
-            return;
+            return false;
         }
         Err(_) => {
             error!("Timed out reading image bytes for {}", cache_key);
-            return;
+            return false;
         }
     };
     if bytes.len() > 5 * 1024 * 1024 {
@@ -228,17 +275,14 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
             cache_key,
             bytes.len()
         );
-        return;
+        return false;
     }
-
-    // Filename: replace ':' with '_' for safe paths (e.g. "s:123" → "s_123.webp").
-    let file_basename = cache_key.replace(':', "_");
 
     // Transcode in a blocking task — image crate is CPU-bound
     let image_cache_dir = pools.image_cache_dir.clone();
+    let path = image_cache_file_path(&image_cache_dir, &cache_key);
     let transcode_result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let img = image::load_from_memory(&bytes)?;
-        let path = format!("{}/{}.webp", image_cache_dir, file_basename);
         img.save_with_format(&path, image::ImageFormat::WebP)?;
         Ok(path)
     })
@@ -248,9 +292,10 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
         Ok(Ok(p)) => p,
         _ => {
             error!("Failed to transcode image for {}", cache_key);
-            return;
+            return false;
         }
     };
+    cleanup.cached = true;
 
     let key_for_write = cache_key.clone();
     let path_clone = path.clone();
@@ -271,6 +316,7 @@ async fn download_and_cache_image_inner(cache_key: String, url: String, pools: A
         Err(e) => error!("Failed to save cache record for {}: {}", cache_key, e),
         Ok(()) => info!("Cached image for {} at {}", cache_key, path),
     }
+    true
 }
 
 /// Periodically removes short-lived medium image cache entries.

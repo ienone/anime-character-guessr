@@ -6,6 +6,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 // ─── Archive rows ─────────────────────────────────────────────────────────────
 
@@ -45,6 +46,26 @@ pub struct DbPools {
     pub tantivy_search: Option<Arc<TantivySearch>>,
     /// Directory for locally cached/transcoded character images.
     pub image_cache_dir: String,
+}
+
+const ARCHIVE_DB_WORK_CONCURRENCY: usize = 16;
+const APP_DB_WORK_CONCURRENCY: usize = 32;
+const DB_WORK_ADMISSION_TIMEOUT: Duration = Duration::from_millis(100);
+
+lazy_static::lazy_static! {
+    static ref ARCHIVE_DB_WORK_SEMAPHORE: Arc<Semaphore> = Arc::new(Semaphore::new(ARCHIVE_DB_WORK_CONCURRENCY));
+    static ref APP_DB_WORK_SEMAPHORE: Arc<Semaphore> = Arc::new(Semaphore::new(APP_DB_WORK_CONCURRENCY));
+}
+
+async fn acquire_db_work_permit(
+    kind: &'static str,
+    semaphore: &'static Arc<Semaphore>,
+    timeout_duration: Duration,
+) -> anyhow::Result<OwnedSemaphorePermit> {
+    tokio::time::timeout(timeout_duration, Arc::clone(semaphore).acquire_owned())
+        .await
+        .map_err(|_| anyhow::anyhow!("{kind} busy: too many queued database tasks"))?
+        .map_err(|e| anyhow::anyhow!("{kind} semaphore closed: {e}"))
 }
 
 pub async fn init_pools(config: &Config) -> anyhow::Result<Arc<DbPools>> {
@@ -121,12 +142,24 @@ where
     T: Send + 'static,
     F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
 {
+    let max_duration = Duration::from_secs(2);
+    let permit = acquire_db_work_permit(
+        "archive_db",
+        &ARCHIVE_DB_WORK_SEMAPHORE,
+        DB_WORK_ADMISSION_TIMEOUT,
+    )
+    .await?;
     let archive_db = pools.archive_db.clone();
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let deadline = Instant::now() + max_duration;
         let mut conn = archive_db
-            .get()
+            .get_timeout(max_duration)
             .map_err(|e| anyhow::anyhow!("archive_db pool error: {}", e))?;
-        f(&mut conn)
+        conn.progress_handler(20_000, Some(move || Instant::now() >= deadline))?;
+        let result = f(&mut conn);
+        conn.progress_handler(0, None::<fn() -> bool>)?;
+        result
     })
     .await
     .context("archive_db spawn_blocking join failed")?
@@ -142,8 +175,15 @@ where
     T: Send + 'static,
     F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
 {
+    let permit = acquire_db_work_permit(
+        "archive_db",
+        &ARCHIVE_DB_WORK_SEMAPHORE,
+        DB_WORK_ADMISSION_TIMEOUT.min(max_duration),
+    )
+    .await?;
     let archive_db = pools.archive_db.clone();
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let started = Instant::now();
         let deadline = started + max_duration;
         let mut conn = archive_db
@@ -177,8 +217,11 @@ where
     T: Send + 'static,
     F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
 {
+    let permit =
+        acquire_db_work_permit("app_db", &APP_DB_WORK_SEMAPHORE, DB_WORK_ADMISSION_TIMEOUT).await?;
     let app_db = pools.app_db.clone();
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let started = Instant::now();
         let mut conn = app_db
             .get_timeout(Duration::from_secs(5))

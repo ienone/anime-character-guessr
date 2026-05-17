@@ -2,6 +2,19 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import axios from 'axios'
 
 const IMAGE_PROXY_RE = /\/img\/(?:(subject)\/)?(?:(medium)\/)?(\d+)\.webp(?:\?.*)?$/
+const RESOLVE_RETRYABLE_CODES = new Set(['SOURCE_BUSY', 'SOURCE_PENDING', 'DOWNLOAD_FAILED'])
+const MAX_RESOLVE_ATTEMPTS = 7
+
+function resolveRetryDelay(data, attempt, preferSource) {
+  const retryAfterMs = Number(data?.retryAfterMs)
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+    return Math.min(Math.max(retryAfterMs, 250), 5000)
+  }
+
+  const baseDelay = preferSource ? 500 : 800
+  const multiplier = 2 ** Math.min(Math.max(attempt - 1, 0), 3)
+  return Math.min(baseDelay * multiplier, 5000)
+}
 
 function parseImageProxySrc(src) {
   const match = typeof src === 'string' ? src.match(IMAGE_PROXY_RE) : null
@@ -74,11 +87,22 @@ function Image({
     if (!parsed) return
 
     const resolvedVariant = variant || (parsed.isMedium || preferSource ? 'medium' : 'grid')
-    const resolvedWaitMs = cachedOnly ? 0 : (waitMs ?? (resolvedVariant === 'medium' ? 1200 : 900))
+    const resolvedWaitMs = cachedOnly ? 0 : (waitMs ?? (resolvedVariant === 'medium' ? 900 : 450))
     let cancelled = false
     let resolveDelayId = null
+    let attempt = 0
+
+    function scheduleResolve(delayMs) {
+      if (cancelled || mountedRef.current === false) return
+      if (resolveDelayId) clearTimeout(resolveDelayId)
+      resolveDelayId = setTimeout(() => {
+        resolveDelayId = null
+        resolve()
+      }, delayMs)
+    }
 
     async function resolve() {
+      attempt += 1
       try {
         const base = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
         const apiBase = base.replace(/\/$/, '')
@@ -99,14 +123,15 @@ function Image({
           setCurrentSrc(data.imgUrl || src)
         } else if (!cachedOnly && data.sourceUrl) {
           setCurrentSrc(data.sourceUrl)
-        } else if (!cachedOnly && data.imgUrl) {
-          const retryDelayMs = preferSource ? 400 : 800
-          resolveDelayId = setTimeout(() => {
-            if (cancelled || !mountedRef.current) return
-            setCurrentSrc(data.imgUrl)
-          }, retryDelayMs)
+        } else if (!cachedOnly && RESOLVE_RETRYABLE_CODES.has(data.code) && attempt < MAX_RESOLVE_ATTEMPTS) {
+          scheduleResolve(resolveRetryDelay(data, attempt, preferSource))
         }
-      } catch {
+      } catch (error) {
+        const status = error?.response?.status
+        if (!cachedOnly && attempt < MAX_RESOLVE_ATTEMPTS && (status === 429 || status === 503)) {
+          scheduleResolve(resolveRetryDelay({ retryAfterMs: 1500 }, attempt, preferSource))
+          return
+        }
         // If resolve fails (server down), fall back to trying the original src.
         // Normal retry logic will handle errors.
         if (cancelled || !mountedRef.current) return

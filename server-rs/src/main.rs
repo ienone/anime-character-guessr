@@ -1,11 +1,15 @@
 use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::{Router, routing::get};
 use socketioxide::SocketIo;
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::thread;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
+use tracing_subscriber::fmt::MakeWriter;
 
 mod config;
 mod db;
@@ -19,7 +23,7 @@ use socket::state::ServerState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_non_blocking_tracing();
     std::panic::set_hook(Box::new(|panic_info| {
         tracing::error!(%panic_info, "panic");
     }));
@@ -68,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn image cache cleanup background task
     utils::start_image_cache_cleanup(Arc::clone(&db_pools));
+    routes::start_image_diagnostics_logger();
 
     // CORS — must allow the dev/prod client origin(s) for both REST and Socket.IO.
     let cors = build_cors_layer(&config.client_url);
@@ -101,6 +106,66 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+#[derive(Clone)]
+struct NonBlockingLogWriter {
+    sender: SyncSender<Vec<u8>>,
+}
+
+struct NonBlockingLogLineWriter {
+    sender: SyncSender<Vec<u8>>,
+    buffer: Vec<u8>,
+}
+
+impl Write for NonBlockingLogLineWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            let bytes = std::mem::take(&mut self.buffer);
+            let _ = self.sender.try_send(bytes);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NonBlockingLogLineWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl<'a> MakeWriter<'a> for NonBlockingLogWriter {
+    type Writer = NonBlockingLogLineWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        NonBlockingLogLineWriter {
+            sender: self.sender.clone(),
+            buffer: Vec::with_capacity(512),
+        }
+    }
+}
+
+fn init_non_blocking_tracing() {
+    let (sender, receiver) = sync_channel::<Vec<u8>>(8192);
+    let _ = thread::Builder::new()
+        .name("nonblocking-log-writer".to_string())
+        .spawn(move || {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            while let Ok(bytes) = receiver.recv() {
+                let _ = stdout.write_all(&bytes);
+                let _ = stdout.flush();
+            }
+        });
+
+    tracing_subscriber::fmt()
+        .with_writer(NonBlockingLogWriter { sender })
+        .init();
 }
 
 /// Build a CORS layer from a comma-separated origins list.

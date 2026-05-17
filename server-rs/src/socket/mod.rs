@@ -19,12 +19,14 @@ use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tracing::{info, warn};
 
 const OUTBOX_CAPACITY: usize = 256;
 const HIGH_OUTBOX_OVERFLOW_CAPACITY: usize = 256;
 const LOBBY_OUTBOX_CAPACITY: usize = 64;
+const OUTBOX_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const SOCKET_EMIT_TIMEOUT: Duration = Duration::from_millis(1500);
 pub const MAX_ROOM_PLAYERS: usize = 8;
 const ANSWER_SETTER_TIMEOUT_SECS: u64 = 120;
 
@@ -319,17 +321,27 @@ fn take_high_overflow(target: &str) -> Option<OutboxMessage> {
 }
 
 async fn deliver_outbox_message(io: &SocketIo, target: &str, message: OutboxMessage) {
-    let _ = io
-        .to(target.to_string())
-        .emit(message.event, &message.payload)
-        .await;
+    let _ = tokio::time::timeout(
+        SOCKET_EMIT_TIMEOUT,
+        io.to(target.to_string())
+            .emit(message.event, &message.payload),
+    )
+    .await;
 
     for coalesced in take_coalesced_for_target(target) {
-        let _ = io
-            .to(target.to_string())
-            .emit(coalesced.event, &coalesced.payload)
-            .await;
+        let _ = tokio::time::timeout(
+            SOCKET_EMIT_TIMEOUT,
+            io.to(target.to_string())
+                .emit(coalesced.event, &coalesced.payload),
+        )
+        .await;
     }
+}
+
+fn cleanup_outbox_target(target: &str) {
+    TARGET_OUTBOXES.remove(target);
+    HIGH_OUTBOX_OVERFLOW.remove(target);
+    let _ = take_coalesced_for_target(target);
 }
 
 fn get_or_spawn_outbox(io: &SocketIo, target: &str) -> TargetOutbox {
@@ -359,26 +371,49 @@ fn get_or_spawn_outbox(io: &SocketIo, target: &str) -> TargetOutbox {
             let message = if let Some(message) = take_high_overflow(&target_id) {
                 Some(message)
             } else {
-                tokio::select! {
-                    biased;
-                    message = high_receiver.recv(), if !high_closed => {
-                        match message {
-                            Some(message) => Some(message),
-                            None => {
-                                high_closed = true;
-                                None
+                let receive_next = async {
+                    tokio::select! {
+                        biased;
+                        message = high_receiver.recv(), if !high_closed => {
+                            match message {
+                                Some(message) => Some(message),
+                                None => {
+                                    high_closed = true;
+                                    None
+                                }
+                            }
+                        }
+                        message = normal_receiver.recv(), if !normal_closed => {
+                            match message {
+                                Some(message) => Some(message),
+                                None => {
+                                    normal_closed = true;
+                                    None
+                                }
                             }
                         }
                     }
-                    message = normal_receiver.recv(), if !normal_closed => {
-                        match message {
-                            Some(message) => Some(message),
-                            None => {
+                };
+                match tokio::time::timeout(OUTBOX_IDLE_TIMEOUT, receive_next).await {
+                    Ok(message) => message,
+                    Err(_) => match high_receiver.try_recv() {
+                        Ok(message) => Some(message),
+                        Err(TryRecvError::Disconnected) => {
+                            high_closed = true;
+                            None
+                        }
+                        Err(TryRecvError::Empty) => match normal_receiver.try_recv() {
+                            Ok(message) => Some(message),
+                            Err(TryRecvError::Disconnected) => {
                                 normal_closed = true;
                                 None
                             }
-                        }
-                    }
+                            Err(TryRecvError::Empty) => {
+                                cleanup_outbox_target(&target_id);
+                                break;
+                            }
+                        },
+                    },
                 }
             };
 
@@ -387,7 +422,7 @@ fn get_or_spawn_outbox(io: &SocketIo, target: &str) -> TargetOutbox {
             };
             deliver_outbox_message(&io_worker, &target_id, message).await;
         }
-        TARGET_OUTBOXES.remove(&target_id);
+        cleanup_outbox_target(&target_id);
     });
 
     outbox
@@ -605,7 +640,9 @@ pub(crate) fn broadcast_lobby_rooms_updated(io: &SocketIo) {
                     while let Ok(next) = receiver.try_recv() {
                         latest = next;
                     }
-                    let _ = io.emit("roomsUpdated", &latest).await;
+                    let _ =
+                        tokio::time::timeout(SOCKET_EMIT_TIMEOUT, io.emit("roomsUpdated", &latest))
+                            .await;
                 }
             });
             *slot = Some(sender.clone());

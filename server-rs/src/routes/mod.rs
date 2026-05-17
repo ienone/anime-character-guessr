@@ -7,13 +7,14 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use serde_json::{Value, json};
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{Semaphore, broadcast};
-use tracing::warn;
+use tracing::{info, warn};
 
 pub mod archive;
 pub mod game;
@@ -34,6 +35,56 @@ pub use rooms::room_routes;
 struct CacheEntry {
     expires_at_ms: i64,
     value: Value,
+}
+
+#[derive(Clone)]
+struct PendingImageSource {
+    tx: broadcast::Sender<bool>,
+    token: u64,
+}
+
+#[derive(Clone)]
+struct PendingImageCacheFill {
+    tx: broadcast::Sender<ImageCacheFillStatus>,
+    token: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageSourceOutcome {
+    Available,
+    Busy,
+    Pending,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageCacheFillStatus {
+    Cached,
+    SourceBusy,
+    SourcePending,
+    SourceMissing,
+    DownloadFailed,
+    AdmissionBusy,
+}
+
+enum PendingSourceRole {
+    Leader {
+        tx: broadcast::Sender<bool>,
+        token: u64,
+    },
+    Follower {
+        rx: broadcast::Receiver<bool>,
+    },
+}
+
+enum PendingCacheFillRole {
+    Leader {
+        tx: broadcast::Sender<ImageCacheFillStatus>,
+        token: u64,
+    },
+    Follower {
+        rx: broadcast::Receiver<ImageCacheFillStatus>,
+    },
 }
 
 fn now_ms() -> i64 {
@@ -99,22 +150,33 @@ lazy_static::lazy_static! {
     static ref INDEX_SUBJECTS_CACHE: DashMap<String, CacheEntry> = DashMap::new(); // key = indexId:offset:limit
     // In-flight de-duplication for BGM image source resolution (per character_id).
     // Prevents bursty concurrent requests all hitting BGM for the same character.
-    static ref PENDING_IMAGE_SOURCE: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
+    static ref PENDING_IMAGE_SOURCE: DashMap<i64, PendingImageSource> = DashMap::new();
     // Same idea, but for subject images (independent namespace).
-    static ref PENDING_SUBJECT_IMAGE_SOURCE: DashMap<i64, broadcast::Sender<bool>> = DashMap::new();
+    static ref PENDING_SUBJECT_IMAGE_SOURCE: DashMap<i64, PendingImageSource> = DashMap::new();
+    // Coalesces the whole "source resolve + download + transcode" cache fill path.
+    static ref PENDING_IMAGE_CACHE_FILL: DashMap<String, PendingImageCacheFill> = DashMap::new();
     // Shared cap for external image-source resolution across characters and subjects.
     static ref IMAGE_SOURCE_RESOLVE_SEMAPHORE: Semaphore = Semaphore::new(4);
+    // Hard cap for cache-fill tasks so cold-id bursts cannot spawn unbounded work.
+    static ref IMAGE_CACHE_FILL_SEMAPHORE: Semaphore = Semaphore::new(64);
 }
 
 const IMAGE_SOURCE_PERMIT_TIMEOUT: Duration = Duration::from_millis(500);
+const IMAGE_SOURCE_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const IMAGE_RESOLVE_DEFAULT_WAIT_MS: u64 = 900;
 const IMAGE_RESOLVE_MAX_WAIT_MS: u64 = 5_000;
-const IMAGE_SOURCE_FALLBACK_WAIT_MS: u64 = 500;
 const BGM_PROXY_LIMIT_PER_MINUTE: usize = 90;
 const IMAGE_RESOLVE_LIMIT_PER_MINUTE: usize = 180;
 const GAME_RANDOM_LIMIT_PER_MINUTE: usize = 60;
 const GAME_CHARACTER_LIMIT_PER_MINUTE: usize = 120;
 const TTL_CACHE_MAX_ENTRIES: usize = 2048;
+
+static NEXT_PENDING_TOKEN: AtomicU64 = AtomicU64::new(1);
+static IMAGE_SOURCE_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static IMAGE_CACHE_FILL_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static IMAGE_SOURCE_BUSY_CHARACTER: AtomicU64 = AtomicU64::new(0);
+static IMAGE_SOURCE_BUSY_SUBJECT: AtomicU64 = AtomicU64::new(0);
+static IMAGE_CACHE_FILL_ADMISSION_BUSY: AtomicU64 = AtomicU64::new(0);
 
 /// /api/* — game logic, leaderboard, stats
 pub fn api_routes(pools: Arc<DbPools>) -> Router {
@@ -156,6 +218,144 @@ pub fn image_routes(pools: Arc<DbPools>) -> Router {
         .route("/medium/{id}", get(get_character_medium_image))
         .route("/{id}", get(get_character_image))
         .with_state(pools)
+}
+
+pub fn start_image_diagnostics_logger() {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let character_busy = IMAGE_SOURCE_BUSY_CHARACTER.swap(0, Ordering::Relaxed);
+            let subject_busy = IMAGE_SOURCE_BUSY_SUBJECT.swap(0, Ordering::Relaxed);
+            let fill_busy = IMAGE_CACHE_FILL_ADMISSION_BUSY.swap(0, Ordering::Relaxed);
+            let source_in_flight = IMAGE_SOURCE_IN_FLIGHT.load(Ordering::Relaxed);
+            let cache_fill_in_flight = IMAGE_CACHE_FILL_IN_FLIGHT.load(Ordering::Relaxed);
+
+            if character_busy > 0
+                || subject_busy > 0
+                || fill_busy > 0
+                || source_in_flight > 0
+                || cache_fill_in_flight > 0
+            {
+                info!(
+                    character_source_busy = character_busy,
+                    subject_source_busy = subject_busy,
+                    cache_fill_admission_busy = fill_busy,
+                    source_in_flight,
+                    cache_fill_in_flight,
+                    source_permits_available = IMAGE_SOURCE_RESOLVE_SEMAPHORE.available_permits(),
+                    cache_fill_permits_available = IMAGE_CACHE_FILL_SEMAPHORE.available_permits(),
+                    pending_character_sources = PENDING_IMAGE_SOURCE.len(),
+                    pending_subject_sources = PENDING_SUBJECT_IMAGE_SOURCE.len(),
+                    pending_cache_fills = PENDING_IMAGE_CACHE_FILL.len(),
+                    "image pipeline diagnostics"
+                );
+            }
+        }
+    });
+}
+
+fn next_pending_token() -> u64 {
+    NEXT_PENDING_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
+fn pending_source_role(
+    map: &'static DashMap<i64, PendingImageSource>,
+    id: i64,
+) -> PendingSourceRole {
+    match map.entry(id) {
+        Entry::Occupied(entry) => PendingSourceRole::Follower {
+            rx: entry.get().tx.subscribe(),
+        },
+        Entry::Vacant(entry) => {
+            let (tx, _) = broadcast::channel(16);
+            let token = next_pending_token();
+            entry.insert(PendingImageSource {
+                tx: tx.clone(),
+                token,
+            });
+            IMAGE_SOURCE_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+            PendingSourceRole::Leader { tx, token }
+        }
+    }
+}
+
+fn pending_cache_fill_role(cache_key: &str) -> PendingCacheFillRole {
+    match PENDING_IMAGE_CACHE_FILL.entry(cache_key.to_string()) {
+        Entry::Occupied(entry) => PendingCacheFillRole::Follower {
+            rx: entry.get().tx.subscribe(),
+        },
+        Entry::Vacant(entry) => {
+            let (tx, _) = broadcast::channel(16);
+            let token = next_pending_token();
+            entry.insert(PendingImageCacheFill {
+                tx: tx.clone(),
+                token,
+            });
+            IMAGE_CACHE_FILL_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+            PendingCacheFillRole::Leader { tx, token }
+        }
+    }
+}
+
+struct PendingSourceCleanup {
+    map: &'static DashMap<i64, PendingImageSource>,
+    id: i64,
+    token: u64,
+    tx: broadcast::Sender<bool>,
+}
+
+impl Drop for PendingSourceCleanup {
+    fn drop(&mut self) {
+        let _ = self.tx.send(true);
+        let should_remove = self
+            .map
+            .get(&self.id)
+            .is_some_and(|entry| entry.token == self.token);
+        if should_remove {
+            self.map.remove(&self.id);
+        }
+        IMAGE_SOURCE_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct PendingCacheFillCleanup {
+    cache_key: String,
+    token: u64,
+    tx: broadcast::Sender<ImageCacheFillStatus>,
+    status: ImageCacheFillStatus,
+}
+
+impl Drop for PendingCacheFillCleanup {
+    fn drop(&mut self) {
+        let _ = self.tx.send(self.status);
+        let should_remove = PENDING_IMAGE_CACHE_FILL
+            .get(&self.cache_key)
+            .is_some_and(|entry| entry.token == self.token);
+        if should_remove {
+            PENDING_IMAGE_CACHE_FILL.remove(&self.cache_key);
+        }
+        IMAGE_CACHE_FILL_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn record_source_busy(kind: ImageKind) {
+    match kind {
+        ImageKind::Character => {
+            IMAGE_SOURCE_BUSY_CHARACTER.fetch_add(1, Ordering::Relaxed);
+        }
+        ImageKind::Subject => {
+            IMAGE_SOURCE_BUSY_SUBJECT.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+}
+
+fn image_source_outcome_status(outcome: ImageSourceOutcome) -> ImageCacheFillStatus {
+    match outcome {
+        ImageSourceOutcome::Available => ImageCacheFillStatus::SourcePending,
+        ImageSourceOutcome::Busy => ImageCacheFillStatus::SourceBusy,
+        ImageSourceOutcome::Pending => ImageCacheFillStatus::SourcePending,
+        ImageSourceOutcome::Missing => ImageCacheFillStatus::SourceMissing,
+    }
 }
 
 fn image_resolve_limit_rejection(
@@ -290,30 +490,14 @@ async fn load_cached_image_path(pools: &Arc<DbPools>, cache_key: String) -> Opti
 }
 
 async fn cached_image_exists(pools: &Arc<DbPools>, cache_key: &str) -> bool {
+    let deterministic_path = utils::image_cache_file_path(&pools.image_cache_dir, cache_key);
+    if tokio::fs::metadata(&deterministic_path).await.is_ok() {
+        return true;
+    }
+
     match load_cached_image_path(pools, cache_key.to_string()).await {
         Some(path) => tokio::fs::metadata(path).await.is_ok(),
         None => false,
-    }
-}
-
-async fn wait_for_cached_image(pools: &Arc<DbPools>, cache_key: &str, wait_ms: u64) -> bool {
-    if wait_ms == 0 {
-        return cached_image_exists(pools, cache_key).await;
-    }
-
-    let deadline = Instant::now() + Duration::from_millis(wait_ms);
-    loop {
-        if cached_image_exists(pools, cache_key).await {
-            return true;
-        }
-
-        let now = Instant::now();
-        if now >= deadline {
-            return false;
-        }
-
-        let remaining = deadline.saturating_duration_since(now);
-        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
     }
 }
 
@@ -332,7 +516,7 @@ async fn ensure_image_source_cached_for_kind(
     pools: &Arc<DbPools>,
     kind: ImageKind,
     id: i64,
-) -> Option<(String, String)> {
+) -> (ImageSourceOutcome, Option<(String, String)>) {
     match kind {
         ImageKind::Character => ensure_image_source_cached(pools, id).await,
         ImageKind::Subject => ensure_subject_image_source_cached(pools, id).await,
@@ -349,57 +533,58 @@ async fn load_cached_source_url(
     choose_image_source(medium, grid, variant)
 }
 
-async fn wait_for_cached_source_url(
-    pools: &Arc<DbPools>,
-    kind: ImageKind,
-    variant: ImageVariant,
-    id: i64,
-    wait_ms: u64,
-) -> Option<String> {
-    if wait_ms == 0 {
-        return load_cached_source_url(pools, kind, variant, id).await;
-    }
-
-    let deadline = Instant::now() + Duration::from_millis(wait_ms);
-    loop {
-        if let Some(url) = load_cached_source_url(pools, kind, variant, id).await {
-            return Some(url);
-        }
-
-        let now = Instant::now();
-        if now >= deadline {
-            return None;
-        }
-
-        let remaining = deadline.saturating_duration_since(now);
-        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
-    }
-}
-
 fn spawn_image_cache_fill(
     pools: Arc<DbPools>,
     kind: ImageKind,
     variant: ImageVariant,
     id: i64,
     cache_key: String,
-) {
-    tokio::spawn(async move {
-        if cached_image_exists(&pools, &cache_key).await {
-            return;
+) -> broadcast::Receiver<ImageCacheFillStatus> {
+    match pending_cache_fill_role(&cache_key) {
+        PendingCacheFillRole::Follower { rx } => rx,
+        PendingCacheFillRole::Leader { tx, token } => {
+            let rx = tx.subscribe();
+            tokio::spawn(async move {
+                let mut cleanup = PendingCacheFillCleanup {
+                    cache_key: cache_key.clone(),
+                    token,
+                    tx,
+                    status: ImageCacheFillStatus::SourcePending,
+                };
+
+                let Ok(_fill_permit) = IMAGE_CACHE_FILL_SEMAPHORE.try_acquire() else {
+                    IMAGE_CACHE_FILL_ADMISSION_BUSY.fetch_add(1, Ordering::Relaxed);
+                    cleanup.status = ImageCacheFillStatus::AdmissionBusy;
+                    return;
+                };
+
+                if cached_image_exists(&pools, &cache_key).await {
+                    cleanup.status = ImageCacheFillStatus::Cached;
+                    return;
+                }
+
+                let (outcome, source) = ensure_image_source_cached_for_kind(&pools, kind, id).await;
+                let Some((image_medium, image_grid)) = source else {
+                    cleanup.status = image_source_outcome_status(outcome);
+                    return;
+                };
+
+                let Some(source_url) = choose_image_source(image_medium, image_grid, variant)
+                else {
+                    cleanup.status = ImageCacheFillStatus::SourceMissing;
+                    return;
+                };
+
+                cleanup.status =
+                    if utils::download_and_cache_image(cache_key, source_url, pools).await {
+                        ImageCacheFillStatus::Cached
+                    } else {
+                        ImageCacheFillStatus::DownloadFailed
+                    };
+            });
+            rx
         }
-
-        let Some((image_medium, image_grid)) =
-            ensure_image_source_cached_for_kind(&pools, kind, id).await
-        else {
-            return;
-        };
-
-        let Some(source_url) = choose_image_source(image_medium, image_grid, variant) else {
-            return;
-        };
-
-        utils::download_and_cache_image(cache_key, source_url, pools).await;
-    });
+    }
 }
 
 /// Fire-and-forget warmup for answer reveal / image-hint medium images.
@@ -434,6 +619,18 @@ async fn serve_cached_image(
     }
 
     let cache_key = image_cache_key(kind, variant, id);
+    let deterministic_path = utils::image_cache_file_path(&pools.image_cache_dir, &cache_key);
+
+    if let Ok(content) = tokio::fs::read(&deterministic_path).await {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+        headers.insert(
+            header::CACHE_CONTROL,
+            "public, max-age=31536000".parse().unwrap(),
+        );
+        return (headers, content).into_response();
+    }
+
     let local_path = load_cached_image_path(&pools, cache_key).await;
 
     if let Some(path) = local_path
@@ -511,9 +708,18 @@ async fn resolve_image(
         .map(|v| v != "none" && v != "local")
         .unwrap_or(true);
 
-    spawn_image_cache_fill(Arc::clone(&pools), kind, variant, id, cache_key.clone());
+    let mut fill_rx =
+        spawn_image_cache_fill(Arc::clone(&pools), kind, variant, id, cache_key.clone());
+    let fill_status = if wait_ms == 0 {
+        None
+    } else {
+        tokio::time::timeout(Duration::from_millis(wait_ms), fill_rx.recv())
+            .await
+            .ok()
+            .and_then(Result::ok)
+    };
 
-    if wait_for_cached_image(&pools, &cache_key, wait_ms).await {
+    if cached_image_exists(&pools, &cache_key).await {
         return Json(json!({
             "cached": true,
             "variant": variant.as_str(),
@@ -523,21 +729,45 @@ async fn resolve_image(
     }
 
     let source_url = if allow_source_fallback {
-        wait_for_cached_source_url(&pools, kind, variant, id, IMAGE_SOURCE_FALLBACK_WAIT_MS).await
+        load_cached_source_url(&pools, kind, variant, id).await
     } else {
         None
+    };
+    let status_code = if source_url.is_some() {
+        "TIMEOUT"
+    } else {
+        match fill_status {
+            Some(ImageCacheFillStatus::SourceBusy | ImageCacheFillStatus::AdmissionBusy) => {
+                "SOURCE_BUSY"
+            }
+            Some(ImageCacheFillStatus::SourceMissing) => "SOURCE_MISSING",
+            Some(ImageCacheFillStatus::DownloadFailed) => "DOWNLOAD_FAILED",
+            _ if IMAGE_SOURCE_RESOLVE_SEMAPHORE.available_permits() == 0 => "SOURCE_BUSY",
+            _ => "SOURCE_PENDING",
+        }
     };
 
     let mut body = json!({
         "cached": false,
-        "code": if source_url.is_some() { "TIMEOUT" } else { "SOURCE_PENDING" },
+        "code": status_code,
         "variant": variant.as_str(),
         "imgUrl": img_url,
     });
+    let retry_after_ms = match status_code {
+        "SOURCE_BUSY" => Some(1200),
+        "SOURCE_PENDING" => Some(800),
+        "DOWNLOAD_FAILED" => Some(2500),
+        _ => None,
+    };
     if let Some(url) = source_url
         && let Value::Object(ref mut obj) = body
     {
         obj.insert("sourceUrl".to_string(), Value::String(url));
+    }
+    if let Some(retry_after_ms) = retry_after_ms
+        && let Value::Object(ref mut obj) = body
+    {
+        obj.insert("retryAfterMs".to_string(), json!(retry_after_ms));
     }
 
     (StatusCode::ACCEPTED, Json(body)).into_response()
@@ -1063,53 +1293,42 @@ fn extract_images_from_bgm_character(raw: &Value) -> (String, String) {
     (medium, grid)
 }
 
-async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(String, String)> {
+async fn ensure_image_source_cached(
+    pools: &Arc<DbPools>,
+    id: i64,
+) -> (ImageSourceOutcome, Option<(String, String)>) {
     // 1) app.sqlite cache
     if let Some((m, g)) = load_cached_image_source(pools, id).await {
-        return Some((m, g));
+        return (ImageSourceOutcome::Available, Some((m, g)));
     }
 
     // 2) In-flight de-duplication: if another request is already resolving this id,
     // wait briefly and then re-check app.sqlite.
-    if let Some(entry) = PENDING_IMAGE_SOURCE.get(&id) {
-        let mut rx = entry.value().subscribe();
-        let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
-        if let Some((m, g)) = load_cached_image_source(pools, id).await {
-            return Some((m, g));
-        }
-        // still not available; fall through to do our own resolution best-effort
-    }
-
-    // Become the leader for this id (best-effort). If another leader races us, we just join it.
-    let (tx, _rx) = broadcast::channel(1);
-    let we_are_leader = PENDING_IMAGE_SOURCE.insert(id, tx.clone()).is_none();
-    struct CleanupPendingImageSource(i64);
-    impl Drop for CleanupPendingImageSource {
-        fn drop(&mut self) {
-            PENDING_IMAGE_SOURCE.remove(&self.0);
-        }
-    }
-
-    if !we_are_leader {
-        // Someone else inserted concurrently. Wait and re-check.
-        if let Some(entry) = PENDING_IMAGE_SOURCE.get(&id) {
-            let mut rx = entry.value().subscribe();
+    let _cleanup = match pending_source_role(&PENDING_IMAGE_SOURCE, id) {
+        PendingSourceRole::Follower { mut rx } => {
             let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
+            if let Some((m, g)) = load_cached_image_source(pools, id).await {
+                return (ImageSourceOutcome::Available, Some((m, g)));
+            }
+            return (ImageSourceOutcome::Pending, None);
         }
-        return load_cached_image_source(pools, id).await;
-    }
-    let _cleanup = CleanupPendingImageSource(id);
+        PendingSourceRole::Leader { tx, token } => PendingSourceCleanup {
+            map: &PENDING_IMAGE_SOURCE,
+            id,
+            token,
+            tx,
+        },
+    };
 
     if !archive_character_exists(pools, id).await {
         warn!(
             id,
             "character image source resolution skipped: id not in archive"
         );
-        let _ = tx.send(true);
-        return None;
+        return (ImageSourceOutcome::Missing, None);
     }
 
-    let _permit = match tokio::time::timeout(
+    let permit = match tokio::time::timeout(
         IMAGE_SOURCE_PERMIT_TIMEOUT,
         IMAGE_SOURCE_RESOLVE_SEMAPHORE.acquire(),
     )
@@ -1117,40 +1336,47 @@ async fn ensure_image_source_cached(pools: &Arc<DbPools>, id: i64) -> Option<(St
     {
         Ok(Ok(permit)) => permit,
         _ => {
-            warn!(
-                id,
-                "character image source resolution skipped: concurrency limit reached"
+            record_source_busy(ImageKind::Character);
+            return (
+                ImageSourceOutcome::Busy,
+                load_cached_image_source(pools, id).await,
             );
-            let _ = tx.send(true);
-            return load_cached_image_source(pools, id).await;
         }
     };
 
-    // 3) BGM image endpoint fallback (preferred): capture Location without downloading the image.
-    let (medium, grid) = tokio::join!(
-        bgm_get_character_image_location(id, "medium"),
-        bgm_get_character_image_location(id, "grid"),
-    );
-    let medium = medium.ok().flatten().unwrap_or_default();
-    let grid = grid.ok().flatten().unwrap_or_default();
-    if !medium.trim().is_empty() || !grid.trim().is_empty() {
-        save_cached_image_source(pools, id, medium.clone(), grid.clone(), "bgm_image").await;
-        let _ = tx.send(true);
-        return Some((medium, grid));
-    }
-
-    // 4) BGM character detail fallback (legacy): parse `images` field.
-    if let Ok(raw) = bgm_get_character(id).await {
-        let (m, g) = extract_images_from_bgm_character(&raw);
-        if !m.trim().is_empty() || !g.trim().is_empty() {
-            save_cached_image_source(pools, id, m.clone(), g.clone(), "bgm").await;
-            let _ = tx.send(true);
-            return Some((m, g));
+    let resolved = tokio::time::timeout(IMAGE_SOURCE_TOTAL_TIMEOUT, async {
+        // 3) BGM image endpoint fallback (preferred): capture Location without downloading the image.
+        let (medium, grid) = tokio::join!(
+            bgm_get_character_image_location(id, "medium"),
+            bgm_get_character_image_location(id, "grid"),
+        );
+        let medium = medium.ok().flatten().unwrap_or_default();
+        let grid = grid.ok().flatten().unwrap_or_default();
+        if !medium.trim().is_empty() || !grid.trim().is_empty() {
+            return Some((medium, grid, "bgm_image"));
         }
-    }
 
-    let _ = tx.send(true);
-    None
+        // 4) BGM character detail fallback (legacy): parse `images` field.
+        if let Ok(raw) = bgm_get_character(id).await {
+            let (m, g) = extract_images_from_bgm_character(&raw);
+            if !m.trim().is_empty() || !g.trim().is_empty() {
+                return Some((m, g, "bgm"));
+            }
+        }
+
+        None
+    })
+    .await;
+    drop(permit);
+
+    match resolved {
+        Ok(Some((m, g, source))) => {
+            save_cached_image_source(pools, id, m.clone(), g.clone(), source).await;
+            (ImageSourceOutcome::Available, Some((m, g)))
+        }
+        Ok(None) => (ImageSourceOutcome::Missing, None),
+        Err(_) => (ImageSourceOutcome::Pending, None),
+    }
 }
 
 async fn get_character_image(
@@ -1319,49 +1545,36 @@ async fn save_cached_subject_image_source(
 async fn ensure_subject_image_source_cached(
     pools: &Arc<DbPools>,
     id: i64,
-) -> Option<(String, String)> {
+) -> (ImageSourceOutcome, Option<(String, String)>) {
     if let Some((m, g)) = load_cached_subject_image_source(pools, id).await {
-        return Some((m, g));
+        return (ImageSourceOutcome::Available, Some((m, g)));
     }
 
-    if let Some(entry) = PENDING_SUBJECT_IMAGE_SOURCE.get(&id) {
-        let mut rx = entry.value().subscribe();
-        let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
-        if let Some((m, g)) = load_cached_subject_image_source(pools, id).await {
-            return Some((m, g));
-        }
-    }
-
-    let (tx, _rx) = broadcast::channel(1);
-    let we_are_leader = PENDING_SUBJECT_IMAGE_SOURCE
-        .insert(id, tx.clone())
-        .is_none();
-    struct CleanupPendingSubjectImageSource(i64);
-    impl Drop for CleanupPendingSubjectImageSource {
-        fn drop(&mut self) {
-            PENDING_SUBJECT_IMAGE_SOURCE.remove(&self.0);
-        }
-    }
-
-    if !we_are_leader {
-        if let Some(entry) = PENDING_SUBJECT_IMAGE_SOURCE.get(&id) {
-            let mut rx = entry.value().subscribe();
+    let _cleanup = match pending_source_role(&PENDING_SUBJECT_IMAGE_SOURCE, id) {
+        PendingSourceRole::Follower { mut rx } => {
             let _ = tokio::time::timeout(Duration::from_millis(1200), rx.recv()).await;
+            if let Some((m, g)) = load_cached_subject_image_source(pools, id).await {
+                return (ImageSourceOutcome::Available, Some((m, g)));
+            }
+            return (ImageSourceOutcome::Pending, None);
         }
-        return load_cached_subject_image_source(pools, id).await;
-    }
-    let _cleanup = CleanupPendingSubjectImageSource(id);
+        PendingSourceRole::Leader { tx, token } => PendingSourceCleanup {
+            map: &PENDING_SUBJECT_IMAGE_SOURCE,
+            id,
+            token,
+            tx,
+        },
+    };
 
     if !archive_subject_exists(pools, id).await {
         warn!(
             id,
             "subject image source resolution skipped: id not in archive"
         );
-        let _ = tx.send(true);
-        return None;
+        return (ImageSourceOutcome::Missing, None);
     }
 
-    let _permit = match tokio::time::timeout(
+    let permit = match tokio::time::timeout(
         IMAGE_SOURCE_PERMIT_TIMEOUT,
         IMAGE_SOURCE_RESOLVE_SEMAPHORE.acquire(),
     )
@@ -1369,39 +1582,45 @@ async fn ensure_subject_image_source_cached(
     {
         Ok(Ok(permit)) => permit,
         _ => {
-            warn!(
-                id,
-                "subject image source resolution skipped: concurrency limit reached"
+            record_source_busy(ImageKind::Subject);
+            return (
+                ImageSourceOutcome::Busy,
+                load_cached_subject_image_source(pools, id).await,
             );
-            let _ = tx.send(true);
-            return load_cached_subject_image_source(pools, id).await;
         }
     };
 
-    let (medium, grid) = tokio::join!(
-        bgm_get_subject_image_location(id, "common"),
-        bgm_get_subject_image_location(id, "grid"),
-    );
-    let medium = medium.ok().flatten().unwrap_or_default();
-    let grid = grid.ok().flatten().unwrap_or_default();
-    if !medium.trim().is_empty() || !grid.trim().is_empty() {
-        save_cached_subject_image_source(pools, id, medium.clone(), grid.clone(), "bgm_image")
-            .await;
-        let _ = tx.send(true);
-        return Some((medium, grid));
-    }
-
-    if let Ok(raw) = bgm_get(&format!("https://api.bgm.tv/v0/subjects/{}", id)).await {
-        let (m, g) = extract_images_from_bgm_subject(&raw);
-        if !m.trim().is_empty() || !g.trim().is_empty() {
-            save_cached_subject_image_source(pools, id, m.clone(), g.clone(), "bgm").await;
-            let _ = tx.send(true);
-            return Some((m, g));
+    let resolved = tokio::time::timeout(IMAGE_SOURCE_TOTAL_TIMEOUT, async {
+        let (medium, grid) = tokio::join!(
+            bgm_get_subject_image_location(id, "common"),
+            bgm_get_subject_image_location(id, "grid"),
+        );
+        let medium = medium.ok().flatten().unwrap_or_default();
+        let grid = grid.ok().flatten().unwrap_or_default();
+        if !medium.trim().is_empty() || !grid.trim().is_empty() {
+            return Some((medium, grid, "bgm_image"));
         }
-    }
 
-    let _ = tx.send(true);
-    None
+        if let Ok(raw) = bgm_get(&format!("https://api.bgm.tv/v0/subjects/{}", id)).await {
+            let (m, g) = extract_images_from_bgm_subject(&raw);
+            if !m.trim().is_empty() || !g.trim().is_empty() {
+                return Some((m, g, "bgm"));
+            }
+        }
+
+        None
+    })
+    .await;
+    drop(permit);
+
+    match resolved {
+        Ok(Some((m, g, source))) => {
+            save_cached_subject_image_source(pools, id, m.clone(), g.clone(), source).await;
+            (ImageSourceOutcome::Available, Some((m, g)))
+        }
+        Ok(None) => (ImageSourceOutcome::Missing, None),
+        Err(_) => (ImageSourceOutcome::Pending, None),
+    }
 }
 
 async fn get_subject_image(
