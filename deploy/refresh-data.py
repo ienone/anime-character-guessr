@@ -91,6 +91,11 @@ def install_snapshot(bundle, app, service, base_url):
                 live.rename(old)
             moved.append((live, old))
             staged.rename(live)
+        # Tantivy creates private metadata and lock files as the builder user.
+        owner = live_db.stat()
+        index = app / 'data/tantivy'
+        for path in (index, *index.rglob('*')):
+            shutil.chown(path, user=owner.st_uid, group=owner.st_gid)
         with sqlite3.connect(live_db) as db:
             db.execute('ATTACH DATABASE ? AS fresh', (str(bundle / 'cache.sqlite'),))
             db.execute('DELETE FROM character_vas')
