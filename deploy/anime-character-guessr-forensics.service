@@ -1,0 +1,9 @@
+[Unit]
+Description=Capture Anime Character Guessr source-linked hang diagnostics
+After=anime-character-guessr.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/anime-character-guessr-forensics
+TimeoutStartSec=90
+UMask=0077
