@@ -4,6 +4,7 @@ After=network-online.target anime-character-guessr.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=/opt/anime-character-guessr/anime-character-guessr.env
 ExecStart=/usr/bin/python3 /opt/anime-character-guessr/refresh-data.py
 Nice=15
 CPUQuota=50%
