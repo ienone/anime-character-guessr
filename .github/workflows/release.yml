@@ -71,16 +71,12 @@ jobs:
 
       - name: Build server
         working-directory: server-rs
-        run: cargo build --release --target ${{ env.SERVER_TARGET }}
+        run: |
+          export RUSTFLAGS="-C force-frame-pointers=yes -C force-unwind-tables=yes --remap-path-prefix=$GITHUB_WORKSPACE=/build/anime-character-guessr"
+          cargo build --locked --release --target ${{ env.SERVER_TARGET }}
 
       - name: Package server
-        run: |
-          mkdir -p release/server-rs
-          cp server-rs/target/${{ env.SERVER_TARGET }}/release/server-rs release/server-rs/server-rs
-          cp deploy/anime-character-guessr.env.example release/server-rs/anime-character-guessr.env.example
-          cp deploy/anime-character-guessr.service release/server-rs/anime-character-guessr.service
-          cp deploy/nginx-site.conf release/server-rs/nginx-site.conf
-          tar -czf server-rs-${{ env.SERVER_TARGET }}.tar.gz -C release/server-rs .
+        run: bash deploy/package-server.sh "${{ env.SERVER_TARGET }}"
 
       - name: Upload server artifact
         uses: actions/upload-artifact@v4
