@@ -24,3 +24,5 @@ systemctl enable --now anime-character-guessr-data.timer
 主程序启动会读取索引快照，因此数据切换需要重启。首页通过 `/api/archive/version` 显示题库来源日期。
 
 代理部署使用 `HOST=127.0.0.1` 和 `TRUST_PROXY_HEADERS=true`，Nginx 覆写 `X-Real-IP`。Docker 部署继续使用容器内部地址和已有代理设置。
+
+目录和未缓存图片需要访问 Bangumi。如果主机直连不可用、已有可用的本地代理，可在游戏服务的环境文件设置 `HTTPS_PROXY`，同时用 `NO_PROXY=localhost,127.0.0.1,::1` 排除本地请求。程序沿用 HTTP 客户端的标准代理支持；不要写死上游 IP。
