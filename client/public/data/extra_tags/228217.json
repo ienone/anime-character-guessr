@@ -1,0 +1,937 @@
+{
+  "160432": {
+    "_name": "无名之人",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160429": {
+    "_name": "艾米丽·黛儿",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160433": {
+    "_name": "弗雷迪·莱利",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "破译型": "<img src='/assets/tag/id5/破译型.png' alt='' />破译型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160438": {
+    "_name": "克利切·皮尔森",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160430": {
+    "_name": "艾玛·伍兹",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160461": {
+    "_name": "瑟维·勒·罗伊",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160442": {
+    "_name": "库特·弗兰克",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "破译型": "<img src='/assets/tag/id5/破译型.png' alt='' />破译型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160440": {
+    "_name": "奈布·萨贝达",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160435": {
+    "_name": "玛尔塔·贝坦菲尔",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160456": {
+    "_name": "特蕾西·列兹尼克",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "破译型": "<img src='/assets/tag/id5/破译型.png' alt='' />破译型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160469": {
+    "_name": "威廉·艾利斯",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型",
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160468": {
+    "_name": "海伦娜·亚当斯",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "破译型": "<img src='/assets/tag/id5/破译型.png' alt='' />破译型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160458": {
+    "_name": "菲欧娜·吉尔曼",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型",
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160449": {
+    "_name": "薇拉·奈尔",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160466": {
+    "_name": "凯文·阿尤索",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型",
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160448": {
+    "_name": "玛格丽莎·泽莱",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "74336": {
+    "_name": "伊莱·克拉克",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160441": {
+    "_name": "伊索·卡尔",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160464": {
+    "_name": "诺顿·坎贝尔",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160443": {
+    "_name": "帕缇夏·多里瓦尔",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160450": {
+    "_name": "穆罗·莫顿",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型",
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160465": {
+    "_name": "麦克·莫顿",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160452": {
+    "_name": "何塞·巴登",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160460": {
+    "_name": "黛米·波本",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型",
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160436": {
+    "_name": "维克多·葛兰兹",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160431": {
+    "_name": "安德鲁·克雷斯",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160451": {
+    "_name": "卢卡·巴尔萨",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "破译型": "<img src='/assets/tag/id5/破译型.png' alt='' />破译型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160445": {
+    "_name": "梅莉·普林尼",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160457": {
+    "_name": "艾格·瓦尔登",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160463": {
+    "_name": "甘吉·古普塔",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型",
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160447": {
+    "_name": "安妮·莱斯特",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160437": {
+    "_name": "艾达·梅斯默",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160467": {
+    "_name": "埃米尔",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160453": {
+    "_name": "“奥尔菲斯”",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160412": {
+    "_name": "“回忆”",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160444": {
+    "_name": "裘克",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160455": {
+    "_name": "卢基诺·迪鲁西",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160470": {
+    "_name": "戚十一",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160462": {
+    "_name": "弗雷德里克·克雷伯格",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "破译型": "<img src='/assets/tag/id5/破译型.png' alt='' />破译型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160459": {
+    "_name": "爱丽丝·德罗斯",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160471": {
+    "_name": "查尔斯·霍尔特",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160454": {
+    "_name": "莉莉·巴利尔",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型",
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160434": {
+    "_name": "马蒂亚斯·切尔宁",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "救援型": "<img src='/assets/tag/id5/救援型.png' alt='' />救援型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160446": {
+    "_name": "弗洛里安·布兰德",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "牵制型": "<img src='/assets/tag/id5/牵制型.png' alt='' />牵制型",
+      "辅助型": "<img src='/assets/tag/id5/辅助型.png' alt='' />辅助型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160439": {
+    "_name": "伊芙琳·莫雷",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "破译型": "<img src='/assets/tag/id5/破译型.png' alt='' />破译型"
+    },
+    "阵营": {
+      "求生者": "求生者"
+    }
+  },
+  "160479": {
+    "_name": "里奥·贝克",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160475": {
+    "_name": "裘克",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160493": {
+    "_name": "班恩·佩雷兹",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160474": {
+    "_name": "杰克",
+    "难度": {
+      "1": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160483": {
+    "_name": "瓦尔莱塔",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160482": {
+    "_name": "美智子",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160484": {
+    "_name": "哈斯塔",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160488": {
+    "_name": "谢必安/范无咎",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160494": {
+    "_name": "约瑟夫·德拉索恩斯",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160500": {
+    "_name": "巴尔克·拉·帕杜拉",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160499": {
+    "_name": "伊德海拉",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160490": {
+    "_name": "罗比·怀特",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160487": {
+    "_name": "卢基诺·迪鲁西",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160491": {
+    "_name": "玛丽·安托瓦内特",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160485": {
+    "_name": "邦邦",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160486": {
+    "_name": "安",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160481": {
+    "_name": "安东尼奥",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160496": {
+    "_name": "伽拉泰亚·克劳德",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160476": {
+    "_name": "珀西",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160501": {
+    "_name": "威尔三兄弟",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160489": {
+    "_name": "格蕾丝",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160492": {
+    "_name": "菲利普",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160477": {
+    "_name": "“奥尔菲斯”",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160497": {
+    "_name": "柯根·尼古拉斯·基奥",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "127282": {
+    "_name": "阿尔瓦·洛伦兹",
+    "难度": {
+      "2": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160480": {
+    "_name": "伊塔库亚",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160495": {
+    "_name": "桑格莉娅",
+    "难度": {
+      "2.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160478": {
+    "_name": "诺顿·坎贝尔",
+    "难度": {
+      "1.5": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_半.png' alt='⬦'/><img src='/assets/tag/id5/难度面具_无.png' alt=''/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160498": {
+    "_name": "“艾维”",
+    "难度": {
+      "3": "<img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/><img src='/assets/tag/id5/难度面具_全.png' alt='⬥'/>"
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "监管者": "监管者"
+    }
+  },
+  "160472": {
+    "_name": "“奥尔菲斯”",
+    "难度": {
+      "0": ""
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "个人角色": "个人角色"
+    }
+  },
+  "160473": {
+    "_name": "爱丽丝·德罗斯",
+    "难度": {
+      "0": ""
+    },
+    "定位": {
+      "无定位": "无定位"
+    },
+    "阵营": {
+      "个人角色": "个人角色"
+    }
+  }
+}

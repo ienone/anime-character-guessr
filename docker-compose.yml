@@ -1,0 +1,76 @@
+version: "3.8"
+
+services:
+  # ─── Reverse Proxy ────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: main_nginx_proxy
+    ports:
+      - "${NGINX_EXTERNAL_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - client
+      - server-rs
+    networks:
+      - app-network
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME:-http://localhost}
+    restart: unless-stopped
+
+  # ─── Client (React, served by Nginx) ──────────────────────────────────────
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+      args:
+        - VITE_SERVER_URL=${DOMAIN_NAME:-http://localhost}
+    container_name: client_app
+    expose:
+      - "80"
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # ─── Game Server (Rust / Axum + socketioxide) ─────────────────────────────
+  server-rs:
+    build:
+      context: ./server-rs
+      dockerfile: Dockerfile
+    container_name: game_server_rs
+    expose:
+      - "${SERVER_INTERNAL_PORT:-3001}"
+    environment:
+      - PORT=${SERVER_INTERNAL_PORT:-3001}
+      - ARCHIVE_DB_PATH=/data/archive.sqlite
+      - APP_DB_PATH=/data/app.sqlite
+      - IMAGE_CACHE_DIR=/data/images
+      - TANTIVY_INDEX_DIR=/data/tantivy
+      - ROOM_ADMIN_TOKEN=${ROOM_ADMIN_TOKEN:-}
+      # CORS allowed origin (must match the frontend URL)
+      - CLIENT_URL=${DOMAIN_NAME:-http://localhost}
+      # Public URL used when generating quick-join links
+      - PUBLIC_CLIENT_URL=${DOMAIN_NAME:-http://localhost}
+      # Docker traffic reaches the server through the bundled nginx proxy
+      - TRUST_PROXY_HEADERS=true
+      - TRUST_CLOUDFLARE_HEADERS=${TRUST_CLOUDFLARE_HEADERS:-false}
+      - TRUST_X_FORWARDED_FOR=${TRUST_X_FORWARDED_FOR:-false}
+    volumes:
+      # Mount pre-built archive.sqlite (read-only asset)
+      - ./archive.sqlite:/data/archive.sqlite:ro
+      # Mount pre-built Tantivy search index (read-only asset)
+      - ./server-rs/data/tantivy:/data/tantivy:ro
+      # Persist app.sqlite (leaderboard, image cache)
+      - app_data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  # Persistent volume for app.sqlite + downloaded/transcoded images
+  app_data:
+    driver: local

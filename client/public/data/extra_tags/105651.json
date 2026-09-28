@@ -1,0 +1,905 @@
+{
+  "65502": {
+    "_name": "Sledge",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "SAS": "<img src='/assets/tag/r6s/sas.png'/>SAS"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  },
+  "65503": {
+    "_name": "Thatcher",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "SAS": "<img src='/assets/tag/r6s/sas.png'/>SAS"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65504": {
+    "_name": "Smoke",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "SAS": "<img src='/assets/tag/r6s/sas.png'/>SAS"
+    },
+    "小队": {
+      "永夜安港": "<img src='/assets/tag/r6s/nighthaven.png'/>永夜安港"
+    }
+  },
+  "65505": {
+    "_name": "Mute",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "SAS": "<img src='/assets/tag/r6s/sas.png'/>SAS"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65506": {
+    "_name": "Ash",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "FBI SWAT": "<img src='/assets/tag/r6s/fbi_swat.png'/>FBI SWAT"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  },
+  "65507": {
+    "_name": "Thermite",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "FBI SWAT": "<img src='/assets/tag/r6s/fbi_swat.png'/>FBI SWAT"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  },
+  "65509": {
+    "_name": "Castle",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "FBI SWAT": "<img src='/assets/tag/r6s/fbi_swat.png'/>FBI SWAT"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65510": {
+    "_name": "Pulse",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "FBI SWAT": "<img src='/assets/tag/r6s/fbi_swat.png'/>FBI SWAT"
+    },
+    "小队": {
+      "永夜安港": "<img src='/assets/tag/r6s/nighthaven.png'/>永夜安港"
+    }
+  },
+  "65511": {
+    "_name": "Twitch",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "GIGN": "<img src='/assets/tag/r6s/gign.png'/>GIGN"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65513": {
+    "_name": "Montagne",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GIGN": "<img src='/assets/tag/r6s/gign.png'/>GIGN"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65514": {
+    "_name": "Doc",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GIGN": "<img src='/assets/tag/r6s/gign.png'/>GIGN"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65515": {
+    "_name": "Rook",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GIGN": "<img src='/assets/tag/r6s/gign.png'/>GIGN"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65516": {
+    "_name": "Glaz",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "SPETSNAZ": "<img src='/assets/tag/r6s/spetsnaz.png'/>SPETSNAZ"
+    },
+    "小队": {
+      "灵瞳": "<img src='/assets/tag/r6s/ghosteyes.png'/>灵瞳"
+    }
+  },
+  "65517": {
+    "_name": "Fuze",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "SPETSNAZ": "<img src='/assets/tag/r6s/spetsnaz.png'/>SPETSNAZ"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  },
+  "65518": {
+    "_name": "Kapkan",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "SPETSNAZ": "<img src='/assets/tag/r6s/spetsnaz.png'/>SPETSNAZ"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  },
+  "65519": {
+    "_name": "Tachanka",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "SPETSNAZ": "<img src='/assets/tag/r6s/spetsnaz.png'/>SPETSNAZ"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  },
+  "65520": {
+    "_name": "Blitz",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "GSG 9": "<img src='/assets/tag/r6s/gsg9.png'/>GSG 9"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65521": {
+    "_name": "I.Q.",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "GSG 9": "<img src='/assets/tag/r6s/gsg9.png'/>GSG 9"
+    },
+    "小队": {
+      "永夜安港": "<img src='/assets/tag/r6s/nighthaven.png'/>永夜安港"
+    }
+  },
+  "65522": {
+    "_name": "Jäger",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "GSG 9": "<img src='/assets/tag/r6s/gsg9.png'/>GSG 9"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65523": {
+    "_name": "Bandit",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "GSG 9": "<img src='/assets/tag/r6s/gsg9.png'/>GSG 9"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65524": {
+    "_name": "Buck",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "JTF-2": "<img src='/assets/tag/r6s/jtf2.png'/>JTF-2"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  },
+  "65525": {
+    "_name": "Frost",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "JTF-2": "<img src='/assets/tag/r6s/jtf2.png'/>JTF-2"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65526": {
+    "_name": "Blackbeard",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "Navy SEALS": "<img src='/assets/tag/r6s/navyseals.png'/>Navy SEALS"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65527": {
+    "_name": "Valkyrie",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "Navy SEALS": "<img src='/assets/tag/r6s/navyseals.png'/>Navy SEALS"
+    },
+    "小队": {
+      "灵瞳": "<img src='/assets/tag/r6s/ghosteyes.png'/>灵瞳"
+    }
+  },
+  "65528": {
+    "_name": "Capitão",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "BOPE": "<img src='/assets/tag/r6s/bope.png'/>BOPE"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65529": {
+    "_name": "Caveira",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "BOPE": "<img src='/assets/tag/r6s/bope.png'/>BOPE"
+    },
+    "小队": {
+      "灵瞳": "<img src='/assets/tag/r6s/ghosteyes.png'/>灵瞳"
+    }
+  },
+  "65530": {
+    "_name": "Hibana",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "SAT": "<img src='/assets/tag/r6s/sat.png'/>SAT"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65531": {
+    "_name": "Echo",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "SAT": "<img src='/assets/tag/r6s/sat.png'/>SAT"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65532": {
+    "_name": "Jackal",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "GEO": "<img src='/assets/tag/r6s/geo.png'/>GEO"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65533": {
+    "_name": "Mira",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GEO": "<img src='/assets/tag/r6s/geo.png'/>GEO"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65534": {
+    "_name": "Ying",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "SDU": "<img src='/assets/tag/r6s/sdu.png'/>SDU"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65535": {
+    "_name": "Lesion",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "SDU": "<img src='/assets/tag/r6s/sdu.png'/>SDU"
+    },
+    "小队": {
+      "灵瞳": "<img src='/assets/tag/r6s/ghosteyes.png'/>灵瞳"
+    }
+  },
+  "65536": {
+    "_name": "Zofia",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GROM": "<img src='/assets/tag/r6s/grom.png'/>GROM"
+    },
+    "小队": {
+      "灵瞳": "<img src='/assets/tag/r6s/ghosteyes.png'/>灵瞳"
+    }
+  },
+  "65537": {
+    "_name": "Ela",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "GROM": "<img src='/assets/tag/r6s/grom.png'/>GROM"
+    },
+    "小队": {
+      "永夜安港": "<img src='/assets/tag/r6s/nighthaven.png'/>永夜安港"
+    }
+  },
+  "65538": {
+    "_name": "Dokkaebi",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "707th SMB": "<img src='/assets/tag/r6s/707thsmb.png'/>707th SMB"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65539": {
+    "_name": "Vigil",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "707th SMB": "<img src='/assets/tag/r6s/707thsmb.png'/>707th SMB"
+    },
+    "小队": {
+      "灵瞳": "<img src='/assets/tag/r6s/ghosteyes.png'/>灵瞳"
+    }
+  },
+  "65540": {
+    "_name": "Lion",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "核生化危机处理单位": "<img src='/assets/tag/r6s/cbrn.png'/>核生化危机处理单位"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "65541": {
+    "_name": "Finka",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "1": "★"
+    },
+    "速度": {
+      "2": "★★"
+    },
+    "生命值": {
+      "2": "★★"
+    },
+    "组织": {
+      "核生化危机处理单位": "<img src='/assets/tag/r6s/cbrn.png'/>核生化危机处理单位"
+    },
+    "小队": {
+      "永夜安港": "<img src='/assets/tag/r6s/nighthaven.png'/>永夜安港"
+    }
+  },
+  "65542": {
+    "_name": "Alibi",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "GIS": "<img src='/assets/tag/r6s/gis.png'/>GIS"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "65543": {
+    "_name": "Maestro",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GIS": "<img src='/assets/tag/r6s/gis.png'/>GIS"
+    },
+    "小队": {
+      "蝰蛇突袭": "<img src='/assets/tag/r6s/viperstrike.png'/>蝰蛇突袭"
+    }
+  },
+  "67104": {
+    "_name": "Maverick",
+    "阵营": {
+      "进攻方": "<img src='/assets/tag/r6s/attacker.png'/>进攻方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "3": "★★★"
+    },
+    "生命值": {
+      "1": "★"
+    },
+    "组织": {
+      "核生化危机处理单位": "<img src='/assets/tag/r6s/cbrn.png'/>核生化危机处理单位"
+    },
+    "小队": {
+      "灵瞳": "<img src='/assets/tag/r6s/ghosteyes.png'/>灵瞳"
+    }
+  },
+  "67105": {
+    "_name": "Clash",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "3": "★★★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GSUTR": "<img src='/assets/tag/r6s/gsutr.png'/>GSUTR"
+    },
+    "小队": {
+      "狼卫": "<img src='/assets/tag/r6s/wolfguard.png'/>狼卫"
+    }
+  },
+  "68868": {
+    "_name": "Kaid",
+    "阵营": {
+      "防守方": "<img src='/assets/tag/r6s/defender.png'/>防守方"
+    },
+    "难度": {
+      "2": "★★"
+    },
+    "速度": {
+      "1": "★"
+    },
+    "生命值": {
+      "3": "★★★"
+    },
+    "组织": {
+      "GIGR": "<img src='/assets/tag/r6s/gigr.png'/>GIGR"
+    },
+    "小队": {
+      "赤锤": "<img src='/assets/tag/r6s/redhammer.png'/>赤锤"
+    }
+  }
+}

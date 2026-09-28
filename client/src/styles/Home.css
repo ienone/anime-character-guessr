@@ -1,0 +1,314 @@
+.home-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  height: 100vh;
+  background: linear-gradient(135deg, #f5f7fa 0%, #e4e9f2 100%);
+  color: #2c3e50;
+  overflow: hidden;
+  padding: 2vh 2rem;
+  box-sizing: border-box;
+}
+
+@media (max-width: 600px) {
+  .home-container {
+    height: auto;
+    min-height: 100vh;
+    overflow: auto;
+  }
+}
+
+.home-container h1 {
+  font-size: 3rem;
+  margin-bottom: 3rem;
+  text-align: center;
+  color: #2c3e50;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* 居中包裹：包含模式按钮和线路选择 */
+.center-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: auto 0; /* 在 header 与 footer 之间居中 */
+  padding-top: 150px;
+}
+
+.game-modes {
+  display: flex;
+  gap: 1.25rem; /* 更紧凑的按钮间距 */
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  flex: none; /* 不占据剩余垂直空间，避免将线路选择推到底部 */
+  max-width: 100%;
+  margin-bottom: 0.25rem; /* 与下方线路选择靠得更近 */
+}
+
+.mode-button {
+  position: relative;
+  width: 300px;
+  height: 100px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+  z-index: 1;
+  padding: 2rem;
+  text-align: center;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.mode-button::before {
+  content: '';
+  position: absolute;
+  top: -3px;
+  left: -3px;
+  right: -3px;
+  bottom: -3px;
+  background: linear-gradient(45deg,
+  #ff0000, #ff7300, #fffb00, #48ff00,
+  #00ffd5, #002bff, #7a00ff, #ff00c8, #ff0000);
+  background-size: 400%;
+  border-radius: 10px;
+  z-index: -1;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.mode-button::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: white;
+  border-radius: 8px;
+  z-index: -1;
+}
+
+.mode-button:hover::before {
+  opacity: 1;
+  animation: animate-border 8s linear infinite;
+}
+
+@keyframes animate-border {
+  0% {
+    background-position: 0 0;
+  }
+  50% {
+    background-position: 400% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+.mode-button:hover {
+  transform: scale(1.05);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+}
+
+.mode-button h2 {
+  font-size: 1.8rem;
+  margin-bottom: 1rem;
+  color: #3498db;
+}
+
+.mode-button p {
+  font-size: 1rem;
+  color: #7f8c8d;
+  line-height: 1.5;
+}
+
+.mode-button small {
+  color: #7f8c8d;
+  display: block;
+  margin-top: 0.5rem;
+}
+
+.home-footer {
+  margin-top: auto;
+  padding-bottom: 1rem;
+  width: 100%;
+  text-align: center;
+  font-size: 0.9rem;
+  color: #666;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+
+.home-footer a {
+  color: #333;
+  text-decoration: none;
+  position: relative;
+  transition: all 0.3s ease;
+}
+
+.home-footer a::before {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 2px;
+  bottom: -2px;
+  left: 0;
+  background: linear-gradient(to right, #7cb8df, #0a9e48);
+  transition: width 0.3s ease;
+}
+
+.home-footer a:hover {
+  color: #3498db;
+}
+
+.home-footer a:hover::before {
+  width: 100%;
+}
+
+/* 3x2 grid 按钮整体居中且右偏心理调节 */
+.button-group-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(3, auto);
+  gap: 12px;
+  justify-items: start;
+  align-items: center;
+  width: fit-content;
+  margin: 0 auto 10px auto;
+  transform: translateX(12px);
+}
+
+/* 线路选择区块样式 - Modernized */
+.line-selector {
+  margin: 0.5rem 0;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(12px);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(31, 38, 135, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 220px;
+  transition: transform 0.3s ease;
+}
+
+.line-selector:hover {
+  box-shadow: 0 12px 40px rgba(31, 38, 135, 0.1);
+}
+
+.line-selector-header {
+  display: flex;
+  align-items: baseline;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.line-selector-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #2c3e50;
+  margin-right: 12px;
+}
+
+.line-selector-hint {
+  font-size: 10px;
+  color: #95a5a6;
+  font-weight: 400;
+}
+
+/* 单列线路选择样式 */
+.line-selector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  justify-content: flex-start;
+  align-items: stretch;
+  margin-bottom: 0;
+}
+
+.domain-link {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 7px 20px;
+  border-radius: 6px;
+  background: #ffffff;
+  border: 1.5px solid #eef2f7;
+  color: #57606f;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.18s cubic-bezier(.4,0,.2,1);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+  min-width: 180px;
+  font-family: inherit;
+  min-height: 32px; /* 更小的高度，避免刷新时高矮抖动 */
+  box-sizing: border-box;
+}
+
+.domain-link:hover:not(.active) {
+  background: #f6fdf9;
+  border-color: #e0f2e9;
+  color: #16a34a;
+  box-shadow: none;
+}
+
+.domain-link.active {
+  background: #d1fae5;
+  color: #22c55e;
+  border-color: #22c55e;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(34,197,94,0.08);
+}
+
+.domain-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5px;
+  flex: 1;
+  overflow: hidden;
+  margin-right: 0;
+}
+
+.line-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2f3c4d;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.current-label {
+  display: none;
+}
+
+.line-tag {
+  display: inline-block;
+  font-size: 8px;
+  font-weight: 600;
+  color: #2563eb;
+  background: #e0e7ff;
+  border-radius: 999px;
+  padding: 2px 10px;
+  margin-right: 10px;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
+.domain-link.active .line-tag {
+  color: #22c55e;
+  background: #d1fae5;
+}
+

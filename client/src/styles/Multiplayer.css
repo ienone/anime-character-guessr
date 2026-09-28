@@ -1,0 +1,1387 @@
+.game-end-view-container {
+  margin: 0.5rem;
+  padding: 0.5rem;
+  width: 100%;
+  max-width: 1400px;
+  box-sizing: border-box;
+}
+
+.multiplayer-container {
+  width: 100%;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 100vh;
+}
+
+.join-container {
+  max-width: 400px;
+  margin: 0;
+  padding: 1rem;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+.username-input {
+  width: 100%;
+  padding: 0.75rem;
+  margin: 1rem 0;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: rgba(255, 255, 255, 0.8);
+  color: #333;
+  font-size: 1rem;
+  box-sizing: border-box;
+}
+
+.join-button {
+  width: 100%;
+  padding: 0.75rem;
+  background-color: #4a90e2;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  box-sizing: border-box;
+}
+
+.join-button:hover {
+  background-color: #357abd;
+}
+
+.error-message {
+  color: #ff6b6b;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+
+.host-controls {
+  margin: 1rem 0;
+  padding: 1.5rem;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+.room-url-container {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  align-items: center;
+  margin-top: 1rem;
+}
+
+.room-url-input {
+  flex: 1;
+  max-width: 400px;
+  padding: 0.75rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background-color: #fff;
+  color: #1f2937;
+  font-size: 1rem;
+  font-family: inherit;
+  transition: all 0.2s ease;
+  outline: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.room-url-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.room-name-input {
+  width: 12rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background-color: #fff;
+  color: #1f2937;
+  font-size: 1rem;
+  font-family: inherit;
+  transition: all 0.2s ease;
+  outline: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.room-name-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.room-name-input::placeholder,
+.room-url-input::placeholder {
+  color: #9ca3af;
+}
+
+/* Mobile adjustments so room-url container doesn't overflow */
+@media (max-width: 640px) {
+  .room-url-container {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .room-name-input {
+    width: 100%;
+    max-width: none;
+  }
+
+  .room-url-input {
+    max-width: none;
+    width: 100%;
+    overflow: auto;
+  }
+
+  .copy-button {
+    width: 100%;
+    padding: 10px 12px;
+  }
+}
+
+.copy-button {
+  padding: 0.75rem 1.5rem;
+  background-color: #4a90e2;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.2s;
+}
+
+.copy-button:hover {
+  background-color: #357abd;
+}
+
+.players-list {
+  width: 80%;
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+.players-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+}
+
+.players-list li {
+  padding: 0.75rem;
+  margin: 0.5rem 0;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.host-game-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.host-game-controls .button-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.host-game-controls .button-row {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.host-game-controls button {
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: none;
+}
+
+.anonymous-mode-info {
+  font-size: 0.8rem;
+  color: #666;
+  margin-top: 0.5rem;
+}
+
+.host-game-controls .settings-button {
+  background-color: #4a90e2;
+  color: white;
+  border: none;
+  transform: none;
+  transition: background-color 0.2s;
+}
+
+.host-game-controls .settings-button:hover {
+  background-color: #357abd;
+  color: white;
+  transform: none;
+}
+
+.start-game-button {
+  background-color: #27ae60;
+  color: white;
+  border: none;
+}
+
+.start-game-button:hover {
+  background-color: #219a52;
+}
+
+.start-game-button:disabled {
+  background-color: #95a5a6;
+  cursor: not-allowed;
+}
+
+.manual-mode-button {
+  background-color: #27ae60;
+  color: white;
+  border: none;
+}
+
+.manual-mode-button:hover {
+  background-color: #219a52;
+}
+
+.manual-mode-button:disabled {
+  background-color: #95a5a6;
+  cursor: not-allowed;
+}
+
+.manual-mode-button.active {
+  background-color: #219a52;
+}
+
+.waiting-answer-controls {
+  flex-direction: row;
+  justify-content: center;
+  flex-wrap: wrap;
+  color: #475569;
+}
+
+.waiting-answer-message {
+  font-size: 0.95rem;
+}
+
+.cancel-wait-button {
+  background-color: #dc3545;
+}
+
+.cancel-wait-button:hover {
+  background-color: #bb2d3b;
+}
+
+.score-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  border: 1px solid #ccc; /* Table outline */
+}
+
+.score-table th, .score-table td {
+  border: 1px solid #ccc; /* Inline borders */
+  padding: 0.5rem;
+  text-align: center;
+}
+
+.score-table th {
+  background-color: #f4f4f4;
+}
+
+.score-table th:nth-child(1) {
+  width: 20%;
+}
+.score-table th:nth-child(2) {
+  width: 8%; /* 队 column: small */
+}
+
+.score-table th:nth-child(4) {
+  width: 26%; /* 名 column: larger */
+}
+.score-table th:nth-child(5) {
+  width: 8%; /* 分 column: small */
+}
+.score-table th:nth-child(6) {
+  width: 32%; /* 猜 column: large */
+}
+
+.score-table .table-head-name-button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+  height: auto;
+  line-height: 1;
+  font-size: inherit;
+  outline: none;
+  font-weight: bold;
+}
+
+.ready-button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  background-color: #4a90e2;
+  min-width: 80px;
+}
+
+.ready-button:hover {
+  background-color: #357abd;
+}
+
+.ready-button.ready {
+  background-color: #4caf50;
+}
+
+.ready-button.ready:hover {
+  background-color: #45a049;
+}
+
+.action-menu-button {
+  background: #f8f9fa;
+  padding: 4px 8px;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #212529;
+  font-size: 14px;
+  min-width: 70px;
+}
+
+.action-dropdown{
+  position: absolute;
+  background: white;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+  z-index: 100;
+  width: 120px;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+}
+
+.action-dropdown .action-button{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: #dc3545;
+  border-bottom: 1px solid #eee;
+  border-radius: 0px;
+}
+.action-dropdown .action-button:hover{
+  background-color: #d8d8d8;
+}
+
+.game-settings-display {
+  margin: 1rem auto;
+  max-width: 500px;
+  padding: 1rem;
+  background-color: #f5f5f5;
+  border-radius: 8px;
+  overflow-x: auto;
+  text-align: left;
+}
+
+.game-settings-display pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+.game-info {
+  margin: 1rem 0;
+  text-align: center;
+}
+
+.guesses-left {
+  font-size: 1.2rem;
+  margin-bottom: 1rem;
+  color: #333;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.hints {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  background-color: #f5f5f5;
+  border-radius: 8px;
+}
+
+.hint {
+  font-size: 1rem;
+  color: #666;
+  text-align: left;
+}
+
+.game-container .players-list {
+  width: 100%;
+  margin: 0 0 1.5rem 0;
+  padding: 0.5rem;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+.game-container .score-table {
+  margin-top: 0;
+}
+
+.game-container .score-table th {
+  background-color: rgba(244, 244, 244, 0.9);
+  font-weight: 600;
+}
+
+.game-container .score-table td {
+  background-color: rgba(255, 255, 255, 0.8);
+}
+
+/* 游戏结束消息表格样式 */
+.game-end-message-table-wrapper {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 1rem;
+}
+
+.game-end-message-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.game-end-header-cell {
+  background: #f1f5f9;
+  border-bottom: 2px solid #e2e8f0;
+  padding: 0.75rem 1rem;
+  text-align: center;
+}
+
+.game-end-header-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.game-end-body-cell {
+  background: #fff;
+  padding: 0.75rem 1rem;
+}
+
+/* 游戏结束消息区域 - 旧样式保留以防万一，但主要使用上面的表格样式 */
+.answer-label {
+  font-size: 1rem;
+  color: #1e293b;
+}
+
+.answer-character-button {
+  background: #64748b;
+  color: #fff;
+  border: 1px solid transparent; /* 预留边框位置 */
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-sizing: border-box; /* 确保padding和border包含在尺寸内 */
+}
+
+.answer-character-button:hover {
+  background: #475569;
+}
+
+.answer-character-button:active {
+  background: #334155;
+}
+
+/* 猜对 - 绿色背景 */
+.answer-character-button.win {
+  background: #22c55e;
+}
+
+.answer-character-button.win:hover {
+  background: #16a34a;
+}
+
+/* 没猜对 - 红色背景 */
+.answer-character-button.lose {
+  background: #ef4444;
+}
+
+.answer-character-button.lose:hover {
+  background: #dc2626;
+}
+
+/* 出题人信息（第一行内联） */
+.setter-info-inline {
+  font-size: 0.9rem;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.setter-name {
+  font-weight: 500;
+  color: #1e293b;
+  margin: 0 0.15rem;
+}
+
+.setter-score {
+  font-weight: 600;
+}
+
+.setter-score.positive {
+  color: #10b981;
+}
+
+
+.setter-score.negative {
+  color: #ef4444;
+}
+
+.score-breakdown {
+  color: #64748b;
+  font-size: 0.75rem;
+  margin-left: 0.25rem;
+  font-weight: normal;
+}
+
+/* 得分详情样式 */
+.score-details-container {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: #fff;
+}
+
+.mode-tags {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.mode-tag {
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.mode-tag.normal {
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #7dd3fc;
+}
+
+.mode-tag.nonstop {
+  background: #ec4899;
+  color: white;
+  border: 1px solid #ec4899;
+}
+
+.mode-tag.sync {
+  background: #06b6d4;
+  color: white;
+  border: 1px solid #06b6d4;
+}
+
+.mode-tag.global-bp {
+  background: #ef4444;
+  color: white;
+  border: 1px solid #ef4444;
+}
+
+.mode-tag.tag-ban {
+  background: #f97316;
+  color: white;
+  border: 1px solid #f97316;
+}
+
+.score-details-title {
+  font-size: 0.9rem;
+  color: #1e293b;
+}
+
+.score-details-list {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: flex-start;
+  justify-content: center; /* 优先居中 */
+}
+
+/* 个人得分圆角矩形样式（单行） */
+.player-score-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+  color: #1e293b;
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.player-score-box.positive {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #01BE43;
+}
+
+.player-score-box.negative {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #E71C1C;
+}
+
+.player-score-box .player-rank {
+  font-weight: 600;
+  color: #64748b;
+}
+
+.player-score-box .player-name {
+  font-weight: 500;
+  color: #000;
+}
+
+.player-score-box .score-value {
+  font-weight: 600;
+  color: inherit;
+}
+
+.player-score-box .score-value.positive {
+  color: inherit;
+}
+
+.player-score-box .score-value.negative {
+  color: inherit;
+}
+
+/* .score-breakdown 样式已在上方通用定义 */
+
+/* 团队圆角矩形样式 - 与血战/同步模式样式一致 */
+.team-box {
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  overflow: hidden;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.team-box.positive {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.team-box.negative {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.team-box .team-header {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 4px 12px;
+  font-size: 0.9rem;
+  color: inherit;
+}
+
+.team-box .team-header .player-rank {
+  font-weight: 600;
+  color: #64748b;
+}
+
+.team-box .team-header .player-name {
+  font-weight: 500;
+  color: #000;
+}
+
+.team-box .team-header .score-value {
+  font-weight: 600;
+  color: inherit;
+}
+
+.team-box .team-header .score-value.positive {
+  color: inherit;
+}
+
+.team-box .team-header .score-value.negative {
+  color: inherit;
+}
+
+.team-box .team-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 4px 12px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.team-box.positive .team-members {
+  border-top-color: #86efac;
+}
+
+.team-box.negative .team-members {
+  border-top-color: #fca5a5;
+}
+
+.team-box .member-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 1rem;
+}
+
+.team-box .member-name {
+  font-weight: 500;
+  color: #1e293b;
+}
+
+.team-box .member-score {
+  font-weight: 600;
+}
+
+.team-box .member-score.positive {
+  color: #10b981;
+}
+
+.team-box .member-score.negative {
+  color: #ef4444;
+}
+
+.team-box .member-reason {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.answer-view-toolbar {
+  margin: 10px 0;
+  text-align: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.answer-view-button {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  background: #fff;
+  cursor: pointer;
+  color: inherit;
+}
+
+.answer-view-button.active {
+  background: #e0e0e0;
+}
+
+.guess-collapse-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.guess-collapse-toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  background-color: #e5e7eb;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.guess-collapse-toggle.active {
+  background-color: #3b82f6;
+}
+
+.guess-collapse-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background-color: white;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.guess-collapse-toggle.active .guess-collapse-thumb {
+  transform: translateX(20px);
+}
+
+.guess-collapse-label {
+  font-size: 14px;
+  color: #475569;
+}
+
+.detailed-guesses-panel {
+  margin-top: 12px;
+}
+
+.game-end-container {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+  margin-top: 2rem;
+}
+
+.game-end-container .game-settings-display {
+  flex: 0 0 300px;
+  margin: 0;
+  position: sticky;
+  top: 2rem;
+}
+
+.game-end-container .guess-history-table {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f1f5f9;
+}
+
+.game-end-container .guess-history-table::-webkit-scrollbar {
+  height: 8px;
+}
+
+.game-end-container .guess-history-table::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+
+.game-end-container .guess-history-table::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.game-end-container .guess-history-table::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.guess-history-table table {
+  width: 100%;
+  min-width: max-content;
+}
+
+.guess-history-table th,
+.guess-history-table td {
+  padding: 12px 16px;
+  text-align: center;
+  border-bottom: 1px solid #e2e8f0;
+  min-width: 150px;
+}
+
+.guess-history-table th {
+  background: #e2e8f0;
+  color: #1e293b;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: center;
+}
+
+.guess-history-table td {
+  background: #fff;
+  color: #334155;
+  text-align: center;
+}
+
+.guess-history-table .character-name {
+  color: #1e293b;
+  font-size: 14px;
+}
+
+.guess-history-table .character-name-cn {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.guess-history-table .character-icon {
+  width: 50px;
+  height: 50px;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
+  margin: 0 auto;
+}
+
+.guess-history-table td div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (prefers-color-scheme: dark) {
+  .guess-history-table th {
+    background: #e2e8f0;
+    color: #1e293b;
+  }
+  
+  .score-table th button {
+    color: #1e293b;
+  }
+  
+  .visibility-button {
+    background-color: #f39c12;
+    color: white;
+    border: none;
+  }
+  
+  .visibility-button:hover {
+    background-color: #e67e22;
+  }
+}
+
+.visibility-button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  background-color: #f39c12;
+  color: white;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.3s ease;
+}
+
+.visibility-button:hover {
+  background-color: #e67e22;
+}
+
+.answer-setter-view {
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* 旁观者/出题人模式下的猜测历史表格 */
+.answer-setter-view .guess-history-table {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 auto;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f1f5f9;
+}
+
+.answer-setter-view .guess-history-table::-webkit-scrollbar {
+  height: 8px;
+}
+
+.answer-setter-view .guess-history-table::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+
+.answer-setter-view .guess-history-table::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.answer-setter-view .guess-history-table::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.answer-setter-view .guess-history-table table {
+  margin: 0 auto;
+}
+
+.answer-setter-view h3 {
+  text-align: center;
+  color: #4a90e2;
+  margin-bottom: 20px;
+}
+
+.selected-answer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 30px;
+  padding: 15px;
+  background: rgba(74, 144, 226, 0.1);
+  border-radius: 8px;
+}
+
+.answer-image {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  margin-right: 15px;
+}
+
+.answer-info {
+  text-align: left;
+}
+
+.answer-info div {
+  margin: 5px 0;
+}
+
+.hints-display {
+  margin: 20px 0;
+  padding: 15px;
+  background: rgba(74, 144, 226, 0.05);
+  border-radius: 8px;
+}
+
+.hints-display div {
+  margin: 10px 0;
+  color: #666;
+  font-style: italic;
+}
+
+/* 踢出通知样式 */
+.kick-notification {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background-color: rgba(220, 53, 69, 0.9);
+  color: white;
+  border-radius: 8px;
+  padding: 15px 20px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  animation: notification-slide-in 0.3s ease-out;
+  max-width: 90%;
+  min-width: 300px;
+}
+
+/* 房主转移通知样式 */
+.kick-notification.host-notification {
+  background-color: rgba(74, 144, 226, 0.9);
+}
+
+/* 重连通知样式 */
+.kick-notification.reconnect-notification {
+  background-color: rgba(39, 174, 96, 0.9);
+}
+
+.kick-notification.warning-notification {
+  background-color: rgba(243, 156, 18, 0.95);
+}
+
+.kick-notification.error-notification {
+  background-color: rgba(220, 53, 69, 0.95);
+}
+
+.kick-notification.info-notification {
+  background-color: rgba(74, 144, 226, 0.9);
+}
+
+.kick-notification-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.kick-notification .app-icon {
+  font-size: 20px;
+}
+
+@keyframes notification-slide-in {
+  from {
+    transform: translateX(-50%) translateY(-100px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
+}
+
+/* 连接状态指示器样式 */
+.connection-status {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1001;
+  border-radius: 8px;
+  padding: 12px 20px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  animation: notification-slide-in 0.3s ease-out;
+  max-width: 90%;
+  min-width: 300px;
+}
+
+.connection-status.reconnecting {
+  background-color: rgba(243, 156, 18, 0.95);
+  color: white;
+}
+
+.connection-status.failed {
+  background-color: rgba(220, 53, 69, 0.95);
+  color: white;
+}
+
+.connection-status.disconnected {
+  /* 与其它通知保持一致：使用红色警示色 */
+  background-color: rgba(220, 53, 69, 0.95);
+  color: white;
+}
+
+.connection-status-content {
+  /* 与 kick-notification 内容保持一致 */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.connection-status .app-icon {
+  /* 与 kick-notification 图标尺寸保持一致 */
+  font-size: 20px;
+}
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.confirm-dialog {
+  width: min(420px, 100%);
+  background: #fff;
+  color: #1f2937;
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.28);
+  padding: 20px;
+  text-align: left;
+}
+
+.confirm-dialog-message {
+  font-size: 1rem;
+  line-height: 1.5;
+  margin-bottom: 18px;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.danger-btn {
+  background-color: #dc3545;
+}
+
+.danger-btn:hover {
+  background-color: #bb2d3b;
+}
+
+.player-avatar {
+  height: 100%;
+  width: auto;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
+  border: 1px solid #ccc;
+}
+
+.score-table td {
+  min-height: 44px;
+  height: 44px;
+}
+
+.score-table td:nth-child(3), .score-table th:nth-child(3) {
+  border-right: none;
+}
+.score-table td:nth-child(4), .score-table th:nth-child(4) {
+  border-left: none;
+}
+
+/* 房间列表样式 - 复用 leaderboard 样式 */
+.quick-join-btn {
+  background-color: #27ae60 !important;
+  margin-bottom: 0.5rem;
+}
+
+.quick-join-btn:hover {
+  background-color: #219a52 !important;
+}
+
+.room-list-wrapper {
+  margin-top: 20px;
+}
+
+.room-list-wrapper .leaderboard-header {
+  cursor: pointer;
+}
+
+.room-list-wrapper .leaderboard-header:hover {
+  background: #e2e8f0;
+}
+
+.room-list-wrapper .room-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+}
+
+.room-list-wrapper .room-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  flex: 1;
+}
+
+.room-list-wrapper .room-players-count {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #333;
+}
+
+.room-list-wrapper .room-players-count .app-icon {
+  margin-right: 0.5rem;
+  color: #4a90e2;
+}
+
+.room-list-wrapper .room-players-names {
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.join-room-btn {
+  padding: 6px 12px;
+  background-color: #4a90e2;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background-color 0.2s;
+  flex-shrink: 0;
+}
+
+.join-room-btn:hover {
+  background-color: #357abd;
+}
+
+/* 观战按钮样式 */
+.join-room-btn.spectate-btn {
+  background-color: #9b59b6;
+}
+
+.join-room-btn.spectate-btn:hover {
+  background-color: #8e44ad;
+}
+
+/* 房间状态标识 */
+.room-status-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 6px;
+  background-color: #e74c3c;
+  color: white;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* 房间列表底部：分页和刷新 */
+.room-list-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0 0 0;
+  margin-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.room-list-pagination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination-btn {
+  padding: 6px 10px;
+  background-color: #f1f5f9;
+  color: #334155;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background-color 0.2s;
+}
+
+.pagination-btn:hover:not(:disabled) {
+  background-color: #e2e8f0;
+}
+
+.pagination-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pagination-info {
+  font-size: 0.85rem;
+  color: #64748b;
+  min-width: 50px;
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .multiplayer-container .guesses-list {
+    max-height: calc(100vh - 280px) !important;
+  }
+}
