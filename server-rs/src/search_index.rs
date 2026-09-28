@@ -67,8 +67,8 @@ impl TantivySearch {
             .collect::<Vec<_>>();
         docs.sort_by(|a, b| {
             a.0.cmp(&b.0)
-                .then_with(|| b.1.total_cmp(&a.1))
                 .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| b.1.total_cmp(&a.1))
         });
         Ok(docs
             .into_iter()
@@ -128,8 +128,8 @@ impl TantivySearch {
         let mut ranked = rank_subject_docs(docs, keyword, types);
         ranked.sort_by(|a, b| {
             a.0.cmp(&b.0)
-                .then_with(|| b.1.total_cmp(&a.1))
                 .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| b.1.total_cmp(&a.1))
         });
 
         let mut out = Vec::new();
@@ -318,23 +318,21 @@ fn rank_subject_docs(
 }
 
 fn character_relevance_bucket(doc: &Value, keyword: &str) -> u8 {
-    let keyword = keyword.trim();
+    let normalized = keyword.trim().to_lowercase();
+    let keyword = normalized.as_str();
     if keyword.is_empty() {
         return 9;
     }
-    let name = first_str(doc, "name");
-    let name_cn = first_str(doc, "name_cn");
-    let aliases = first_str(doc, "aliases");
-    let name_en = first_str(doc, "name_en");
-    let romaji = first_str(doc, "romaji");
+    let name = first_str(doc, "name").to_lowercase();
+    let name_cn = first_str(doc, "name_cn").to_lowercase();
+    let aliases = first_str(doc, "aliases").to_lowercase();
+    let name_en = first_str(doc, "name_en").to_lowercase();
+    let romaji = first_str(doc, "romaji").to_lowercase();
     if name == keyword || name_cn == keyword {
         0
-    } else if name.starts_with(keyword) || name_cn.starts_with(keyword) {
+    } else if name.starts_with(keyword) || name_cn.starts_with(keyword) || aliases.contains(keyword)
+    {
         1
-    } else if aliases.split_whitespace().any(|alias| alias == keyword) {
-        2
-    } else if aliases.contains(keyword) {
-        3
     } else if name_en.starts_with(keyword) || romaji.starts_with(keyword) {
         4
     } else {
@@ -343,21 +341,19 @@ fn character_relevance_bucket(doc: &Value, keyword: &str) -> u8 {
 }
 
 fn subject_relevance_bucket(doc: &Value, keyword: &str) -> u8 {
-    let keyword = keyword.trim();
+    let normalized = keyword.trim().to_lowercase();
+    let keyword = normalized.as_str();
     if keyword.is_empty() {
         return 9;
     }
-    let name = first_str(doc, "name");
-    let name_cn = first_str(doc, "name_cn");
-    let aliases = first_str(doc, "aliases");
+    let name = first_str(doc, "name").to_lowercase();
+    let name_cn = first_str(doc, "name_cn").to_lowercase();
+    let aliases = first_str(doc, "aliases").to_lowercase();
     if name == keyword || name_cn == keyword {
         0
-    } else if name.starts_with(keyword) || name_cn.starts_with(keyword) {
+    } else if name.starts_with(keyword) || name_cn.starts_with(keyword) || aliases.contains(keyword)
+    {
         1
-    } else if aliases.split_whitespace().any(|alias| alias == keyword) {
-        2
-    } else if aliases.contains(keyword) {
-        3
     } else if name.contains(keyword) || name_cn.contains(keyword) {
         4
     } else {

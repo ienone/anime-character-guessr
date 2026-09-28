@@ -1,7 +1,7 @@
 pub mod gameplay;
 pub mod state;
 
-use crate::db::{self, DbPools};
+use crate::db::DbPools;
 use crate::routes::game::{self, GameSettings};
 use crate::routes::stats;
 use chrono::Utc;
@@ -2269,43 +2269,21 @@ fn register_room_handlers(
 
                 let settings_value = data.get("settings").cloned().unwrap_or_else(|| json!({}));
                 let game_settings = GameSettings::from_json(&settings_value);
-                let character = if let Some(payload) = data.get("character").cloned() {
-                    match CharacterPayload::from_value(payload) {
+                let character =
+                    match game::random_character(Arc::clone(&pools), game_settings.clone())
+                        .await
+                        .and_then(CharacterPayload::from_value)
+                    {
                         Ok(character) => character,
                         Err(e) => {
-                            emit_error(&socket, "gameStart", &format!("指定角色数据异常: {}", e));
+                            emit_error(
+                                &socket,
+                                "gameStart",
+                                &format!("随机角色失败: {}", e.root_cause()),
+                            );
                             return;
                         }
-                    }
-                } else {
-                    let game_settings_for_query = game_settings.clone();
-                    match db::with_archive_db_timed(
-                        Arc::clone(&pools),
-                        "socket_game_start_random_character",
-                        Duration::from_secs(2),
-                        move |conn| {
-                            game::random_character_with_conn(conn, &game_settings_for_query)
-                        },
-                    )
-                    .await
-                    {
-                        Ok((_, payload)) => match CharacterPayload::from_value(payload) {
-                            Ok(character) => character,
-                            Err(e) => {
-                                emit_error(
-                                    &socket,
-                                    "gameStart",
-                                    &format!("随机角色数据异常: {}", e),
-                                );
-                                return;
-                            }
-                        },
-                        Err(e) => {
-                            emit_error(&socket, "gameStart", &format!("随机角色失败: {}", e));
-                            return;
-                        }
-                    }
-                };
+                    };
                 let answer_stats = (character.id, character_name_for_stats(&character));
 
                 let started = state
@@ -2458,21 +2436,40 @@ fn register_room_handlers(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let character = match data
-                    .get("character")
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("missing character"))
-                    .and_then(CharacterPayload::from_value)
+                let actor_id = socket.id.to_string();
+                let Some(snapshot) = state.room_snapshot(&room_id).await else {
+                    return;
+                };
+                if snapshot.answer_setter_id.as_deref() != Some(actor_id.as_str())
+                    || !snapshot.waiting_for_answer
+                {
+                    emit_error(&socket, "setAnswer", "当前没有等待你提交的题目");
+                    return;
+                }
+                let Some(character_id) = data.get("characterId").and_then(Value::as_i64) else {
+                    emit_error(&socket, "setAnswer", "请选择答案角色");
+                    return;
+                };
+                let character = match game::character_by_id(
+                    Arc::clone(&pools),
+                    character_id,
+                    snapshot.settings.unwrap_or_default(),
+                )
+                .await
+                .and_then(CharacterPayload::from_value)
                 {
                     Ok(character) => character,
                     Err(e) => {
-                        emit_error(&socket, "setAnswer", &format!("答案角色数据异常: {}", e));
+                        emit_error(
+                            &socket,
+                            "setAnswer",
+                            &format!("读取答案角色失败: {}", e.root_cause()),
+                        );
                         return;
                     }
                 };
                 let answer_stats = (character.id, character_name_for_stats(&character));
                 let hints = hints_from_payload(&data);
-                let actor_id = socket.id.to_string();
                 let result = state
                     .run_room_command(&room_id, RoomCommand::SocketEvent("setAnswer"), |room| {
                         let is_setter = room.answer_setter_id.as_deref() == Some(actor_id.as_str());
@@ -2612,23 +2609,11 @@ fn register_room_handlers(
                     return;
                 }
 
-                let guess_data = match db::with_archive_db_timed(
-                    Arc::clone(&pools),
-                    "socket_player_guess_character",
-                    Duration::from_secs(2),
-                    move |conn| game::character_by_id_with_conn(conn, guess_char_id, &game_settings),
-                )
-                .await
-                {
-                    Ok(payload) => match CharacterPayload::from_value(payload) {
-                        Ok(character) => character,
-                        Err(e) => {
-                            emit_error(&socket, "playerGuess", &format!("猜测角色数据异常: {}", e));
-                            return;
-                        }
-                    },
+                let guess_data = match game::character_by_id(Arc::clone(&pools), guess_char_id, game_settings)
+                    .await.and_then(CharacterPayload::from_value) {
+                    Ok(character) => character,
                     Err(e) => {
-                        emit_error(&socket, "playerGuess", &format!("加载猜测角色失败: {}", e));
+                        emit_error(&socket, "playerGuess", &format!("加载猜测角色失败: {}", e.root_cause()));
                         return;
                     }
                 };

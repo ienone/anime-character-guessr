@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Anime Character Guessr data
+After=network-online.target anime-character-guessr.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/anime-character-guessr/refresh-data.py
+Nice=15
+CPUQuota=50%
+MemoryMax=600M
+TimeoutStartSec=2h

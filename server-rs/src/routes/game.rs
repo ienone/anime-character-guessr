@@ -3,11 +3,11 @@
 //! Mirrors the logic in client/src/utils/bangumi.js, but runs server-side
 //! against the pre-built archive.sqlite — no live Bangumi API calls needed.
 
-use crate::db::SubjectRow;
-use anyhow::Result;
+use crate::db::{self, DbPools, SubjectRow};
+use anyhow::{Context, Result};
 use rand::prelude::IndexedRandom;
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Map;
 use serde_json::{Value, json};
@@ -77,6 +77,112 @@ impl Hash for CandidateCacheKey {
 }
 
 // ─── Public entry points ──────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct EmptyCandidatePool;
+
+impl std::fmt::Display for EmptyCandidatePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("当前范围没有可用角色，请调整作品、年份或角色范围")
+    }
+}
+
+impl std::error::Error for EmptyCandidatePool {}
+
+pub async fn random_character(pools: Arc<DbPools>, settings: GameSettings) -> Result<Value> {
+    let index_subject = if settings.use_index {
+        let index_id = settings.index_id.as_deref().unwrap_or("").parse::<i64>()?;
+        anyhow::ensure!(index_id > 0, "目录 ID 必须为正整数");
+        let info = super::index_info(index_id).await?;
+        let total = info["total"].as_u64().context("无法读取目录作品数量")? as usize;
+        let count = total + settings.added_subject_ids.len();
+        if count == 0 {
+            return Err(EmptyCandidatePool.into());
+        }
+        let offset = rand::random_range(0..count);
+        Some(if offset >= total {
+            settings.added_subject_ids[offset - total]
+        } else {
+            let batch_offset = offset / 10 * 10;
+            let page = super::index_subjects(index_id, batch_offset as u64, 10).await?;
+            page["data"][offset % 10]["id"]
+                .as_i64()
+                .context("目录作品已变化，请重试")?
+        })
+    } else {
+        None
+    };
+    let payload = db::with_archive_db_timed(
+        Arc::clone(&pools),
+        "game_random_character",
+        Duration::from_secs(2),
+        move |conn| {
+            if let Some(subject_id) = index_subject {
+                let mut stmt = conn.prepare(
+                    "SELECT sc.character_id FROM subject_characters sc
+                     JOIN characters c ON c.id = sc.character_id
+                     WHERE sc.subject_id = ?1 AND (sc.type = 1 OR (?2 = 0 AND sc.type = 2))
+                     ORDER BY sc.type, c.popularity DESC, sc.order_num ASC LIMIT ?3",
+                )?;
+                let limit = if settings.main_character_only {
+                    i64::MAX
+                } else {
+                    settings.character_num as i64
+                };
+                let ids = stmt
+                    .query_map(
+                        rusqlite::params![subject_id, settings.main_character_only, limit],
+                        |row| row.get::<_, i64>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let id = ids
+                    .choose(&mut rand::rng())
+                    .copied()
+                    .ok_or(EmptyCandidatePool)?;
+                assemble_character(conn, id, &settings)
+            } else {
+                random_character_with_conn(conn, &settings).map(|(_, payload)| payload)
+            }
+        },
+    )
+    .await?;
+    with_voice_actors(pools, payload).await
+}
+
+pub async fn character_by_id(
+    pools: Arc<DbPools>,
+    id: i64,
+    settings: GameSettings,
+) -> Result<Value> {
+    let payload = db::with_archive_db_timed(
+        Arc::clone(&pools),
+        "game_character_by_id",
+        Duration::from_secs(2),
+        move |conn| character_by_id_with_conn(conn, id, &settings),
+    )
+    .await?;
+    with_voice_actors(pools, payload).await
+}
+
+async fn with_voice_actors(pools: Arc<DbPools>, mut payload: Value) -> Result<Value> {
+    let id = payload["id"].as_i64().context("角色缺少 ID")?;
+    let vas = db::with_app_db(pools, move |conn| {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT va_names_json FROM character_vas WHERE character_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match raw {
+            Some(raw) => serde_json::from_str::<Vec<String>>(&raw)?,
+            None => Vec::new(),
+        })
+    })
+    .await?;
+    payload["animeVAs"] = json!(vas);
+    Ok(payload)
+}
 
 pub fn assemble_character(
     conn: &Connection,
@@ -189,7 +295,7 @@ fn pick_candidate(conn: &Connection, settings: &GameSettings) -> Result<i64> {
     candidates
         .choose(&mut rand::rng())
         .copied()
-        .ok_or_else(|| anyhow::anyhow!("No eligible characters found"))
+        .ok_or_else(|| EmptyCandidatePool.into())
 }
 
 fn get_or_build_candidate_pool(
@@ -199,7 +305,6 @@ fn get_or_build_candidate_pool(
 ) -> Result<Arc<Vec<i64>>> {
     if let Some(entry) = CANDIDATE_CACHE.get(key)
         && entry.built_at.elapsed() < CANDIDATE_CACHE_TTL
-        && !entry.candidates.is_empty()
     {
         return Ok(Arc::clone(&entry.candidates));
     }
@@ -216,7 +321,6 @@ fn get_or_build_candidate_pool(
 
     if let Some(entry) = CANDIDATE_CACHE.get(key)
         && entry.built_at.elapsed() < CANDIDATE_CACHE_TTL
-        && !entry.candidates.is_empty()
     {
         return Ok(Arc::clone(&entry.candidates));
     }
@@ -383,15 +487,6 @@ fn query_candidate_pool(conn: &Connection, settings: &GameSettings) -> Result<Ve
         .collect::<Vec<_>>();
     candidates.sort_unstable();
     candidates.dedup();
-
-    if candidates.is_empty() {
-        let mut stmt =
-            conn.prepare("SELECT id FROM characters WHERE role = 1 ORDER BY random() LIMIT 50")?;
-        candidates = stmt
-            .query_map([], |row| row.get::<_, i64>(0))?
-            .filter_map(Result::ok)
-            .collect();
-    }
 
     Ok(candidates)
 }
@@ -694,7 +789,9 @@ impl GameSettings {
             .map(|value| value.min(3000));
         self.subject_tag_num = self.subject_tag_num.clamp(0, 10);
         self.character_tag_num = self.character_tag_num.clamp(0, 10);
-        self.character_num = self.character_num.clamp(1, 50);
+        self.character_num = self
+            .character_num
+            .clamp(1, if self.use_index { 100 } else { 50 });
         self.max_attempts = self.max_attempts.clamp(1, 15);
         self.use_hints = self
             .use_hints
@@ -1079,6 +1176,8 @@ fn assemble_payload(
         })
         .collect();
 
+    // A guess or a manually selected/index answer may be outside the random pool.
+    // Keep its existing profile display behavior; only random selection rejects an empty pool.
     let appearance_subjects: Vec<&SubjectInfo> = if filtered.is_empty() {
         subjects.iter().collect()
     } else {
@@ -1316,8 +1415,8 @@ fn assemble_payload(
         "popularity": popularity,
         "appearances": appearance_names,
         "appearanceIds": appearance_ids,
-        "latestAppearance": if latest_appearance == -1 { json!(null) } else { json!(latest_appearance) },
-        "earliestAppearance": if earliest_appearance == -1 { json!(null) } else { json!(earliest_appearance) },
+        "latestAppearance": latest_appearance,
+        "earliestAppearance": earliest_appearance,
         "highestRating": if highest_rating < 0.0 { json!(-1) } else { json!(highest_rating) },
         "metaTags": meta_tags_out,
         "rawTags": raw_tags_out,
@@ -1531,7 +1630,10 @@ fn push_unique(target: &mut Vec<String>, values: Vec<String>) {
     }
 }
 
-fn id_tags_map() -> HashMap<i64, Vec<String>> {
-    let raw = include_str!("../id_tags.json");
-    serde_json::from_str(raw).unwrap_or_default()
+pub fn id_tags_map() -> &'static HashMap<i64, Vec<String>> {
+    static TAGS: LazyLock<HashMap<i64, Vec<String>>> = LazyLock::new(|| {
+        serde_json::from_str(include_str!("../id_tags.json"))
+            .expect("embedded character tags must be valid JSON")
+    });
+    &TAGS
 }

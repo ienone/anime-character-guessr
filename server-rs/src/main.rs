@@ -29,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     let config = config::load_config()?;
+    routes::game::id_tags_map();
     info!("Starting Anime Character Guessr Server...");
 
     utils::ensure_directories(&config.image_cache_dir)?;
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
             middleware::metrics::track_metrics,
         ));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let addr = SocketAddr::new(config.host, config.port);
     info!("Listening on {}", addr);
 
     let listener = TcpListener::bind(&addr).await?;

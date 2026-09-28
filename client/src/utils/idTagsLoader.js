@@ -8,6 +8,9 @@ export function loadIdToTags() {
         throw new Error(`Failed to load id tags: ${response.status}`);
       }
       return response.json();
+    }).catch(error => {
+      idToTagsPromise = null;
+      throw error;
     });
   }
   return idToTagsPromise;

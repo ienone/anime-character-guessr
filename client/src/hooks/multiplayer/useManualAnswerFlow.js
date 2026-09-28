@@ -40,13 +40,9 @@ function useManualAnswerFlow({
 
   const handleSetAnswer = useCallback(async ({ character, hints }) => {
     try {
-      const rawTags = Object.fromEntries(character.rawTags?.entries?.() || []);
       socketRef.current?.emit('setAnswer', {
         roomId,
-        character: {
-          ...character,
-          rawTags
-        },
+        characterId: character.id,
         hints
       });
       setShowSetAnswerPopup(false);

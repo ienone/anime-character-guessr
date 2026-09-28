@@ -3,6 +3,7 @@ use std::env;
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub host: std::net::IpAddr,
     pub port: u16,
     pub archive_db_path: String,
     pub app_db_path: String,
@@ -15,6 +16,10 @@ pub struct Config {
 
 pub fn load_config() -> anyhow::Result<Config> {
     Ok(Config {
+        host: env::var("HOST")
+            .unwrap_or_else(|_| "0.0.0.0".into())
+            .parse()
+            .context("HOST must be an IP address")?,
         port: env::var("PORT")
             .unwrap_or_else(|_| "3001".to_string())
             .parse()

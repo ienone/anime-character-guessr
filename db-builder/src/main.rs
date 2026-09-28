@@ -10,10 +10,10 @@ use serde_json::Value;
 use tantivy::schema::{Schema, TantivyDocument, FAST, INDEXED, STORED, STRING, TEXT};
 use tantivy::{doc, Index};
 
-const DEFAULT_DUMP_DIR: &str = "../dump-2026-04-28.210420Z";
+const DEFAULT_DUMP_DIR: &str = "../dump";
 const DEFAULT_DB_PATH: &str = "../archive.sqlite";
 const DEFAULT_APP_DB_PATH: &str = "../server-rs/data/app.sqlite";
-const DEFAULT_IMAGES_JSON_PATH: &str = "../dump-2026-04-28.210420Z/character-images.jsonlines";
+const DEFAULT_IMAGES_JSON_PATH: &str = "../dump/character-images.jsonlines";
 const DEFAULT_TANTIVY_INDEX_DIR: &str = "../server-rs/data/tantivy";
 
 #[derive(Debug, Clone)]

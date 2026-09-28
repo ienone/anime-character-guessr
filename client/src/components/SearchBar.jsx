@@ -6,6 +6,12 @@ import '../styles/search.css';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
 
+function searchErrorMessage(error) {
+  if (error.response?.status === 429 || error.response?.status === 503) return '搜索繁忙，请稍后点击搜索重试';
+  if (error.code === 'ECONNABORTED') return '搜索超时，请点击搜索重试';
+  return '搜索失败，请检查连接后点击搜索重试';
+}
+
 function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, finishInit = true }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -19,6 +25,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const [selectedItemIndex, setSelectedItemIndex] = useState(-1); // 当前键盘选中的项目索引
   const [isLoadingNewResults, setIsLoadingNewResults] = useState(false); // 标记是否正在加载更多结果
   const [failedImages, setFailedImages] = useState(() => new Set());
+  const [searchMessage, setSearchMessage] = useState('');
   
   // DOM引用
   const searchContainerRef = useRef(null);
@@ -66,9 +73,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     characterSearchAbortRef.current = controller;
     
     loadingState(true);
+    setSearchMessage('');
     try {
       const response = await axios.get(`${SERVER_URL}/api/archive/search/characters`, {
         signal: controller.signal,
+        timeout: 8000,
         params: {
           keyword: query,
           limit: currentLimit,
@@ -91,6 +100,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
 
       if (reset) {
         setSearchResults(newResults);
+        setSearchMessage(newResults.length ? '' : '没有找到匹配的角色');
         setOffset(INITIAL_LIMIT);
       } else {
         setSearchResults(prev => {
@@ -102,7 +112,8 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       
       setHasMore(newResults.length === currentLimit && currentOffset + currentLimit <= 100);
     } catch (error) {
-      if (error.code === 'ERR_CANCELED') return;
+      if (error.code === 'ERR_CANCELED' || requestSeq !== searchRequestSeqRef.current) return;
+      setSearchMessage(searchErrorMessage(error));
       console.error('Search failed:', error);
       if (reset) {
         setSearchResults([]);
@@ -133,9 +144,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     const controller = new AbortController();
     subjectSearchAbortRef.current = controller;
     loadingState(true);
+    setSearchMessage('');
     try {
       const results = await searchSubjects(query, {
         signal: controller.signal,
+        timeout: 8000,
         params: {
           limit: currentLimit,
           offset: currentOffset
@@ -144,6 +157,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       if (requestSeq !== searchRequestSeqRef.current) return;
       if (reset) {
         setSearchResults(results);
+        setSearchMessage(results.length ? '' : '没有找到匹配的作品');
         setOffset(INITIAL_LIMIT);
       } else {
         setSearchResults(prev => {
@@ -155,7 +169,8 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       setFailedImages(new Set());
       setHasMore(results.length === currentLimit && currentOffset + currentLimit <= 100);
     } catch (error) {
-      if (error.code === 'ERR_CANCELED') return;
+      if (error.code === 'ERR_CANCELED' || requestSeq !== searchRequestSeqRef.current) return;
+      setSearchMessage(searchErrorMessage(error));
       console.error('Subject search failed:', error);
       if (reset) {
         setSearchResults([]);
@@ -179,6 +194,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   const handleSubjectSelect = useCallback(async (subject) => {
     const requestSeq = ++subjectSelectRequestSeqRef.current;
     setIsSearching(true);
+    setSearchMessage('');
     setSelectedSubject(subject);
     setSearchResults([]);
     setFailedImages(new Set());
@@ -188,6 +204,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
       const visibleCharacters = characters.slice(0, SUBJECT_CHARACTER_LIMIT);
       const formattedCharacters = formatSubjectCharacters(subject, visibleCharacters);
       if (requestSeq !== subjectSelectRequestSeqRef.current) return;
+      setSearchMessage(characters.length ? '' : '这个作品暂无可用角色');
       setSubjectCharacters(characters);
       setSearchResults(formattedCharacters);
       setFailedImages(new Set());
@@ -195,6 +212,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     } catch (error) {
       if (requestSeq === subjectSelectRequestSeqRef.current) {
         console.error('Failed to fetch characters:', error);
+        setSearchMessage(searchErrorMessage(error));
         setSearchResults([]);
       }
     } finally {
@@ -271,7 +289,13 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
   useEffect(() => {
     function handleClickOutside(event) {
       if (searchContainerRef.current && !searchContainerRef.current.contains(event.target)) {
+        searchRequestSeqRef.current++;
+        characterSearchAbortRef.current?.abort();
+        subjectSearchAbortRef.current?.abort();
+        setIsSearching(false);
+        setIsLoadingMore(false);
         setSearchResults([]);
+        setSearchMessage('');
         setFailedImages(new Set());
         setOffset(0);
         setHasMore(true);
@@ -394,6 +418,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     loadMoreInFlightRef.current = false;
     setOffset(0);
     setHasMore(true);
+    setSearchMessage('');
     setSearchResults([]);
     setFailedImages(new Set());
     setSelectedSubject(null);
@@ -432,6 +457,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
         performCharacterSearch(query, true, 0);
       } else {
         setSearchResults([]);
+        setSearchMessage('');
         setFailedImages(new Set());
         setOffset(0);
         setHasMore(true);
@@ -473,11 +499,11 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
 
   const renderSearchResults = () => {
     if (searchResults.length === 0) {
-      if (!isSearching) return null;
+      if (!isSearching && !searchMessage) return null;
       return (
         <div className="search-dropdown" ref={searchDropdownRef}>
-          <div className="search-loading">
-            {searchMode === 'subject' && selectedSubject ? '加载角色中...' : '搜索中...'}
+          <div className="search-loading" role="status">
+            {isSearching ? (searchMode === 'subject' && selectedSubject ? '加载角色中...' : '搜索中...') : searchMessage}
           </div>
         </div>
       );
@@ -486,6 +512,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
     if (searchMode === 'subject' && !selectedSubject) {
       return (
         <div className="search-dropdown" ref={searchDropdownRef}>
+          {searchMessage && <div className="search-loading" role="status">{searchMessage}</div>}
           {isSearching ? (
             <div className="search-loading">搜索中...</div>
           ) : (
@@ -511,6 +538,7 @@ function SearchBar({ onCharacterSelect, isGuessing, gameEnd, subjectSearch, fini
 
     return (
       <div className="search-dropdown" ref={searchDropdownRef}>
+        {searchMessage && <div className="search-loading" role="status">{searchMessage}</div>}
         {selectedSubject && (
           <div className="selected-subject-header">
             <span>{selectedSubject.name_cn || selectedSubject.name}</span>

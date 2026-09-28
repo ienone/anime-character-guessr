@@ -4,6 +4,7 @@ import axios from 'axios'
 const IMAGE_PROXY_RE = /\/img\/(?:(subject)\/)?(?:(medium)\/)?(\d+)\.webp(?:\?.*)?$/
 const RESOLVE_RETRYABLE_CODES = new Set(['SOURCE_BUSY', 'SOURCE_PENDING', 'DOWNLOAD_FAILED'])
 const MAX_RESOLVE_ATTEMPTS = 7
+const resolvedImages = new Map()
 
 function resolveRetryDelay(data, attempt, preferSource) {
   const retryAfterMs = Number(data?.retryAfterMs)
@@ -88,6 +89,12 @@ function Image({
 
     const resolvedVariant = variant || (parsed.isMedium || preferSource ? 'medium' : 'grid')
     const resolvedWaitMs = cachedOnly ? 0 : (waitMs ?? (resolvedVariant === 'medium' ? 900 : 450))
+    const resolvedKey = `${src}|${resolvedVariant}`
+    if (resolvedImages.has(resolvedKey)) {
+      setCurrentSrc(resolvedImages.get(resolvedKey))
+      return
+    }
+    const controller = new AbortController()
     let cancelled = false
     let resolveDelayId = null
     let attempt = 0
@@ -108,6 +115,7 @@ function Image({
         const apiBase = base.replace(/\/$/, '')
         const url = parsed.isSubject ? `${apiBase}/api/img/resolve/subject/${parsed.id}` : `${apiBase}/api/img/resolve/${parsed.id}`
         const res = await axios.get(url, {
+          signal: controller.signal,
           timeout: cachedOnly ? 500 : Math.max(1500, Number(resolvedWaitMs) + 800),
           params: {
             variant: resolvedVariant,
@@ -120,16 +128,21 @@ function Image({
 
         const data = res.data || {}
         if (data.cached) {
-          setCurrentSrc(data.imgUrl || src)
+          const imageSrc = data.imgUrl || src
+          resolvedImages.set(resolvedKey, imageSrc)
+          if (resolvedImages.size > 256) resolvedImages.delete(resolvedImages.keys().next().value)
+          setCurrentSrc(imageSrc)
         } else if (!cachedOnly && data.sourceUrl) {
           setCurrentSrc(data.sourceUrl)
         } else if (!cachedOnly && RESOLVE_RETRYABLE_CODES.has(data.code) && attempt < MAX_RESOLVE_ATTEMPTS) {
           scheduleResolve(resolveRetryDelay(data, attempt, preferSource))
         }
       } catch (error) {
+        if (cancelled || error.code === 'ERR_CANCELED') return
         const status = error?.response?.status
         if (!cachedOnly && attempt < MAX_RESOLVE_ATTEMPTS && (status === 429 || status === 503)) {
-          scheduleResolve(resolveRetryDelay({ retryAfterMs: 1500 }, attempt, preferSource))
+          const retryAfter = Number(error.response?.headers?.['retry-after'])
+          scheduleResolve(retryAfter > 0 ? retryAfter * 1000 : resolveRetryDelay({ retryAfterMs: 1500 }, attempt, preferSource))
           return
         }
         // If resolve fails (server down), fall back to trying the original src.
@@ -142,6 +155,7 @@ function Image({
     resolve()
     return () => {
       cancelled = true
+      controller.abort()
       if (resolveDelayId) clearTimeout(resolveDelayId)
     }
   }, [src, preferSource, cachedOnly, variant, waitMs, sourceFallback]);

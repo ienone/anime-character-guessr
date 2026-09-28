@@ -74,6 +74,7 @@ jobs:
         run: |
           export RUSTFLAGS="-C force-frame-pointers=yes -C force-unwind-tables=yes --remap-path-prefix=$GITHUB_WORKSPACE=/build/anime-character-guessr"
           cargo build --locked --release --target ${{ env.SERVER_TARGET }}
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/server-rs/target" cargo build --locked --release --target ${{ env.SERVER_TARGET }} --manifest-path ../db-builder/Cargo.toml
 
       - name: Package server
         run: bash deploy/package-server.sh "${{ env.SERVER_TARGET }}"

@@ -837,27 +837,13 @@ async fn get_random_character(
     }
 
     let settings = game::GameSettings::from_json(&body);
-    let pools_for_query = Arc::clone(&pools);
-    let result = db::with_archive_db_timed(
-        pools_for_query,
-        "game_random_character",
-        Duration::from_secs(2),
-        move |conn| game::random_character_with_conn(conn, &settings),
-    )
-    .await;
+    let result = game::random_character(Arc::clone(&pools), settings).await;
 
     match result {
-        Ok((char_id, mut payload)) => {
+        Ok(payload) => {
+            let char_id = payload["id"].as_i64().unwrap();
             warm_character_medium_image_cache(Arc::clone(&pools), char_id);
 
-            if let Some(vas) = load_cached_vas(&pools, char_id).await
-                && let Value::Object(ref mut obj) = payload
-            {
-                obj.insert(
-                    "animeVAs".to_string(),
-                    Value::Array(vas.into_iter().map(Value::String).collect()),
-                );
-            }
             let stats_name = character_name_for_stats(&payload);
             let stats_pools = Arc::clone(&pools);
             tokio::spawn(async move {
@@ -866,8 +852,12 @@ async fn get_random_character(
             Json(payload).into_response()
         }
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            if e.is::<game::EmptyCandidatePool>() {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+            Json(json!({ "error": e.root_cause().to_string() })),
         )
             .into_response(),
     }
@@ -914,28 +904,12 @@ async fn get_character_by_id(
         .trim()
         .to_ascii_lowercase();
     let settings = game::GameSettings::from_json(body.get("settings").unwrap_or(&json!({})));
-    let pools_for_query = Arc::clone(&pools);
-    let result = db::with_archive_db_timed(
-        pools_for_query,
-        "game_character_by_id",
-        Duration::from_secs(2),
-        move |conn| game::character_by_id_with_conn(conn, char_id, &settings),
-    )
-    .await;
+    let result = game::character_by_id(Arc::clone(&pools), char_id, settings).await;
 
     match result {
-        Ok(mut payload) => {
+        Ok(payload) => {
             if stats_purpose == "answer" {
                 warm_character_medium_image_cache(Arc::clone(&pools), char_id);
-            }
-
-            if let Some(vas) = load_cached_vas(&pools, char_id).await
-                && let Value::Object(ref mut obj) = payload
-            {
-                obj.insert(
-                    "animeVAs".to_string(),
-                    Value::Array(vas.into_iter().map(Value::String).collect()),
-                );
             }
             let stats_name = character_name_for_stats(&payload);
             let stats_pools = Arc::clone(&pools);
@@ -957,7 +931,7 @@ async fn get_character_by_id(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            Json(json!({ "error": e.root_cause().to_string() })),
         )
             .into_response(),
     }
@@ -1023,24 +997,26 @@ async fn bgm_proxy_index_info(
         return rejection.into_response();
     }
     let index_id = match positive_query_id(&q, "indexId") {
-        Ok(id) => id.to_string(),
+        Ok(id) => id,
         Err(error) => {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
         }
     };
-    if let Some(v) = cache_get_ttl(&INDEX_INFO_CACHE, &index_id) {
-        return Json(v).into_response();
-    }
-    let url = format!("https://api.bgm.tv/v0/indices/{}", index_id);
-    match bgm_get(&url).await {
-        Ok(data) => {
-            // Reduce payload to only what frontend needs
-            let minimal = json!({ "title": data.get("title"), "total": data.get("total") });
-            cache_put_ttl(&INDEX_INFO_CACHE, index_id, 10 * 60 * 1000, minimal.clone());
-            Json(minimal).into_response()
-        }
+    match index_info(index_id).await {
+        Ok(data) => Json(data).into_response(),
         Err(e) => bgm_proxy_error_response(e),
     }
+}
+
+async fn index_info(index_id: i64) -> anyhow::Result<Value> {
+    let key = index_id.to_string();
+    if let Some(data) = cache_get_ttl(&INDEX_INFO_CACHE, &key) {
+        return Ok(data);
+    }
+    let data = bgm_get(&format!("https://api.bgm.tv/v0/indices/{index_id}")).await?;
+    let minimal = json!({ "title": data.get("title"), "total": data.get("total") });
+    cache_put_ttl(&INDEX_INFO_CACHE, key, 10 * 60 * 1000, minimal.clone());
+    Ok(minimal)
 }
 
 /// GET /api/bgm/index-subjects?indexId=xxx&offset=0&limit=10
@@ -1053,7 +1029,7 @@ async fn bgm_proxy_index_subjects(
         return rejection.into_response();
     }
     let index_id = match positive_query_id(&q, "indexId") {
-        Ok(id) => id.to_string(),
+        Ok(id) => id,
         Err(error) => {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
         }
@@ -1067,26 +1043,27 @@ async fn bgm_proxy_index_subjects(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(10)
         .min(50);
-    let cache_key = format!("{}:{}:{}", index_id, offset, limit);
-    if let Some(v) = cache_get_ttl(&INDEX_SUBJECTS_CACHE, &cache_key) {
-        return Json(v).into_response();
-    }
-    let url = format!(
-        "https://api.bgm.tv/v0/indices/{}/subjects?limit={}&offset={}",
-        index_id, limit, offset
-    );
-    match bgm_get(&url).await {
-        Ok(data) => {
-            cache_put_ttl(
-                &INDEX_SUBJECTS_CACHE,
-                cache_key,
-                10 * 60 * 1000,
-                data.clone(),
-            );
-            Json(data).into_response()
-        }
+    match index_subjects(index_id, offset, limit).await {
+        Ok(data) => Json(data).into_response(),
         Err(e) => bgm_proxy_error_response(e),
     }
+}
+
+async fn index_subjects(index_id: i64, offset: u64, limit: u64) -> anyhow::Result<Value> {
+    let cache_key = format!("{index_id}:{offset}:{limit}");
+    if let Some(data) = cache_get_ttl(&INDEX_SUBJECTS_CACHE, &cache_key) {
+        return Ok(data);
+    }
+    let url =
+        format!("https://api.bgm.tv/v0/indices/{index_id}/subjects?limit={limit}&offset={offset}");
+    let data = bgm_get(&url).await?;
+    cache_put_ttl(
+        &INDEX_SUBJECTS_CACHE,
+        cache_key,
+        10 * 60 * 1000,
+        data.clone(),
+    );
+    Ok(data)
 }
 
 async fn bgm_get(url: &str) -> anyhow::Result<Value> {
@@ -1250,27 +1227,6 @@ async fn save_cached_image_source(
         Ok(())
     })
     .await;
-}
-
-async fn load_cached_vas(pools: &Arc<DbPools>, id: i64) -> Option<Vec<String>> {
-    let id2 = id;
-    let json_opt = db::with_app_db(Arc::clone(pools), move |conn| {
-        Ok(conn
-            .query_row(
-                "SELECT va_names_json FROM character_vas WHERE character_id = ?1",
-                [id2],
-                |row| row.get::<_, String>(0),
-            )
-            .ok())
-    })
-    .await
-    .ok()
-    .flatten();
-
-    let json = json_opt?;
-    serde_json::from_str::<Vec<String>>(&json)
-        .ok()
-        .filter(|v| !v.is_empty())
 }
 
 fn extract_images_from_bgm_character(raw: &Value) -> (String, String) {

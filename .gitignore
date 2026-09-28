@@ -75,7 +75,8 @@ out
 
 # Local Netlify folder
 .netlify
-dump-2026-04-28.210420Z/
+dump-*/
+dump/
 
 # Rust
 server-rs/target/

@@ -11,6 +11,7 @@ const LINE_OPTIONS = [
 
 const Home = () => {
   const [roomCount, setRoomCount] = useState(0);
+  const [dataDate, setDataDate] = useState('');
   const [showWelcomePopup, setShowWelcomePopup] = useState(false);
   // 线路选择当前域名状态
   const [currentOrigin, setCurrentOrigin] = useState('');
@@ -18,6 +19,14 @@ const Home = () => {
   useEffect(() => {
     const serverUrl = import.meta.env.VITE_SERVER_URL || '';
     let mounted = true;
+    fetch(`${serverUrl}/api/archive/version`)
+      .then(response => response.ok ? response.json() : null)
+      .then(data => {
+        if (mounted && data?.created_at) {
+          setDataDate(new Date(data.created_at).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }));
+        }
+      })
+      .catch(error => console.error('Error fetching data version:', error));
 
     const fetchRoomCount = () => {
       fetch(`${serverUrl}/room-count`)
@@ -193,6 +202,7 @@ const Home = () => {
           <br/>
           灵感来源<a href="https://blast.tv/counter-strikle"> BLAST.tv </a> &nbsp;
           数据来源<a href="https://bgm.tv/"> Bangumi </a>
+          {dataDate && <><br />题库更新于 {dataDate}</>}
         </p>
       </div>
     </div>

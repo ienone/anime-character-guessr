@@ -60,6 +60,8 @@ async function backendGetRandomCharacter(gameSettings) {
       characterNum: gameSettings.characterNum,
       useSubjectPerYear: gameSettings.useSubjectPerYear,
       addedSubjects: gameSettings.addedSubjects,
+      useIndex: gameSettings.useIndex,
+      indexId: gameSettings.indexId,
     })
   } catch (error) {
     throw new Error(describeBackendError(error, '随机出题失败'))
@@ -125,14 +127,6 @@ async function serverGetIndexInfo(indexId) {
   return response.data
 }
 
-async function serverFetchIndexSubjects(indexId, offset, limit) {
-  const response = await perfAxios.get(`${SERVER_URL}/api/bgm/index-subjects`, {
-    params: { indexId, offset, limit }
-  })
-  return response.data
-}
-
-
 async function getCharacterAppearances(characterId, gameSettings, purpose = 'guess') {
   return await backendGetCharacterAppearances(characterId, gameSettings, purpose)
 }
@@ -165,7 +159,7 @@ async function getCharacterDetails(characterId) {
 }
 
 async function getCharactersBySubjectId(subjectId) {
-  const response = await perfAxios.get(`${SERVER_URL}/api/archive/subjects/${subjectId}/characters`)
+  const response = await perfAxios.get(`${SERVER_URL}/api/archive/subjects/${subjectId}/characters`, { timeout: 8000 })
 
   if (!response.data || !response.data.length) {
     console.error('作品没有角色：'+subjectId);
@@ -184,71 +178,8 @@ async function getCharactersBySubjectId(subjectId) {
   return filteredCharacters;
 }
 
-function normalizeAddedSubjects(addedSubjects) {
-  if (!Array.isArray(addedSubjects)) return []
-  return addedSubjects
-    .map(subject => {
-      if (typeof subject === 'number') return { id: subject }
-      if (typeof subject === 'string' && subject.trim()) {
-        const id = Number(subject)
-        return Number.isFinite(id) ? { id } : null
-      }
-      if (subject && typeof subject === 'object' && subject.id) return subject
-      return null
-    })
-    .filter(Boolean)
-}
-
 async function getRandomCharacter(gameSettings) {
-  // No compatibility paths:
-  // - Non-index modes: always served by our backend (archive.sqlite)
-  // - Index mode: still requires BGM index lists, but only via server proxy routes
-  if (!gameSettings.useIndex) {
-    return await backendGetRandomCharacter(gameSettings)
-  }
-
-  if (!gameSettings.indexId) {
-    throw new Error('Index 模式缺少 indexId')
-  }
-
-  const batchSize = 10
-  const indexInfo = await getIndexInfo(gameSettings.indexId)
-  const addedSubjects = normalizeAddedSubjects(gameSettings.addedSubjects)
-  const total = indexInfo.total + addedSubjects.length
-  let randomOffset = Math.floor(Math.random() * total)
-  let subject
-
-  if (randomOffset >= indexInfo.total) {
-    randomOffset = randomOffset - indexInfo.total
-    subject = addedSubjects[randomOffset]
-  } else {
-    const batchOffset = Math.floor(randomOffset / batchSize) * batchSize
-    const indexInBatch = randomOffset % batchSize
-    const response = { data: await serverFetchIndexSubjects(gameSettings.indexId, batchOffset, batchSize) }
-    if (!response.data || !response.data.data || response.data.data.length === 0) {
-      throw new Error('范围为空')
-    }
-    subject = response.data.data[Math.min(indexInBatch, response.data.data.length - 1)]
-  }
-
-  const characters = await getCharactersBySubjectId(subject.id)
-  const filteredCharacters = gameSettings.mainCharacterOnly
-    ? characters.filter(character => character.relation === '主角')
-    : characters.filter(character => character.relation === '主角' || character.relation === '配角').slice(0, gameSettings.characterNum)
-
-  if (filteredCharacters.length === 0) {
-    throw new Error('选到了作品，但数据库中没有角色，请在设置里重试')
-  }
-
-  const selectedCharacter = filteredCharacters[Math.floor(Math.random() * filteredCharacters.length)]
-  const characterDetails = await getCharacterDetails(selectedCharacter.id)
-  const appearances = await getCharacterAppearances(selectedCharacter.id, gameSettings, 'answer')
-
-  return {
-    ...selectedCharacter,
-    ...characterDetails,
-    ...appearances
-  }
+  return backendGetRandomCharacter(gameSettings)
 }
 
 async function designateCharacter(characterId, gameSettings) {
@@ -467,7 +398,7 @@ async function searchSubjects(keyword, config = {}) {
       throw error
     }
     console.error('Error searching subjects:', error);
-    return [];
+    throw error;
   }
 }
 

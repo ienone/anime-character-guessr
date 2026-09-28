@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for a new Bangumi data snapshot
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 Asia/Shanghai
+Persistent=true
+Unit=anime-character-guessr-data.service
+
+[Install]
+WantedBy=timers.target

@@ -135,12 +135,29 @@ fn search_busy_response(kind: &'static str) -> Response {
 
 pub fn archive_routes(pools: Arc<DbPools>) -> Router<Arc<DbPools>> {
     Router::new()
+        .route("/version", get(data_version))
         .route("/subjects/{id}", get(get_subject))
         .route("/subjects/{id}/characters", get(get_subject_characters))
         .route("/characters/{id}", get(get_character_basic))
         .route("/search/subjects", get(search_subjects))
         .route("/search/characters", get(search_characters))
         .with_state(pools)
+}
+
+async fn data_version(State(pools): State<Arc<DbPools>>) -> Response {
+    let result = db::with_archive_db(pools, |conn| {
+        let raw: String = conn.query_row(
+            "SELECT value FROM archive_metadata WHERE key = 'snapshot'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::from_str::<Value>(&raw)?)
+    })
+    .await;
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// GET /api/archive/subjects/:id

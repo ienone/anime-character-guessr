@@ -24,11 +24,18 @@ pub fn reject(status: StatusCode, message: impl Into<String>) -> Response {
 pub struct GuardRejection {
     status: StatusCode,
     message: String,
+    retry_after: Option<u64>,
 }
 
 impl IntoResponse for GuardRejection {
     fn into_response(self) -> Response {
-        reject(self.status, self.message)
+        let mut response = reject(self.status, self.message);
+        if let Some(seconds) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -36,6 +43,7 @@ fn guard_reject(status: StatusCode, message: impl Into<String>) -> GuardRejectio
     GuardRejection {
         status,
         message: message.into(),
+        retry_after: None,
     }
 }
 
@@ -73,10 +81,13 @@ pub fn enforce_public_write_limit(
     }
 
     if hits.len() >= max_per_minute {
-        return Err(guard_reject(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many requests, please retry later",
-        ));
+        let remaining =
+            PUBLIC_WRITE_WINDOW.saturating_sub(now.duration_since(*hits.front().unwrap()));
+        return Err(GuardRejection {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "too many requests, please retry later".into(),
+            retry_after: Some(remaining.as_secs() + 1),
+        });
     }
 
     hits.push_back(now);
